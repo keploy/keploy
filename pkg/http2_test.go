@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -456,4 +457,106 @@ func TestResetStreamForgetsWhatEndedSoAndKeepsACompleteStream(t *testing.T) {
 	assert.Contains(t, sm.streams, uint32(3), "a complete stream stays for its capture")
 	assert.True(t, sm.ResetStream(5), "a stream it holds nothing of")
 	assert.NotContains(t, sm.streams, uint32(5))
+}
+
+// An HTTP request's answer may be read before its request's header block (the
+// two directions are parsed apart): the stream is decided once both are read,
+// an HTTP request with its bodies, not a gRPC call.
+func TestStreamManagerReadsAnHTTPAnswerReadBeforeItsRequest(t *testing.T) {
+	sm := NewStreamManager(zap.NewNop())
+	var reqOut, respOut bytes.Buffer
+	reqEnc, respEnc := hpack.NewEncoder(&reqOut), hpack.NewEncoder(&respOut)
+	in, out := NewFrameReader(), NewFrameReader()
+	feed := func(r *FrameReader, b []byte, outgoing bool) {
+		t.Helper()
+		require.NoError(t, eachFrame(t, r, b, func(f http2.Frame) error { return sm.HandleFrame(f, outgoing, time.Now()) }))
+	}
+	data := func(end bool, b string) []byte {
+		var d bytes.Buffer
+		require.NoError(t, http2.NewFramer(&d, nil).WriteData(1, end, []byte(b)))
+		return d.Bytes()
+	}
+	feed(out, splitBlock(t, respEnc, &respOut, 1, false, 1,
+		hpack.HeaderField{Name: ":status", Value: "200"},
+		hpack.HeaderField{Name: "content-type", Value: "application/json"}), true)
+	feed(out, data(true, `{"ok":true}`), true)
+	assert.Empty(t, sm.GetCompleteStreams(), "complete before its request was read")
+	assert.Empty(t, sm.TakeAnswered(), "decided before its request was read")
+	feed(in, splitBlock(t, reqEnc, &reqOut, 1, false, 1,
+		hpack.HeaderField{Name: ":method", Value: "POST"},
+		hpack.HeaderField{Name: ":path", Value: "/v1/login"},
+		hpack.HeaderField{Name: ":authority", Value: "vault.local"},
+		hpack.HeaderField{Name: "content-type", Value: "application/json"}), false)
+	require.Len(t, sm.TakeAnswered(), 1, "an HTTP request is listed once its answer's and its own headers are read")
+	feed(in, data(true, `{"role":"web"}`), false)
+	streams := sm.GetCompleteStreams()
+	require.Len(t, streams, 1)
+	require.NotNil(t, streams[0].HTTPReq, "decided as a gRPC call")
+	body, _ := io.ReadAll(streams[0].HTTPReq.Body)
+	assert.Equal(t, `{"role":"web"}`, string(body))
+	body, _ = io.ReadAll(streams[0].HTTPResp.Body)
+	assert.Equal(t, `{"ok":true}`, string(body))
+}
+
+// A stream whose answer is not recorded (Drop) keeps none of the bytes still
+// to come, and is forgotten, with no call built of it, once complete.
+func TestStreamManagerKeepsNothingOfADroppedStream(t *testing.T) {
+	sm := NewStreamManager(zap.NewNop())
+	var reqOut, respOut bytes.Buffer
+	reqEnc, respEnc := hpack.NewEncoder(&reqOut), hpack.NewEncoder(&respOut)
+	in, out := NewFrameReader(), NewFrameReader()
+	feed := func(r *FrameReader, b []byte, outgoing bool) {
+		t.Helper()
+		require.NoError(t, eachFrame(t, r, b, func(f http2.Frame) error { return sm.HandleFrame(f, outgoing, time.Now()) }))
+	}
+	feed(in, splitBlock(t, reqEnc, &reqOut, 1, true, 1,
+		hpack.HeaderField{Name: ":method", Value: "GET"},
+		hpack.HeaderField{Name: ":path", Value: "/events"}), false)
+	feed(out, splitBlock(t, respEnc, &respOut, 1, false, 1,
+		hpack.HeaderField{Name: ":status", Value: "200"},
+		hpack.HeaderField{Name: "content-type", Value: "text/event-stream"}), true)
+	sm.Drop(1)
+	var d bytes.Buffer
+	require.NoError(t, http2.NewFramer(&d, nil).WriteData(1, false, []byte("data: hi\n\n")))
+	feed(out, d.Bytes(), true)
+	sm.mutex.RLock()
+	held := len(sm.streams[1].respDataFrames)
+	sm.mutex.RUnlock()
+	assert.Zero(t, held, "a dropped stream kept its answer's bytes")
+	d.Reset()
+	require.NoError(t, http2.NewFramer(&d, nil).WriteData(1, true, []byte("data: bye\n\n")))
+	feed(out, d.Bytes(), true)
+	assert.Empty(t, sm.GetCompleteStreams())
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
+	assert.Empty(t, sm.streams, "a dropped stream was kept once complete")
+}
+
+// An HTTP request's answer whose headers and end are read together, between
+// an emitter pass's TakeAnswered and its GetCompleteStreams, is not handed on
+// complete before it is taken: a stream answer (SSE) would be recorded as a
+// call before it was dropped.
+func TestStreamManagerHandsOnNoStreamBeforeItsAnswerIsTaken(t *testing.T) {
+	sm := NewStreamManager(zap.NewNop())
+	var reqOut, respOut bytes.Buffer
+	reqEnc, respEnc := hpack.NewEncoder(&reqOut), hpack.NewEncoder(&respOut)
+	in, out := NewFrameReader(), NewFrameReader()
+	feed := func(r *FrameReader, b []byte, outgoing bool) {
+		t.Helper()
+		require.NoError(t, eachFrame(t, r, b, func(f http2.Frame) error { return sm.HandleFrame(f, outgoing, time.Now()) }))
+	}
+	feed(in, splitBlock(t, reqEnc, &reqOut, 1, true, 1,
+		hpack.HeaderField{Name: ":method", Value: "GET"},
+		hpack.HeaderField{Name: ":path", Value: "/events"}), false)
+	assert.Empty(t, sm.TakeAnswered())
+	feed(out, splitBlock(t, respEnc, &respOut, 1, false, 1,
+		hpack.HeaderField{Name: ":status", Value: "200"},
+		hpack.HeaderField{Name: "content-type", Value: "text/event-stream"}), true)
+	var d bytes.Buffer
+	require.NoError(t, http2.NewFramer(&d, nil).WriteData(1, true, []byte("data: hi\n\n")))
+	feed(out, d.Bytes(), true)
+	assert.Empty(t, sm.GetCompleteStreams(), "handed on complete before its answer was taken")
+	require.Len(t, sm.TakeAnswered(), 1)
+	sm.Drop(1)
+	assert.Empty(t, sm.GetCompleteStreams(), "a dropped stream was handed on")
 }

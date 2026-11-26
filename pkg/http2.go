@@ -3,6 +3,9 @@ package pkg
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -10,6 +13,8 @@ import (
 	"io"
 	"maps"
 	"net"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -168,6 +173,24 @@ type HTTP2StreamState struct {
 	grpcReq  *models.GrpcReq
 	grpcResp *models.GrpcResp
 
+	// Each side's DATA bytes once it has ended, and its header fields as
+	// they came, every value of a repeated name kept (GrpcHeaders keeps
+	// one): the request's own block, the response's, and its trailers'.
+	// What they are is decided once the stream is complete
+	// (GetCompleteStreams): a gRPC call's messages, or an HTTP request's
+	// bodies and headers. The response's side can end before the request's
+	// header block, read on the other direction's goroutine, says which.
+	reqRaw, respRaw                      []byte
+	reqFields, respFields, trailerFields []hpack.HeaderField
+
+	// answerNoted: the stream, an HTTP request, has been listed with its
+	// answer's headers (TakeAnswered); answerUntaken: and not taken yet, so
+	// whether its answer is recorded is still to be decided, and it is not
+	// handed on complete (GetCompleteStreams) until it is. dropped: its
+	// answer is not recorded (Drop): its bytes are not kept, and it is
+	// forgotten once complete.
+	answerNoted, answerUntaken, dropped bool
+
 	// Completion
 	isComplete bool
 }
@@ -181,6 +204,19 @@ type HTTP2Stream struct {
 	// frame was read (HandleFrameRead): the order of the read and the pause,
 	// not the request's time, puts the call in the pause.
 	RequestPaused bool
+	// HTTPReq and HTTPResp, set in place of GRPCReq and GRPCResp, are a
+	// stream that is not a gRPC call (its content-type is not
+	// application/grpc...) as the HTTP request and response it is: an HTTP
+	// request sent over cleartext HTTP/2 (h2c), which shares gRPC's
+	// preface, not its framing. ReqTime and RespTime are its request's first
+	// frame's time and its response's end.
+	HTTPReq           *http.Request
+	HTTPResp          *http.Response
+	ReqTime, RespTime time.Time
+	// MessageErr, when set, says a gRPC call's compressed message cannot be
+	// inflated (ErrUndecodableGrpcMessage), or inflates past the test-case
+	// size limit (ErrDecompressedTooLarge): the call is no test case.
+	MessageErr error
 }
 
 // DefaultStreamManager implements stream management
@@ -193,6 +229,10 @@ type DefaultStreamManager struct {
 	// Two separate HPACK decoders: one per direction
 	decoderIn  *hpack.Decoder // incoming (client -> server)
 	decoderOut *hpack.Decoder // outgoing (server -> client)
+
+	// answered: HTTP requests whose answer's headers have come, not taken
+	// yet (TakeAnswered).
+	answered []*HTTP2Stream
 }
 
 // NewStreamManager creates a new stream manager
@@ -305,8 +345,13 @@ func (sm *DefaultStreamManager) HandleFrameRead(frame http2.Frame, isOutgoing bo
 		dataCopy := make([]byte, len(f.Data()))
 		copy(dataCopy, f.Data())
 
+		if s.dropped {
+			dataCopy = nil
+		}
 		if isOutgoing {
-			s.respDataFrames = append(s.respDataFrames, dataCopy)
+			if dataCopy != nil {
+				s.respDataFrames = append(s.respDataFrames, dataCopy)
+			}
 			if f.StreamEnded() {
 				s.respEndStreamReceived = true
 				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
@@ -316,7 +361,9 @@ func (sm *DefaultStreamManager) HandleFrameRead(frame http2.Frame, isOutgoing bo
 				sm.checkStreamCompletion(streamID)
 			}
 		} else {
-			s.reqDataFrames = append(s.reqDataFrames, dataCopy)
+			if dataCopy != nil {
+				s.reqDataFrames = append(s.reqDataFrames, dataCopy)
+			}
 			if f.StreamEnded() {
 				s.reqEndStreamReceived = true
 				if err := sm.processCompleteMessage(s /*isOutgoing=*/, false); err != nil {
@@ -342,6 +389,7 @@ func (sm *DefaultStreamManager) endHeaderBlock(s *HTTP2StreamState, isOutgoing b
 	if err := sm.processHeaderBlock(s, isOutgoing); err != nil {
 		return err
 	}
+	sm.noteAnswerLocked(s)
 	if !isOutgoing {
 		if !s.reqEndsWithBlock {
 			return nil
@@ -438,11 +486,18 @@ func (sm *DefaultStreamManager) processHeaderBlock(s *HTTP2StreamState, isOutgoi
 		h := ProcessHeaders(fields)
 
 		if !s.respHeadersReceived {
+			// An informational answer (100 Continue, 103 Early Hints)
+			// comes before the response's own headers (RFC 9113 §8.1): it
+			// is neither them nor trailers.
+			if strings.HasPrefix(h.PseudoHeaders[":status"], "1") {
+				return nil
+			}
 			// Initial response headers
 			if s.grpcResp == nil {
 				s.grpcResp = &models.GrpcResp{}
 			}
 			s.grpcResp.Headers = *h
+			s.respFields = fields
 			s.respHeadersReceived = true
 			return nil
 		}
@@ -452,6 +507,7 @@ func (sm *DefaultStreamManager) processHeaderBlock(s *HTTP2StreamState, isOutgoi
 			s.grpcResp = &models.GrpcResp{}
 		}
 		s.grpcResp.Trailers = *h
+		s.trailerFields = fields
 		s.respTrailersReceived = true
 		return nil
 
@@ -475,6 +531,7 @@ func (sm *DefaultStreamManager) processHeaderBlock(s *HTTP2StreamState, isOutgoi
 				s.grpcReq = &models.GrpcReq{}
 			}
 			s.grpcReq.Headers = *h
+			s.reqFields = fields
 			s.reqHeadersReceived = true
 			return nil
 		}
@@ -492,20 +549,104 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 	var completed []*HTTP2Stream
 
 	for id, stream := range sm.streams {
+		if stream.isComplete && stream.dropped {
+			delete(sm.streams, id)
+			continue
+		}
+		// Listed since its answer's headers came, and not decided yet: a
+		// stream answer (Drop) must not be handed on as a call before it
+		// is. The emitter's next pass takes it first (TakeAnswered), and
+		// the chunk that completed it is let go only after that pass.
+		if stream.isComplete && stream.answerUntaken {
+			continue
+		}
 		if stream.isComplete {
-			stream.grpcReq.Timestamp = stream.startTime
-			stream.grpcResp.Timestamp = stream.endTime
 			http2Stream := &HTTP2Stream{
 				ID:            id,
-				GRPCReq:       stream.grpcReq,
-				GRPCResp:      stream.grpcResp,
 				RequestPaused: stream.startPaused,
+				ReqTime:       stream.startTime,
+				RespTime:      stream.endTime,
+			}
+			if isGRPCCall(stream.grpcReq, stream.grpcResp) {
+				stream.grpcReq.Timestamp = stream.startTime
+				stream.grpcResp.Timestamp = stream.endTime
+				// Its messages, from each side's bytes, inflated with the
+				// side's grpc-encoding when compressed; a side with none (an
+				// error answer's) keeps no body.
+				if len(stream.reqRaw) > 0 {
+					msg, err := ingressMessage(stream.reqRaw, stream.grpcReq.Headers.OrdinaryHeaders["grpc-encoding"])
+					stream.grpcReq.Body = msg
+					if err != nil {
+						http2Stream.MessageErr = fmt.Errorf("request: %w", err)
+					}
+				}
+				if len(stream.respRaw) > 0 {
+					msg, err := ingressMessage(stream.respRaw, stream.grpcResp.Headers.OrdinaryHeaders["grpc-encoding"])
+					stream.grpcResp.Body = msg
+					if err != nil && http2Stream.MessageErr == nil {
+						http2Stream.MessageErr = fmt.Errorf("response: %w", err)
+					}
+				}
+				stream.reqRaw, stream.respRaw = nil, nil
+				http2Stream.GRPCReq, http2Stream.GRPCResp = stream.grpcReq, stream.grpcResp
+			} else {
+				http2Stream.HTTPReq, http2Stream.HTTPResp = streamAsHTTP(stream)
 			}
 			completed = append(completed, http2Stream)
 		}
 	}
 
 	return completed
+}
+
+// noteAnswerLocked lists s with its answer's headers (TakeAnswered) once
+// both its request's and its answer's headers are read, in whichever order
+// the two directions' parsers read them, when it is an HTTP request (not a
+// gRPC call): whether the answer is recorded is known then, at its headers
+// (a stream, a static asset), as on the HTTP/1.x path. Caller holds mutex.
+func (sm *DefaultStreamManager) noteAnswerLocked(s *HTTP2StreamState) {
+	if s.answerNoted || !s.reqHeadersReceived || !s.respHeadersReceived || isGRPCCall(s.grpcReq, s.grpcResp) {
+		return
+	}
+	s.answerNoted, s.answerUntaken = true, true
+	req, resp := streamAsHTTP(s)
+	sm.answered = append(sm.answered, &HTTP2Stream{ID: s.ID, HTTPReq: req, HTTPResp: resp, RequestPaused: s.startPaused, ReqTime: s.startTime})
+}
+
+// TakeAnswered returns the HTTP requests whose answer's headers have come
+// since it was last called, each with its request's headers and its
+// answer's (no bodies), and forgets them. A stream is not handed on
+// complete (GetCompleteStreams) until it has been taken here, so its
+// answer is decided first (Drop).
+func (sm *DefaultStreamManager) TakeAnswered() []*HTTP2Stream {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	a := sm.answered
+	sm.answered = nil
+	for _, st := range a {
+		if s := sm.streams[st.ID]; s != nil {
+			s.answerUntaken = false
+		}
+	}
+	return a
+}
+
+// Drop says stream id's answer is not recorded (a stream, a static asset
+// left out): what it holds of its bodies goes, it keeps none of the bytes
+// still to come however long it lasts, and it is forgotten once complete,
+// with no call built of it.
+func (sm *DefaultStreamManager) Drop(streamID uint32) {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+	s := sm.streams[streamID]
+	if s == nil {
+		return
+	}
+	s.dropped = true
+	s.reqDataFrames, s.respDataFrames, s.reqRaw, s.respRaw = nil, nil, nil, nil
+	if s.isComplete {
+		delete(sm.streams, streamID)
+	}
 }
 
 // ResetStream forgets a stream that either side reset (RST_STREAM) before it
@@ -533,7 +674,9 @@ func (sm *DefaultStreamManager) CleanupStream(streamID uint32) {
 	delete(sm.streams, streamID)
 }
 
-// processCompleteMessage assembles DATA frames for the given side and parses gRPC payload
+// processCompleteMessage assembles the DATA frames of the given side, once it
+// has ended, into its bytes; GetCompleteStreams reads them as what the stream
+// is.
 func (sm *DefaultStreamManager) processCompleteMessage(s *HTTP2StreamState, isOutgoing bool) error {
 	if isOutgoing {
 		if s.grpcResp == nil {
@@ -544,22 +687,20 @@ func (sm *DefaultStreamManager) processCompleteMessage(s *HTTP2StreamState, isOu
 			// Leave grpcResp.Body as zero value so the stream is still marked complete.
 			return nil
 		}
-		data := bytes.Join(s.respDataFrames, nil)
+		s.respRaw = bytes.Join(s.respDataFrames, nil)
 		s.respDataFrames = nil
-		s.grpcResp.Body = CreateLengthPrefixedMessageFromPayload(data)
 		return nil
 
 	} else {
 		if len(s.reqDataFrames) == 0 {
 			return nil
 		}
-		data := bytes.Join(s.reqDataFrames, nil)
+		s.reqRaw = bytes.Join(s.reqDataFrames, nil)
 		s.reqDataFrames = nil
 
 		if s.grpcReq == nil {
 			s.grpcReq = &models.GrpcReq{}
 		}
-		s.grpcReq.Body = CreateLengthPrefixedMessageFromPayload(data)
 		return nil
 	}
 }
@@ -571,14 +712,129 @@ func (sm *DefaultStreamManager) checkStreamCompletion(streamID uint32) {
 		// Request considered "done" once END_STREAM seen on request side and headers received.
 		reqDone := s.reqHeadersReceived && s.reqEndStreamReceived
 
-		// Response considered "done" once headers + trailers received and END_STREAM on response.
-		respDone := s.respHeadersReceived && s.respTrailersReceived && s.respEndStreamReceived
+		// Response considered "done" once headers + trailers received and
+		// END_STREAM on response. An HTTP response sent over HTTP/2 has no
+		// trailers unless it says so: it is done at its END_STREAM. Waiting
+		// for trailers, it was never complete and never recorded, and was
+		// held until its connection closed.
+		respDone := s.respHeadersReceived && s.respEndStreamReceived &&
+			(s.respTrailersReceived || (reqDone && !isGRPCCall(s.grpcReq, s.grpcResp)))
 
 		if reqDone && respDone {
 			sm.logger.Debug("Stream completed", zap.Any("stream", s))
 			s.isComplete = true
 		}
 	}
+}
+
+// isGRPCCall reports whether a stream is a gRPC call: its request's
+// content-type is application/grpc (alone or with a suffix: +proto, +json),
+// or its answer is gRPC's, with a grpc-status or a gRPC content-type, which
+// no HTTP answer carries. A client that left the request's content-type out
+// and was answered in gRPC made a gRPC call.
+func isGRPCCall(req *models.GrpcReq, resp *models.GrpcResp) bool {
+	isGRPCType := func(h map[string]string) bool {
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(h["content-type"])), "application/grpc")
+	}
+	if req != nil && isGRPCType(req.Headers.OrdinaryHeaders) {
+		return true
+	}
+	if resp == nil {
+		return false
+	}
+	for _, h := range []map[string]string{resp.Headers.OrdinaryHeaders, resp.Trailers.OrdinaryHeaders} {
+		if _, ok := h["grpc-status"]; ok || isGRPCType(h) {
+			return true
+		}
+	}
+	return false
+}
+
+// streamAsHTTP is a stream that is not a gRPC call as the HTTP request and
+// response it is, as http.ReadRequest / ReadResponse would give them on the
+// HTTP/1.x path: its pseudo-headers as the method, path, host and status,
+// its other header fields as headers (every value of a repeated name), the
+// response's trailers as its Trailer, and its DATA bytes as the bodies, as
+// sent.
+func streamAsHTTP(s *HTTP2StreamState) (*http.Request, *http.Response) {
+	var reqHdrs, respHdrs models.GrpcHeaders
+	if s.grpcReq != nil {
+		reqHdrs = s.grpcReq.Headers
+	}
+	if s.grpcResp != nil {
+		respHdrs = s.grpcResp.Headers
+	}
+	ph := reqHdrs.PseudoHeaders
+	method := ph[":method"]
+	if method == "" {
+		method = http.MethodGet
+	}
+	path := ph[":path"]
+	u, err := url.ParseRequestURI(path)
+	if err != nil {
+		u = &url.URL{Path: path}
+	}
+	reqHeader := fieldsHeader(s.reqFields)
+	host := ph[":authority"]
+	if host == "" {
+		host = reqHeader.Get("Host")
+	}
+	// As http.ReadRequest: the host is the request's Host, not a header.
+	reqHeader.Del("Host")
+	req := &http.Request{
+		Method:        method,
+		URL:           u,
+		Proto:         "HTTP/2.0",
+		ProtoMajor:    2,
+		Header:        reqHeader,
+		Host:          host,
+		RequestURI:    path,
+		Body:          io.NopCloser(bytes.NewReader(s.reqRaw)),
+		ContentLength: int64(len(s.reqRaw)),
+	}
+	status, _ := strconv.Atoi(respHdrs.PseudoHeaders[":status"])
+	var trailer http.Header
+	// Trailers of their own only: a response that is one header block has
+	// none, though it is kept as its trailers too (endHeaderBlock).
+	if len(s.trailerFields) > 0 {
+		trailer = fieldsHeader(s.trailerFields)
+	}
+	resp := &http.Response{
+		Status:        strings.TrimSpace(fmt.Sprintf("%d %s", status, http.StatusText(status))),
+		StatusCode:    status,
+		Proto:         "HTTP/2.0",
+		ProtoMajor:    2,
+		Header:        fieldsHeader(s.respFields),
+		Trailer:       trailer,
+		Body:          io.NopCloser(bytes.NewReader(s.respRaw)),
+		ContentLength: int64(len(s.respRaw)),
+		Request:       req,
+	}
+	return req, resp
+}
+
+// fieldsHeader is a header block's fields as an http.Header, every value of
+// a repeated name kept, pseudo-headers left out. A request's cookie, which
+// an HTTP/2 client may split into a field per cookie, is joined back into
+// one value with "; " (RFC 9113 §8.2.3), as the HTTP/1.x request it stands
+// for carries it: kept as several values, they were recorded joined with
+// "," and replayed as one cookie.
+func fieldsHeader(fields []hpack.HeaderField) http.Header {
+	h := http.Header{}
+	var cookies []string
+	for _, f := range fields {
+		switch {
+		case strings.HasPrefix(f.Name, ":"):
+		case f.Name == "cookie":
+			cookies = append(cookies, f.Value)
+		default:
+			h.Add(f.Name, f.Value)
+		}
+	}
+	if len(cookies) > 0 {
+		h.Set("Cookie", strings.Join(cookies, "; "))
+	}
+	return h
 }
 
 // ProcessHeaders converts HPACK header fields to a map
@@ -809,6 +1065,14 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	for k, v := range grpcReq.Headers.OrdinaryHeaders {
 		// Skip pseudo-headers and certain internal headers
 		if strings.HasPrefix(k, ":") {
+			continue
+		}
+		// The codecs the recording's client could read are not the replay
+		// client's: forwarded, they had the app compress its answer with
+		// one the replay cannot read (deflate), and the test failed on
+		// "Decompressor is not installed". The replay client names its own,
+		// as gRPC negotiates them.
+		if strings.EqualFold(k, "grpc-accept-encoding") {
 			continue
 		}
 		md[k] = []string{v}
@@ -1245,6 +1509,140 @@ func CreateLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefix
 	}
 
 	return msg
+}
+
+// ingressMessage is the message a call's side carries, from its bytes
+// (CreateLengthPrefixedMessageFromPayload), inflated with the side's
+// grpc-encoding when compressed (inflatedGrpcMessage). A compressed message cut
+// short, or one that does not inflate, is ErrUndecodableGrpcMessage; one that
+// inflates past MaxGrpcInflateBytes is ErrDecompressedTooLarge.
+func ingressMessage(raw []byte, encoding string) (models.GrpcLengthPrefixedMessage, error) {
+	// Only its first message is recorded: it is bounded alone.
+	if len(raw) < 5 || raw[0] == 0 {
+		return CreateLengthPrefixedMessageFromPayload(raw), nil
+	}
+	end := 5 + int(binary.BigEndian.Uint32(raw[1:5]))
+	if end < 5 || end > len(raw) {
+		return models.GrpcLengthPrefixedMessage{}, fmt.Errorf("%w: cut short", ErrUndecodableGrpcMessage)
+	}
+	return inflatedGrpcMessage(raw[0], raw[5:end], encoding, MaxGrpcInflateBytes)
+}
+
+// MaxGrpcInflateBytes bounds what one side of a gRPC call inflates to, all
+// its messages together (SplitGrpcMessages, ingressMessage): the test-case
+// size limit (hooks/conn MaxTestCaseSize, which imports this package), as
+// the HTTP capture bounds a body it decompresses. A call whose messages
+// inflate past it is no test case, as one past it on the wire is not; the
+// bound stops a small compressed message (a zip bomb) from costing more.
+const MaxGrpcInflateBytes = 5 * 1024 * 1024
+
+// ErrUndecodableGrpcMessage reports a compressed gRPC message (compression
+// flag set) that cannot be inflated: its codec is one keploy does not know
+// (snappy, zstd, or identity with the flag set), or it does not inflate (one
+// that inflates past the limit is ErrDecompressedTooLarge, a size skip).
+// Recorded, it would be bytes no app reads as its
+// message: no field view, no decode with a .proto, and a replay that sends it
+// as an uncompressed message. The egress recorder skips such a call
+// (integrations grpcV2 HasUndecodableBody); the ingress does too.
+var ErrUndecodableGrpcMessage = errors.New("grpc: a compressed message cannot be inflated")
+
+// InflateGrpcMessage returns a gRPC message's payload as the app's code sends
+// and reads it: as it is when its compression flag is 0, else inflated with
+// its direction's grpc-encoding: gzip (also when the header is missing:
+// gzip is the codec gRPC mandates, as the egress recorder reads it) or
+// deflate (zlib, or a raw deflate stream). It reads at most limit bytes of
+// the inflated message: one past it is ErrDecompressedTooLarge. Anything
+// else it cannot read is ErrUndecodableGrpcMessage.
+//
+// gRPC compresses each message on its own, with the codec the call names in
+// grpc-encoding (grpc.UseCompressor): it is not the app's data, which a
+// message carries as it is, but how gRPC sends it. Read as protobuf, the
+// compressed bytes were recorded as a protoscope dump of gzip.
+func InflateGrpcMessage(flag byte, payload []byte, encoding string, limit int64) ([]byte, error) {
+	if flag == 0 {
+		return payload, nil
+	}
+	var r io.Reader
+	switch enc := strings.ToLower(strings.TrimSpace(encoding)); enc {
+	case "", "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(payload))
+		if err != nil {
+			return nil, fmt.Errorf("%w: gzip: %v", ErrUndecodableGrpcMessage, err)
+		}
+		defer func() { _ = zr.Close() }() // Close only repeats an error the read already returned
+		r = zr
+	case "deflate":
+		// HTTP's deflate (RFC 9110) is a zlib stream; some peers send a raw
+		// deflate stream under the name.
+		if zr, err := zlib.NewReader(bytes.NewReader(payload)); err == nil {
+			defer func() { _ = zr.Close() }()
+			r = zr
+		} else {
+			fr := flate.NewReader(bytes.NewReader(payload))
+			defer func() { _ = fr.Close() }()
+			r = fr
+		}
+	default:
+		return nil, fmt.Errorf("%w: grpc-encoding %q is not one keploy inflates", ErrUndecodableGrpcMessage, enc)
+	}
+	out, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrUndecodableGrpcMessage, encoding, err)
+	}
+	if int64(len(out)) > limit {
+		return nil, fmt.Errorf("gRPC message inflates past %d bytes: %w", limit, ErrDecompressedTooLarge)
+	}
+	return out, nil
+}
+
+// inflatedGrpcMessage is a gRPC message as recorded: its payload inflated
+// (InflateGrpcMessage), so it is kept as the app's message, uncompressed
+// (CompressionFlag 0, its own length), as the egress recorder keeps one and
+// as replay's gRPC client reads the app's answer.
+func inflatedGrpcMessage(flag byte, payload []byte, encoding string, limit int64) (models.GrpcLengthPrefixedMessage, error) {
+	plain, err := InflateGrpcMessage(flag, payload, encoding, limit)
+	if err != nil {
+		return models.GrpcLengthPrefixedMessage{}, err
+	}
+	if int64(len(plain)) > limit {
+		return models.GrpcLengthPrefixedMessage{}, fmt.Errorf("gRPC message of %d bytes past %d: %w", len(plain), limit, ErrDecompressedTooLarge)
+	}
+	msg := models.GrpcLengthPrefixedMessage{MessageLength: uint32(len(plain))} // #nosec G115 -- bounded by limit
+	if len(plain) > 0 {
+		msg.DecodedData = protoscope.Write(plain, protoscope.WriterOptions{})
+	}
+	return msg, nil
+}
+
+// SplitGrpcMessages is SplitLengthPrefixedMessages for a direction whose
+// grpc-encoding is encoding: each compressed message is inflated, and kept
+// uncompressed (inflatedGrpcMessage). A message that cannot be is
+// ErrUndecodableGrpcMessage, with the messages before it. The direction's
+// messages together, as the app sent them, are at most limit bytes
+// (MaxGrpcInflateBytes): past it is ErrDecompressedTooLarge.
+func SplitGrpcMessages(data []byte, encoding string, limit int64) ([]models.GrpcLengthPrefixedMessage, error) {
+	var msgs []models.GrpcLengthPrefixedMessage
+	left := limit
+	for off := 0; off < len(data); {
+		if len(data)-off < 5 {
+			return msgs, fmt.Errorf("%w: %d trailing byte(s) after %d message(s), too few for a 5-byte prefix",
+				ErrTrailingGrpcBytes, len(data)-off, len(msgs))
+		}
+		length := binary.BigEndian.Uint32(data[off+1 : off+5])
+		end := off + 5 + int(length)
+		if end < off+5 || end > len(data) {
+			return msgs, fmt.Errorf("%w: message %d declares %d bytes but only %d remain",
+				ErrTrailingGrpcBytes, len(msgs), length, len(data)-off-5)
+		}
+		msg, err := inflatedGrpcMessage(data[off], data[off+5:end], encoding, left)
+		if err != nil {
+			return msgs, fmt.Errorf("message %d: %w", len(msgs), err)
+		}
+		left -= int64(msg.MessageLength)
+		msgs = append(msgs, msg)
+		off = end
+	}
+	return msgs, nil
 }
 
 // ErrTrailingGrpcBytes reports that a length-prefixed chain did not consume

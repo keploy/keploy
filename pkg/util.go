@@ -42,6 +42,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -901,11 +902,37 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		}
 	}
 
+	// A request recorded over HTTP/2 is sent over HTTP/2: a cleartext one
+	// with prior knowledge (h2c), as a mesh sidecar on an "http2" port or an
+	// h2c client sends it, since an app that serves only HTTP/2 refuses
+	// HTTP/1.1; a TLS one negotiating it.
+	if tc.HTTPReq.ProtoMajor == 2 {
+		useHTTP2(client, req.URL.Scheme, disableCompression)
+	}
+
 	return &preparedHTTPRequest{
 		Request: req,
 		Client:  client,
 		AppPort: appPort,
 	}, nil
+}
+
+// useHTTP2 makes client send over HTTP/2: over cleartext with prior
+// knowledge (h2c) for an http URL, negotiating it over TLS for an https one.
+func useHTTP2(client *http.Client, scheme string, disableCompression bool) {
+	if scheme == "http" {
+		client.Transport = &http2.Transport{
+			AllowHTTP:          true,
+			DisableCompression: disableCompression,
+			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			},
+		}
+		return
+	}
+	if t, ok := client.Transport.(*http.Transport); ok {
+		t.ForceAttemptHTTP2 = true
+	}
 }
 
 // endAtHeaders gives an answer that switches its connection to another

@@ -201,7 +201,7 @@ func TestCompareGrpcMessage_KeyShape(t *testing.T) {
 			expMsg := models.GrpcLengthPrefixedMessage{CompressionFlag: 0, MessageLength: 5, DecodedData: "alpha"}
 			actMsg := models.GrpcLengthPrefixedMessage{CompressionFlag: 1, MessageLength: 5, DecodedData: "brave"}
 
-			compareGrpcMessage(tc.idx, tc.indexed, expMsg, actMsg, differences, result, nil, false, zap.NewNop())
+			compareGrpcMessage(tc.idx, tc.indexed, expMsg, actMsg, differences, result, nil, false, nil, nil, zap.NewNop())
 
 			for _, want := range tc.want {
 				if _, ok := differences[want]; !ok {

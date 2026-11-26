@@ -270,7 +270,7 @@ func TestCaptureGRPC_SchemaKeyStamping(t *testing.T) {
 			return false, key
 		}
 		tChan := make(chan *models.TestCase, 1)
-		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false)
+		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false, models.IncomingOptions{})
 		select {
 		case tc := <-tChan:
 			if tc.SchemaKey != key {
@@ -286,7 +286,7 @@ func TestCaptureGRPC_SchemaKeyStamping(t *testing.T) {
 			return true, key
 		}
 		tChan := make(chan *models.TestCase, 1)
-		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false)
+		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false, models.IncomingOptions{})
 		if len(tChan) != 0 {
 			t.Fatal("duplicate must not emit a test case")
 		}
@@ -295,7 +295,7 @@ func TestCaptureGRPC_SchemaKeyStamping(t *testing.T) {
 	t.Run("nil hook leaves schema key empty", func(t *testing.T) {
 		GRPCCaptureHook = nil
 		tChan := make(chan *models.TestCase, 1)
-		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false)
+		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false, models.IncomingOptions{})
 		select {
 		case tc := <-tChan:
 			if tc.SchemaKey != "" {
@@ -747,7 +747,7 @@ func TestATestCaseTheCaptureCannotHandOnIsCounted(t *testing.T) {
 	origHook := GRPCCaptureHook
 	GRPCCaptureHook = nil
 	defer func() { GRPCCaptureHook = origHook }()
-	CaptureGRPC(stopped, zap.NewNop(), make(chan *models.TestCase), stream, 9090, false, false)
+	CaptureGRPC(stopped, zap.NewNop(), make(chan *models.TestCase), stream, 9090, false, false, models.IncomingOptions{})
 	if mgr.NotHandedOn() != 2 {
 		t.Fatalf("a gRPC call's test case its stopped ingress could not hand on: counted %d in all, want 2", mgr.NotHandedOn())
 	}
@@ -785,7 +785,7 @@ func TestASyncGRPCTestCaseIsNamedAsItsMocksMapping(t *testing.T) {
 		TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimePerTest, LifetimeDerived: true}})
 	stream := &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{Timestamp: start}, GRPCResp: &models.GrpcResp{Timestamp: time.Now()}}
 	queue := make(chan *models.TestCase, 1)
-	CaptureGRPC(syncMock.NewContext(context.Background(), mgr), zap.NewNop(), queue, stream, 9090, true, true)
+	CaptureGRPC(syncMock.NewContext(context.Background(), mgr), zap.NewNop(), queue, stream, 9090, true, true, models.IncomingOptions{})
 
 	var tc *models.TestCase
 	select {
@@ -803,5 +803,66 @@ func TestASyncGRPCTestCaseIsNamedAsItsMocksMapping(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second): // only turns a hang into a failure
 		t.Fatal("the call's mocks were not mapped on its context's manager")
+	}
+}
+
+// A gRPC call is filtered as an HTTP request is (IsGrpcFiltered): a health
+// probe the recording's filters exclude by User-Agent (as k8s-proxy's built-in
+// probe exclusion does) or a call a user's rule excludes by path is no test
+// case and never reaches the static deduper; any other call is captured.
+func TestCaptureGRPC_IngressFilters(t *testing.T) {
+	origHook := GRPCCaptureHook
+	defer func() { GRPCCaptureHook = origHook }()
+
+	call := func(path, userAgent string) *pkg.HTTP2Stream {
+		return &pkg.HTTP2Stream{
+			GRPCReq: &models.GrpcReq{Headers: models.GrpcHeaders{
+				PseudoHeaders:   map[string]string{":path": path, ":authority": "orders.shop:50051", ":method": "POST"},
+				OrdinaryHeaders: map[string]string{"user-agent": userAgent, "content-type": "application/grpc"},
+			}},
+			GRPCResp: &models.GrpcResp{},
+		}
+	}
+	opts := models.IncomingOptions{Filters: []models.Filter{
+		{Headers: map[string]string{"User-Agent": `^(kube-probe/|grpc[-_]health[-_]probe)`}, FilterPolicy: "exclude"},
+		{BypassRule: models.BypassRule{Path: "^/internal\\.Admin/"}, FilterPolicy: "exclude"},
+	}}
+
+	cases := []struct {
+		name, path, ua string
+		kept           bool
+	}{
+		{"kubelet gRPC probe", "/grpc.health.v1.Health/Check", "kube-probe/1.31 grpc-go/1.65.0", false},
+		{"grpc_health_probe exec probe", "/grpc.health.v1.Health/Check", "grpc_health_probe grpc-go/1.48.0", false},
+		{"grpc-health-probe exec probe", "/grpc.health.v1.Health/Check", "grpc-health-probe grpc-go/1.79.3", false},
+		{"path a user excluded", "/internal.Admin/Flush", "grpc-go/1.72.0", false},
+		{"an app's own call", "/shop.Orders/GetOrder", "grpc-go/1.72.0", true},
+		{"another service's health call", "/grpc.health.v1.Health/Check", "grpc-go/1.72.0", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			deduped := false
+			GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp) (bool, string) {
+				deduped = true
+				return false, ""
+			}
+			tChan := make(chan *models.TestCase, 1)
+			CaptureGRPC(context.Background(), zap.NewNop(), tChan, call(c.path, c.ua), 50051, false, false, opts)
+			if got := len(tChan) == 1; got != c.kept {
+				t.Fatalf("captured = %v, want %v", got, c.kept)
+			}
+			if deduped != c.kept {
+				t.Fatalf("static deduper saw the call: %v, want %v (a filtered call is never counted)", deduped, c.kept)
+			}
+		})
+	}
+}
+
+// The gRPC recorders inflate a side's messages up to the test-case size
+// limit (pkg.MaxGrpcInflateBytes, which this package cannot be imported by):
+// the two are one limit.
+func TestTheGRPCInflateBoundIsTheTestCaseSizeLimit(t *testing.T) {
+	if pkg.MaxGrpcInflateBytes != MaxTestCaseSize {
+		t.Fatalf("pkg.MaxGrpcInflateBytes %d, MaxTestCaseSize %d: want one limit", pkg.MaxGrpcInflateBytes, MaxTestCaseSize)
 	}
 }

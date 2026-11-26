@@ -97,7 +97,7 @@ func TestRecordIncoming_ACallsWindowHoldsItsMocksPastTheStaleHorizon(t *testing.
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, &heldWriteConn{Conn: appProxy, held: looked}, tcCh, 50051, "", sync, true)
+				_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, &heldWriteConn{Conn: appProxy, held: looked}, tcCh, 50051, "", sync, true, nil)
 			}()
 			defer func() {
 				cancel()
@@ -327,7 +327,7 @@ func TestRecordIncoming_AGRPCOnlySyncRecordingMapsEachCallsMocksToItsTestCase(t 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", true, true)
+		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", true, true, nil)
 	}()
 	defer func() {
 		cancel()
@@ -423,7 +423,7 @@ func TestRecordIncoming_ASyncCallReadDuringAPauseSignalsNoFirstRequest(t *testin
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", true, true)
+		_ = RecordIncoming(ctx, zap.NewNop(), cliProxy, appProxy, tcCh, 50051, "", true, true, nil)
 	}()
 	defer func() {
 		cancel()

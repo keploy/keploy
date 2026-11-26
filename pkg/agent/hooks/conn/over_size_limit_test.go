@@ -239,7 +239,7 @@ func TestCaptureGRPCCountsAndTellsACallOverTheSizeLimit(t *testing.T) {
 		GRPCResp: &models.GrpcResp{},
 	}
 	ch := make(chan *models.TestCase, 1)
-	CaptureGRPC(ctx, zap.NewNop(), ch, stream, 8080, false, false)
+	CaptureGRPC(ctx, zap.NewNop(), ch, stream, 8080, false, false, models.IncomingOptions{})
 	if len(ch) != 0 {
 		t.Fatal("a gRPC call over the limit was handed on as a test case")
 	}

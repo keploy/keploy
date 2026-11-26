@@ -1120,7 +1120,9 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// for the count of the calls a pause of the memory guard costs
 		// (hooksUtils.SkipGRPCUnderPressure).
 		grpcCtx := syncMock.WithIngressConn(ctx, ingressConnName(clientConn, finalAppAddr))
-		grpc.RecordIncoming(grpcCtx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping)
+		if err := grpc.RecordIncoming(grpcCtx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping, pm.loadIncomingOpts); err != nil {
+			utils.LogError(logger, err, "failed to record the gRPC connection")
+		}
 	} else {
 		pm.handleHttp1WithConn(ctx, newReplayConn(preface, clientConn), upConn, finalAppAddr, logger, t, sem, appPort)
 	}

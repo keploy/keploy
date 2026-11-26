@@ -92,7 +92,7 @@ func TestAGRPCCallServedAfterTheRecordingEndedIsNotCaptured(t *testing.T) {
 	GRPCCaptureHook = func(*models.GrpcReq, *models.GrpcResp) (bool, string) { judged++; return false, "" }
 	ctx, m, logs := endedOn(t)
 	tcs := make(chan *models.TestCase, 1)
-	CaptureGRPC(ctx, zap.NewNop(), tcs, &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{}, GRPCResp: &models.GrpcResp{}}, 9090, true, true)
+	CaptureGRPC(ctx, zap.NewNop(), tcs, &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{}, GRPCResp: &models.GrpcResp{}}, 9090, true, true, models.IncomingOptions{})
 	if len(tcs) != 0 || judged != 0 {
 		t.Fatalf("a call served after the recording ended was handed on (%d) or judged (%d times)", len(tcs), judged)
 	}
