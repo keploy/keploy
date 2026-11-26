@@ -1198,6 +1198,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		}
 	}()
 
+	httpMatcher.WarnEndpointNoiseProblems(r.logger, r.config.Test.GlobalNoise.Endpoints)
+
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
@@ -9247,7 +9249,7 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	// The matcher's lines, a failure's diff with both bodies among them, on
 	// the run's console alone (Replayer.console), none without one.
 	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt(), httpMatcher.WithConsole(r.console)}, opts...)
-	noiseConfig := r.httpNoiseConfig(testSetID)
+	noiseConfig := r.httpNoiseConfig(testSetID, tc)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.schemaMatch() {
@@ -9265,7 +9267,7 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool, opts ...httpMatcher.MatchOption) (bool, *models.Result) {
 	// On the run's console alone, as compareHTTPResp's.
 	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt(), httpMatcher.WithConsole(r.console)}, opts...)
-	noiseConfig := r.httpNoiseConfig(testSetID)
+	noiseConfig := r.httpNoiseConfig(testSetID, tc)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.schemaMatch() {
@@ -9315,10 +9317,13 @@ func (r *Replayer) autoHeaderNoiseOpt() httpMatcher.MatchOption {
 	return httpMatcher.WithAutoHeaderNoise(!r.config.Test.DisableAutoHeaderNoise)
 }
 
-func (r *Replayer) httpNoiseConfig(testSetID string) map[string]map[string][]string {
+func (r *Replayer) httpNoiseConfig(testSetID string, tc *models.TestCase) map[string]map[string][]string {
 	noiseConfig := deepCopyNoiseConfig(r.config.Test.GlobalNoise.Global)
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
+	}
+	if tc != nil {
+		noiseConfig = httpMatcher.AddEndpointNoise(noiseConfig, r.config.Test.GlobalNoise.Endpoints, tc)
 	}
 
 	return noiseConfig

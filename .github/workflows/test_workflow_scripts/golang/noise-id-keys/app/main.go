@@ -76,6 +76,13 @@ func main() {
 		}
 		answer(w, map[string]interface{}{"query": q, "lastSeen": seen})
 	})
+	version := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Build", label)
+		answer(w, map[string]interface{}{"version": label})
+	}
+	http.HandleFunc("/version", version)
+	http.HandleFunc("/about", version)
+	http.HandleFunc("/apps/", version)
 	if err := http.ListenAndServe("127.0.0.1:8093", nil); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

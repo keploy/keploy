@@ -52,6 +52,9 @@ func NewValidatedJSON(expected, actual interface{}) ValidatedJSON {
 func JSONMatchKey(doc interface{}, noise map[string][]string) uint64 {
 	k := matchKeyer{h: fnv.New64a()}
 	for key := range noise {
+		if p, ok := exactPath(key); ok {
+			key = p
+		}
 		lk := strings.ToLower(key)
 		if !strings.Contains(key, ".") {
 			if k.global == nil {

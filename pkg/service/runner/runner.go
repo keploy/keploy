@@ -116,6 +116,9 @@ func New(
 	cfg *config.Config,
 	globalNoise models.GlobalNoise,
 ) Service {
+	if cfg != nil {
+		httpMatcher.WarnEndpointNoiseProblems(logger, cfg.Test.GlobalNoise.Endpoints)
+	}
 	return &Runner{
 		logger:          logger,
 		testCaseDB:      testCaseDB,
@@ -196,6 +199,9 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 
 	// 5. Global noise.
 	noise := r.globalNoise
+	if r.config != nil {
+		noise = httpMatcher.AddEndpointNoise(noise, r.config.Test.GlobalNoise.Endpoints, tc)
+	}
 
 	// 6. Execute: rewrite URL, fire HTTP request, compare response.
 	passed, respCompare, execErr := r.executeAndCompare(ctx, tc, opts.ServiceURL, noise)
