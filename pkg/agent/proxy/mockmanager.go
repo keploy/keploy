@@ -5996,10 +5996,11 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 
 // ServedAsOwnOrStartup reports whether mk is the open test's own recording in
 // the view in force (one its view holds as its own: its mapping's, in flight
-// into it, shared with it; never its worker: scope's or the background
-// pool's; and none while a pool view, which is no test's, is in force, even
-// one holding the next test's recordings ahead) or one of the set's start-up
-// recordings (startupNames), whatever the view. It is ServeOwnerOf's
+// into it, shared with it; never its worker: scope's or non-startup-owned
+// background pool's; and none while a pool view, which is no test's, is in
+// force, even one holding the next test's recordings ahead) or one of the
+// set's start-up recordings (startupNames) not classified as the open test's
+// worker: scope or non-startup-owned background. It is ServeOwnerOf's
 // learn.OwnerTest, which the learn tracker files each serve by
 // (learn.Tracker.SetServeOwnerOf); judging and a replay check a call against
 // such a recording in a span those serves start (learn.Tracker.LiveSpanOf).
@@ -6011,26 +6012,31 @@ func (m *MockManager) ServedAsOwnOrStartup(mk *models.Mock) bool {
 
 // ServeOwnerOf is ServedAsOwnOrStartup with what the store cannot say told
 // apart from what it says no to (learn.Tracker.SetServeOwnerOf):
-// learn.OwnerTest where that says yes (a start-up recording whatever the
-// view); learn.OwnerOther where a test's view is in force and does not hold
-// mk as its own (a worker: scope's, the background's, another test's);
-// learn.OwnerUnknown where no test's view is in force (none yet, or a pool
-// view) and mk is no start-up recording, or mk has no name. It reads the
-// view once, under the same rules.
+// learn.OwnerOther where a test's view is in force and classifies mk as its
+// worker: scope or non-startup-owned background (even when recorded before
+// the first test) or another test's; learn.OwnerTest for a start-up
+// recording not in the open test's worker:/non-startup-owned background or
+// for the open test's own recording; learn.OwnerUnknown where no test's
+// view is in force (none yet, or a pool view) and mk is no start-up
+// recording, or mk has no name. It reads the view once, under the same
+// rules.
 func (m *MockManager) ServeOwnerOf(mk *models.Mock) learn.ServeOwner {
 	if m == nil || mk == nil || mk.Name == "" {
 		return learn.OwnerUnknown
+	}
+	v := m.exactView()
+	if v != nil && v.test != "" && (v.isWorker(mk.Name) || v.bg.inWorker(mk.Name) || (v.bg.inPool(mk.Name) && !v.startupOwned(mk.Name))) {
+		return learn.OwnerOther
 	}
 	if names := m.startupNames.Load(); names != nil {
 		if _, ok := (*names)[mk.Name]; ok {
 			return learn.OwnerTest
 		}
 	}
-	v := m.exactView()
 	switch {
 	case v == nil || v.test == "":
 		return learn.OwnerUnknown
-	case v.holds(mk.Name) && !v.isWorker(mk.Name) && !v.bg.has(mk.Name):
+	case v.holds(mk.Name):
 		return learn.OwnerTest
 	}
 	return learn.OwnerOther

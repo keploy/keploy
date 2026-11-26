@@ -173,11 +173,16 @@ func cutHi(o models.ClockOffset) time.Duration {
 }
 
 // heldSinceBegin reports whether the window from each run's test begin to
-// its call (Window.sinceBegin: client tests) holds r and l, written at
+// its call (Window.sinceBegin for client tests, Window.fromTestBegin for
+// server tests past another goroutine's serve) holds r and l, written at
 // enc, as plain reads of the clock.
 func heldSinceBegin(r, l typedInstant, w *Window, enc time.Duration) bool {
-	wb := w.sinceBegin()
-	return wb != nil && wb.Rec.holds(r.at, enc) && wb.F.holds(l.at, enc)
+	for _, wb := range []*Window{w.sinceBegin(), w.fromTestBegin()} {
+		if wb != nil && wb.Rec.holds(r.at, enc) && wb.F.holds(l.at, enc) {
+			return true
+		}
+	}
+	return false
 }
 
 // sinceBeginV5 is clockSinceBegin: ln, a Clock the order's step 7 found in

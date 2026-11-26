@@ -72,9 +72,10 @@ func TestTheStoreSaysARecordingIsTheOpenTestsOwnOrTheStartupsFromItsView(t *test
 // pool view holding the next test's recording ahead) it cannot say whose any
 // recording is, as of a recording with no name, except the start-up's,
 // which are the test's whatever the view; with a test's view in force the
-// test's own recordings and the start-up's are the test's, and a worker:
-// recording and another test's are another's. Its yes is
-// ServedAsOwnOrStartup's.
+// test's own recordings and test-owned start-up recordings are the test's,
+// and a worker: recording, a non-startup-owned background recording (even
+// when recorded before the first test), and another test's are another's.
+// Its yes is ServedAsOwnOrStartup's.
 func TestTheStoreSaysWhoseARecordingIsOnlyWhereATestsViewIsInForce(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimePerTest)
 	other := exactMock("other", time.Second, models.LifetimePerTest)
@@ -250,4 +251,121 @@ func TestTheProxyTellsTheTrackerWhatItsStoreCannotSayOfARecording(t *testing.T) 
 	if ofWorker, ok := tr.LiveSpanOf(arrival, worker); !ok || !ofWorker.TestFrom.Equal(ofOwn.TestFrom) {
 		t.Fatalf("a pool view in force, the test still open: span of the worker: recording %+v,%v; want the test's begin %v", ofWorker, ok, ofOwn.TestFrom)
 	}
+}
+
+// A worker: or background recording made before the first test window (such as
+// a queue consumer's delivering poll recorded at boot) is placed in the startup
+// tier by SetMocksWithWindow, yet belongs to worker:/background rather than to
+// any open test. While a test's view is in force, ServeOwnerOf must return
+// OwnerOther for it so a concurrent serve of that recording during the test
+// does not narrow the test's OwnCall clock window past the handler's clock
+// read, while genuine non-worker startup recordings still return OwnerTest.
+func TestServeOwnerOfTreatsPreFirstTestWorkerAndBackgroundAsOwnerOther(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	boot := exactMock("boot-init", -3*time.Second, models.LifetimePerTest)
+	bootInBg := httpCall("boot-startup-bg", -2500*time.Millisecond, "/startup/config")
+	poll := httpCall("mock-2", -2*time.Second, "/sqs/receive")
+	bgPool := httpCall("mock-3", -time.Second, "/mongo/read")
+	own := exactMock("post-url-3-update", 0, models.LifetimePerTest)
+	own.Spec.ReqTimestampMock = exactT0.Add(15 * time.Millisecond)
+
+	mm := NewMockManager(nil, nil, nil)
+	// Pre-first-test perTest mocks (like S12 (a)'s delivering SQS poll mock-2
+	// and consumer read mock-3) land in startupInit -> m.startupNames when
+	// SetMocksWithWindow partitions filtered mocks placed before firstStart,
+	// even though mappings.yaml files them under worker:/background. A plain
+	// startup: recording marked Startup: true in the background pool stays
+	// startup-owned (OwnerTest) during a test window.
+	mm.SetMocksWithWindow(
+		[]*models.Mock{boot, bootInBg, poll, bgPool, own},
+		nil,
+		exactT0,
+		exactT0.Add(time.Hour),
+	)
+	mm.SeedBackgroundRecordings([]models.BackgroundRecording{
+		{Mock: bootInBg, Startup: true},
+		{Mock: bgPool},
+		{Mock: poll},
+	})
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"boot-startup-bg", "mock-3"}, []string{"mock-2"})
+	mm.ServeExactWorker([]string{"mock-2"})
+	mm.ServeExactTest("post-url-3", []*models.Mock{own})
+
+	for _, tc := range []struct {
+		what string
+		mk   *models.Mock
+		want learn.ServeOwner
+	}{
+		{"pre-first-test worker poll", poll, learn.OwnerOther},
+		{"pre-first-test background pool mock", bgPool, learn.OwnerOther},
+		{"plain startup recording in background pool", bootInBg, learn.OwnerTest},
+		{"non-worker startup mock", boot, learn.OwnerTest},
+		{"open test own mock", own, learn.OwnerTest},
+	} {
+		if got := mm.ServeOwnerOf(tc.mk); got != tc.want {
+			t.Errorf("%s (%s): ServeOwnerOf = %v, want %v", tc.what, tc.mk.Name, got, tc.want)
+		}
+	}
+
+	// End-to-end window check: a concurrent serve of mock-2 between the
+	// handler's time.Now() read and its dependency call arrival must not advance
+	// OwnCall.Window's F.From past the read.
+	base := time.Date(2026, 11, 26, 15, 6, 0, 0, time.UTC)
+	moveTo := base.Add(100 * time.Microsecond)
+	recBegin := exactT0.Add(10 * time.Millisecond)
+	lead := learn.FullRoundLead
+	off := recBegin.Add(lead).Sub(moveTo)
+
+	tr := learn.NewTracker()
+	tr.SetServeOwnerOf(mm.ServeOwnerOf)
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) {
+		if r.Before(moveTo) {
+			return r, true
+		}
+		return r.Add(off), true
+	})
+	tr.SetAppClockRun(func(r time.Time) (time.Time, bool) {
+		if r.Before(moveTo) {
+			return time.Time{}, true
+		}
+		return moveTo, true
+	})
+	tr.NewSetAt(base.Add(-time.Second))
+	tr.ServedMockAt(&models.Mock{Name: "get-lhr4bwai-1", Kind: models.Mongo}, base.Add(-10*time.Millisecond))
+	tr.RecordedBegin(recBegin)
+	tr.BeginAt(base)
+
+	handlerRead := moveTo.Add(400 * time.Microsecond).Add(off)
+	workerServe := moveTo.Add(1500 * time.Microsecond)
+	callArrival := moveTo.Add(2200 * time.Microsecond)
+
+	tr.ServedMockAt(poll, workerServe)
+
+	prev := exactMock("get-lhr4bwai-1", 0, models.LifetimePerTest)
+	prev.Spec.ReqTimestampMock = exactT0.Add(5 * time.Millisecond)
+	tests := recordedWindow{start: recBegin, end: exactT0.Add(20 * time.Millisecond)}
+	oc := tr.NewOwnCall(own, nil, tests)
+	if oc == nil {
+		t.Fatal("NewOwnCall returned nil")
+	}
+	oc.See(prev)
+	w := oc.Window(callArrival)
+	if w == nil {
+		t.Fatal("OwnCall.Window returned nil")
+	}
+	if w.F.From.After(handlerRead) {
+		t.Fatalf("OwnCall.Window F.From = %v advanced past handlerRead %v (worker serve at %v leaked into own-test span)", w.F.From, handlerRead, workerServe.Add(off))
+	}
+}
+
+type recordedWindow struct{ start, end time.Time }
+
+func (rw recordedWindow) InRecordedTestWindow(at time.Time) (bool, bool) {
+	return !at.Before(rw.start) && !at.After(rw.end), true
+}
+
+func (rw recordedWindow) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
+	inA, _ := rw.InRecordedTestWindow(a)
+	inB, _ := rw.InRecordedTestWindow(b)
+	return inA && inB, true
 }

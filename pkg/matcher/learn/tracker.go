@@ -2378,13 +2378,23 @@ func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival
 // starts this run's half of the window. prevRec is then the recording's
 // previous call found with its siblings left out too (NewPreviousCallOf),
 // so both halves start at the latest call before the call that is not its
-// sibling. A nil sibling is CallWindowFrom's.
+// sibling. A nil sibling is CallWindowFrom's. Where the store says paired
+// is not the open test's own (OwnerOther: worker: scope, background, or
+// another test's), Rec.TestFrom and F.TestFrom stay zero, mirroring
+// LiveSpanOfSiblings so learn never accepts a read from the test's begin
+// that replay will not check from it.
 func (t *Tracker) CallWindowFromSiblings(prevRec time.Time, paired *models.Mock, arrival time.Time, sibling Siblings) *Window {
 	if t == nil {
 		return nil
 	}
 	lc, recBegan := t.liveClockAt(arrival, sibling)
-	return lc.window(prevRec, recBegan, paired, arrival)
+	w := lc.window(prevRec, recBegan, paired, arrival)
+	if w != nil && paired != nil {
+		if f := t.serveOwner.Load(); f != nil && (*f)(paired) == OwnerOther {
+			w.Rec.TestFrom, w.F.TestFrom = time.Time{}, time.Time{}
+		}
+	}
+	return w
 }
 
 // RecordedTests tells, of an instant of the recording, whether it lies in a
@@ -2668,11 +2678,13 @@ const (
 	// force (none yet, or a pool view between tests).
 	OwnerUnknown ServeOwner = iota
 	// OwnerTest: the open test's own recording (its mapping's) or one of
-	// the set's start-up recordings.
+	// the set's start-up recordings not classified as the open test's
+	// worker: scope or non-startup-owned background.
 	OwnerTest
 	// OwnerOther: a test's view is in force and the recording is neither
-	// its own nor the start-up's (a worker: scope's, the background's,
-	// another test's).
+	// its own nor a test-owned start-up recording (a worker: scope's,
+	// non-startup-owned background's — even when recorded before the first
+	// test — or another test's).
 	OwnerOther
 )
 

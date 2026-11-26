@@ -2651,7 +2651,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	// cannot bind another form refuses.
 	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
 	windowRead := func() bool {
-		return c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+		return c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()) || !dc.dr.clientTests && readIn(dc.in.Window.fromTestBegin()))
 	}
 	cutSlot := func(p evPlace) bool {
 		return c.rm != nil && c.lm != nil && dc.clientCase(p.mock) && dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm) && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && windowRead()
@@ -2753,7 +2753,9 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	// F's view of a recording of the set holds (echoedOutside).
 	// At a millisecond or coarser such an answer may hold the moment only
 	// as two stamps the runs' timing put in one cut: where the call's own
-	// window holds the read (5) it is that read, and else it is refused so.
+	// window holds the read (5) — or, in a server test, the window from its
+	// test's begin (Window.fromTestBegin) — it is that read, and else it is
+	// refused so.
 	// One that holds it finer is a pick from it, refused here.
 	var gaveOutside []string
 	var gaveRefusal *Decision
@@ -2876,7 +2878,24 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 	if inWindow {
 		return dc.clock(path, at, n, c, off, "a read of the application's clock its call's window holds in both runs", copies(false) != nil)
 	}
+	// Server tests: a plain read made after the test began and before another
+	// goroutine's serve (Window.fromTestBegin), checked in its call's span at
+	// every replay, which passes a read from the test's begin too
+	// (Span.TestFrom, CheckClockRead). Never a read plus an offset.
+	serverFromTestBegin := func() (Decision, bool) {
+		if dc.dr.clientTests || c.rm == nil || c.lm == nil || cutWhy != "" {
+			return Decision{}, false
+		}
+		wt := dc.in.Window.fromTestBegin()
+		if wt == nil || !wt.holdsRead(*c.rm, *c.lm, zone) {
+			return Decision{}, false
+		}
+		return dc.clock(path, at, n, c, models.ClockOffset{Res: max(c.rm.res, c.lm.res)}, "a read of the application's clock made since its test began in both runs, before another serve", copies(false) != nil), true
+	}
 	if gaveRefusal != nil {
+		if d, ok := serverFromTestBegin(); ok {
+			return d
+		}
 		return *gaveRefusal
 	}
 
@@ -2930,6 +2949,9 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c ch
 				}
 			}
 		}
+	}
+	if d, ok := serverFromTestBegin(); ok {
+		return d
 	}
 
 	if len(coarse) > 0 && (!clockSrc(coarse) || twoClockReads(coarse)) {
