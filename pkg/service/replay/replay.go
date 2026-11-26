@@ -56,16 +56,27 @@ const applicationFailedToRunLogMessage = "application failed to run; check the a
 // case — the replay-side twin of the record-side IsStartup tagging keyed off
 // SyncMockManager.resolvedTestCount.
 //
-// When the set has <= models.StartupMockTestCaseWindow test cases, the entire
-// recording is startup; keepAll (the replay start time, pruneBefore) is
-// returned so every recorded mock is retained — mocks recorded before replay
+// When recordedFirst is non-zero and strictly earlier than every test case
+// currently held (or no held test case carries a usable timestamp), earlier
+// test cases have already been retired while the mock file remains (for
+// example, continuous auto-replay deleting replayed tests across rounds). The
+// startup window ended in that earlier round, so recordedFirst is returned
+// directly — matching staging's firstTestStart (recordedSetShape) — rather
+// than advancing the cutoff into the current round's tests or keepAll.
+//
+// Otherwise, when the set has <= models.StartupMockTestCaseWindow test cases,
+// the entire recording is startup; keepAll (the replay start time, pruneBefore)
+// is returned so every recorded mock is retained — mocks recorded before replay
 // start are kept by this exemption and any written after it are kept by
 // UpdateMocks' post-replay-write rule. Returns the zero time when no test case
-// carries a usable timestamp, which disables the exemption (matching the prior
-// behaviour for timestamp-less sets).
-func startupMockCutoff(testCases []*models.TestCase, keepAll time.Time) time.Time {
+// carries a usable timestamp and recordedFirst is zero, which disables the
+// exemption (matching the prior behaviour for timestamp-less sets).
+func startupMockCutoff(testCases []*models.TestCase, keepAll, recordedFirst time.Time) time.Time {
 	tcTimes := make([]time.Time, 0, len(testCases))
 	for _, tc := range testCases {
+		if tc == nil {
+			continue
+		}
 		var candidate time.Time
 
 		// Prefer high-precision request timestamps when available.
@@ -83,6 +94,10 @@ func startupMockCutoff(testCases []*models.TestCase, keepAll time.Time) time.Tim
 		}
 	}
 	sort.Slice(tcTimes, func(i, j int) bool { return tcTimes[i].Before(tcTimes[j]) })
+
+	if !recordedFirst.IsZero() && (len(tcTimes) == 0 || recordedFirst.Before(tcTimes[0])) {
+		return recordedFirst
+	}
 
 	if len(tcTimes) > models.StartupMockTestCaseWindow {
 		return tcTimes[models.StartupMockTestCaseWindow]
@@ -7767,10 +7782,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// mocks from deletion. "Startup mocks" are every mock recorded from app
 		// boot up to and including the StartupMockTestCaseWindow-th test case;
 		// mocks recorded before the cutoff survive pruning while still keeping
-		// their per-test mappings for replay matching. With <= window test cases
-		// the whole recording is startup, so pruneBefore is used as the cutoff to
-		// retain everything (see startupMockCutoff).
-		startupCutoffTime := startupMockCutoff(testCases, pruneBefore)
+		// their per-test mappings for replay matching. When the TestDB remembers
+		// an earlier first recorded test than any test case still held (e.g.
+		// continuous auto-replay across rounds), startupMockCutoff pins the
+		// boundary to that earliest recorded test instead of advancing it into
+		// the current round or pruneBefore.
+		startupCutoffTime := startupMockCutoff(testCases, pruneBefore, r.recordedFirstTestStart(runTestSetCtx, testSetID))
 
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, startupCutoffTime)
 		if err != nil {
@@ -8582,6 +8599,25 @@ func recordedSetShapeOf(testCases []*models.TestCase) recordedSetShape {
 	}
 }
 
+// recordedFirstTestStart returns the earliest test start the TestDB remembers
+// for testSetID (RecordedStartReader), or the zero time when the TestDB does
+// not implement RecordedStartReader, does not know it, or fails to read it.
+func (r *Replayer) recordedFirstTestStart(ctx context.Context, testSetID string) time.Time {
+	reader, ok := r.testDB.(RecordedStartReader)
+	if !ok {
+		return time.Time{}
+	}
+	recorded, err := reader.RecordedFirstTestStart(ctx, testSetID)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warn("could not read when the test set's first test was recorded; its startup traffic is taken from the test cases it holds now",
+				zap.String("testSetID", testSetID), zap.Error(err))
+		}
+		return time.Time{}
+	}
+	return recorded
+}
+
 // recordedSetShape is the shape a staging call sends for testSetID: that of its
 // test cases, with the first test moved back to the earliest test the set ever
 // recorded when the TestDB keeps it (RecordedStartReader). The agent stages
@@ -8592,17 +8628,7 @@ func (r *Replayer) recordedSetShape(ctx context.Context, testSetID string, testC
 	shape := recordedSetShapeOf(testCases)
 	shape.background, shape.startup, shape.deriveBackground = r.backgroundMocksOf(ctx, testSetID)
 	shape.sessionCalls = models.DeclaredSessionCallsToHand()
-	reader, ok := r.testDB.(RecordedStartReader)
-	if !ok {
-		return shape
-	}
-	recorded, err := reader.RecordedFirstTestStart(ctx, testSetID)
-	if err != nil {
-		r.logger.Warn("could not read when the test set's first test was recorded; its startup traffic is taken from the test cases it holds now",
-			zap.String("testSetID", testSetID), zap.Error(err))
-		return shape
-	}
-	if !recorded.IsZero() && (shape.firstTestStart.IsZero() || recorded.Before(shape.firstTestStart)) {
+	if recorded := r.recordedFirstTestStart(ctx, testSetID); !recorded.IsZero() && (shape.firstTestStart.IsZero() || recorded.Before(shape.firstTestStart)) {
 		shape.firstTestStart = recorded
 	}
 	return shape
