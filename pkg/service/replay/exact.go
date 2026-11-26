@@ -683,7 +683,7 @@ func (r *Replayer) windowOwnershipOf(testSetID string, cases []*models.TestCase,
 	seen := map[string]bool{}
 	for _, list := range stored {
 		for _, mk := range list {
-			if mk == nil || mk.Name == "" || seen[mk.Name] {
+			if mk == nil || mk.Name == "" || seen[mk.Name] || mk.IsReadThrough() {
 				continue
 			}
 			seen[mk.Name] = true

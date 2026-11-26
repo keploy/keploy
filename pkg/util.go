@@ -5173,6 +5173,12 @@ func filterByMappingMode(_ context.Context, logger *zap.Logger, m []*models.Mock
 		if mapping[p.Name] {
 			p.TestModeInfo.IsFiltered = true
 			filtered = append(filtered, p)
+		} else if p.IsReadThrough() {
+			// Session read-through mocks are unmapped by construction; keep
+			// them in the filtered slice passed to MockManager so
+			// SetMocksWithWindow routes them into the read-through tier.
+			p.TestModeInfo.IsFiltered = false
+			filtered = append(filtered, p)
 		} else {
 			p.TestModeInfo.IsFiltered = false
 			unfiltered = append(unfiltered, p)

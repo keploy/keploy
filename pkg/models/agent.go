@@ -780,6 +780,48 @@ type MockStreamHeader struct {
 	UnfilteredCount int `json:"unfilteredCount"`
 }
 
+// StoreMocksProtocolHeader is advertised on GET /agent/health to negotiate
+// chunked, resumable mock uploads. Clients fall back to legacy single-stream
+// POST /agent/storemocks when an older agent omits this header.
+const (
+	StoreMocksProtocolHeader    = "X-Keploy-StoreMocks-Protocol"
+	StoreMocksProtocolBatchedV1 = "batched-v1"
+)
+
+// StoreMocksBeginReq opens a staged batched mock upload session on the agent.
+type StoreMocksBeginReq struct {
+	FilteredCount   int    `json:"filteredCount"`
+	UnfilteredCount int    `json:"unfilteredCount"`
+	AppID           uint64 `json:"appId,omitempty"`
+}
+
+// StoreMocksBeginResp is the agent's JSON reply to POST /agent/storemocks/begin.
+// Fields are declared explicitly (rather than embedding AgentResp) so
+// AgentResp's custom UnmarshalJSON does not swallow StagingID.
+type StoreMocksBeginResp struct {
+	ErrorMsg  string `json:"error,omitempty"`
+	IsSuccess bool   `json:"isSuccess"`
+	StagingID string `json:"stagingId,omitempty"`
+}
+
+// MockBatchHeader is the first gob value on a POST /agent/storemocks/batch
+// body, identifying the batch sequence number and how many gob Mock frames
+// follow it.
+type MockBatchHeader struct {
+	Seq   int
+	Count int
+}
+
+// StoreMocksBatchResp is the agent's JSON reply to POST /agent/storemocks/batch.
+type StoreMocksBatchResp struct {
+	ErrorMsg    string `json:"error,omitempty"`
+	IsSuccess   bool   `json:"isSuccess"`
+	StagingID   string `json:"stagingId,omitempty"`
+	Seq         int    `json:"seq"`
+	ExpectedSeq int    `json:"expectedSeq,omitempty"`
+	Ingested    int    `json:"ingested,omitempty"`
+}
+
 type MockFilterParams struct {
 	AfterTime time.Time `json:"afterTime,omitempty"`
 	// ExactMapping makes MockMapping the test's whole recording even when

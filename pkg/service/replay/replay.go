@@ -1198,6 +1198,8 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		}
 	}()
 
+	httpMatcher.WarnEndpointNoiseProblems(r.logger, r.config.Test.GlobalNoise.Endpoints)
+
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
@@ -8457,10 +8459,41 @@ func (r *Replayer) payloadMutator() models.PayloadMutator {
 // file's, or a store's that indexes no file) now, once.
 func (r *Replayer) mutatePayloads(ctx context.Context, payloads models.PayloadSource, pools ...[]*models.Mock) error {
 	mutate := r.payloadMutator()
+	prefetcher, _ := r.hookImpl.(MockPayloadBatchPrefetcher)
 	if payloads != nil {
 		payloads.SetPayloadMutator(mutate)
+		if bmSrc, ok := payloads.(models.BatchPayloadMutatorSource); ok {
+			if prefetcher != nil && mutate != nil {
+				bmSrc.SetBatchPayloadMutator(func(ctx context.Context, batch []*models.Mock) error {
+					if err := prefetcher.PrefetchMocks(ctx, batch); err != nil {
+						return err
+					}
+					for _, m := range batch {
+						if err := models.MutatePayload(ctx, m, mutate); err != nil {
+							return err
+						}
+					}
+					return nil
+				})
+			} else {
+				bmSrc.SetBatchPayloadMutator(nil)
+			}
+		}
 	}
 	for _, pool := range pools {
+		if prefetcher != nil && mutate != nil {
+			var inMem []*models.Mock
+			for _, m := range pool {
+				if m != nil && !m.PayloadOnDisk() {
+					inMem = append(inMem, m)
+				}
+			}
+			if len(inMem) > 0 {
+				if err := prefetcher.PrefetchMocks(ctx, inMem); err != nil {
+					return err
+				}
+			}
+		}
 		for _, m := range pool {
 			if m == nil || m.PayloadOnDisk() {
 				continue
@@ -9216,7 +9249,7 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	// The matcher's lines, a failure's diff with both bodies among them, on
 	// the run's console alone (Replayer.console), none without one.
 	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt(), httpMatcher.WithConsole(r.console)}, opts...)
-	noiseConfig := r.httpNoiseConfig(testSetID)
+	noiseConfig := r.httpNoiseConfig(testSetID, tc)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.schemaMatch() {
@@ -9234,7 +9267,7 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 func (r *Replayer) compareHTTPRespForReplay(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string, emitFailureLogs bool, opts ...httpMatcher.MatchOption) (bool, *models.Result) {
 	// On the run's console alone, as compareHTTPResp's.
 	opts = append([]httpMatcher.MatchOption{r.autoHeaderNoiseOpt(), httpMatcher.WithConsole(r.console)}, opts...)
-	noiseConfig := r.httpNoiseConfig(testSetID)
+	noiseConfig := r.httpNoiseConfig(testSetID, tc)
 	originalBodySize := originalHTTPRespBodySize(tc, actualResponse)
 
 	if r.schemaMatch() {
@@ -9284,10 +9317,13 @@ func (r *Replayer) autoHeaderNoiseOpt() httpMatcher.MatchOption {
 	return httpMatcher.WithAutoHeaderNoise(!r.config.Test.DisableAutoHeaderNoise)
 }
 
-func (r *Replayer) httpNoiseConfig(testSetID string) map[string]map[string][]string {
+func (r *Replayer) httpNoiseConfig(testSetID string, tc *models.TestCase) map[string]map[string][]string {
 	noiseConfig := deepCopyNoiseConfig(r.config.Test.GlobalNoise.Global)
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(noiseConfig, tsNoise)
+	}
+	if tc != nil {
+		noiseConfig = httpMatcher.AddEndpointNoise(noiseConfig, r.config.Test.GlobalNoise.Endpoints, tc)
 	}
 
 	return noiseConfig
@@ -10983,6 +11019,9 @@ func (r *Replayer) determineMockingStrategyWith(ctx context.Context, testSetID s
 // compared. Tier is read from TestModeInfo.Lifetime (derived at ingest) with
 // Spec.Metadata["type"] as a fallback for mocks whose lifetime wasn't derived.
 func isReusableTierMock(m *models.Mock) bool {
+	if m != nil && m.IsReadThrough() {
+		return true
+	}
 	switch m.TestModeInfo.Lifetime {
 	case models.LifetimeSession, models.LifetimeConnection:
 		return true
@@ -10998,9 +11037,13 @@ func isReusableTierMock(m *models.Mock) bool {
 
 // isReusableTierState is the MockState (consumed-mock) equivalent of
 // isReusableTierMock. GetConsumedMocks carries the recorder-derived Lifetime
-// and metadata type, so session/connection/config mocks are carved out of the
-// consumed side of the assertion the same way they are on the expected side.
+// and metadata type, so session/connection/config/read-through mocks are carved
+// out of the consumed side of the assertion and startup partitioning the same
+// way they are on the expected side.
 func isReusableTierState(s models.MockState) bool {
+	if s.ReadThrough {
+		return true
+	}
 	switch s.Lifetime {
 	case models.LifetimeSession, models.LifetimeConnection:
 		return true

@@ -1395,6 +1395,18 @@ func (s *scopedMockDb) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, 
 	return s.keep(s.MockMemDb.GetStartupMocks())
 }
 
+func (s *scopedMockDb) MatchReadThrough(live *models.Mock) (*models.Mock, bool) {
+	if s == nil || s.MockMemDb == nil {
+		return nil, false
+	}
+	if !s.passThrough() && !s.live {
+		if v := s.current(); v.refused != "" {
+			return nil, false
+		}
+	}
+	return integrations.MatchReadThrough(s.MockMemDb, live)
+}
+
 // SetWorkerScope registers (or replaces) the per-test mock allowlist for a
 // worker PID. An empty/nil name list clears the worker's scope (it then serves
 // the whole pool), matching "no mapping for this test ⇒ suite-level".

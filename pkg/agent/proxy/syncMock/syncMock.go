@@ -462,6 +462,11 @@ type SyncMockManager struct {
 	lossTallies []*LossTally
 	lossEpoch   uint64
 
+	// readThrough retains deduplicated, bounded read-only mocks rescued from
+	// sampled-out, static-deduped, or out-of-window requests (read_through.go).
+	// Guarded by mu.
+	readThrough readThroughCache
+
 	// outChanMu guards outChan and outChanClosed together. Senders
 	// RLock across the whole read+send; the closer Locks across the
 	// close. This is the only lock protecting outChan — see commit
@@ -3678,6 +3683,10 @@ func (m *SyncMockManager) CloseOutChan() {
 	// earlier in shutdown, so a late-decoded teardown mock would otherwise be
 	// discarded here and orphan its test case.
 	m.FlushOwnedWindows()
+	// Rescue any remaining unowned read-only mocks (e.g. from sampled-out
+	// requests within StaleHorizon of shutdown) into the deduplicated session
+	// read-through tier before sealing outChan.
+	m.flushUnownedReadThrough()
 
 	// Closed to senders first: what comes after is dropped as closed. What
 	// is queued already goes on to a consumer that still reads (an older
@@ -3937,7 +3946,9 @@ func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mock
 				noted := m.noteSentClaimedLocked(mock, nil, refs.of(shared, behind))
 				mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 			} else {
-				m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, tally, refs.of(shared, behind))
+				if !m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, tally, refs.of(shared, behind)) {
+					m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
+				}
 			}
 			continue
 		case flushOwned:
@@ -3982,6 +3993,7 @@ func (m *SyncMockManager) flushLocked(outChanBound bool, tally *dropTally) (mock
 	m.pruneSentClaimedLocked(&lateMappings)
 	gaveUp = m.fitHoldLocked(tally)
 	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
+	m.drainReadThroughPendingLocked(outChanBound, &mocksToSend)
 	return mocksToSend, lateMappings, gaveUp
 }
 
@@ -4548,6 +4560,9 @@ func (m *SyncMockManager) dropHeldLocked(n int, t *dropTally, givenUp bool) (dro
 		if h.owner != nil {
 			m.owed = append(m.owed, owedMock{mock: h.mock, to: h.owner})
 			continue
+		}
+		if !givenUp {
+			m.queueReadThroughLocked(h.mock)
 		}
 		if h.why == droppedOutsideAnyWindow {
 			m.heldCut = append(m.heldCut, cutHeld{mock: h.mock, epoch: epoch})
@@ -5133,6 +5148,7 @@ func (m *SyncMockManager) StartRecordSession() {
 	m.firstReqSeen = false
 	m.resolvedTestCount = 0
 	m.destTCs = nil
+	m.readThrough.reset()
 	m.recordingFrom.Store(time.Now().UnixNano())
 	m.mu.Unlock()
 	m.EndStoppedRecording()
@@ -6376,8 +6392,11 @@ func (m *SyncMockManager) resolveRangeInternal(start, end time.Time, testName st
 			} else {
 				// A duplicate's debris — unless a concurrent request still in
 				// flight may own it (a duplicate's window says nothing about
-				// whose it is): then it is held for that request.
-				m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
+				// whose it is): then it is held for that request. Otherwise
+				// offer read-only calls to the deduplicated read-through tier.
+				if !m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind)) {
+					m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
+				}
 			}
 			// We successfully matched and handled this mock.
 			// We discard it from the buffer so it doesn't get processed again.
@@ -6437,7 +6456,9 @@ func (m *SyncMockManager) resolveRangeInternal(start, end time.Time, testName st
 					noted := m.noteSentClaimedLocked(mock, w, refs.of(shared, behind))
 					mocksToSend = append(mocksToSend, ownedMock{mock: mock, noted: noted})
 				} else {
-					m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
+					if !m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind)) {
+						m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
+					}
 				}
 				continue
 			}
@@ -6507,6 +6528,10 @@ func (m *SyncMockManager) resolveRangeInternal(start, end time.Time, testName st
 			if m.holdOrDropLocked(mock, droppedOutsideAnyWindow, openFrom, open, &tally, nil) {
 				continue
 			}
+			// Sampled-out / out-of-window read-only calls (e.g. cold cache
+			// warmers) are copied once per canonical key into the session
+			// read-through tier while preserving original cut/loss accounting.
+			m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
 			// Collected, and said, told and left out for after mu
 			// (cutDropped): a request in flight with no window open
 			// for it may still be decided with this mock inside its
@@ -6570,6 +6595,7 @@ func (m *SyncMockManager) resolveRangeInternal(start, end time.Time, testName st
 	}
 	gaveUp := m.fitHoldLocked(&tally)
 	lateBinned += m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
+	m.drainReadThroughPendingLocked(outChanBound, &mocksToSend)
 	hold := m.holdStateLocked()
 
 	// The startup mocks sent while this request was in flight, which it
@@ -6828,8 +6854,10 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 		// Owns no kept window and is before the horizon → the skipped
 		// duplicate's own debris, unless a request still in flight started
 		// before it: then it may be that request's, and is held for it.
-		// Drop it (fall through without keeping), or hold it.
-		m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind))
+		// Otherwise offer read-only calls to the deduplicated read-through tier.
+		if !m.holdOrDropLocked(mock, droppedDuplicateLeftover, openFrom, open, &tally, refs.of(shared, behind)) {
+			m.offerReadThroughLocked(mock, outChanBound, &mocksToSend)
+		}
 	}
 
 	// Memory Cleanup: Nil out the deleted entries to allow GC to reclaim the memory
@@ -6841,6 +6869,7 @@ func (m *SyncMockManager) DeleteMocksStrictlyBefore(timestamp time.Time) {
 	m.keepSettledLocked(stillSettled, at)
 	gaveUp := m.fitHoldLocked(&tally)
 	m.handOwedLocked(outChanBound, &mocksToSend, &lateMappings)
+	m.drainReadThroughPendingLocked(outChanBound, &mocksToSend)
 	bufferLenAfter, hold := len(m.buffer), m.holdStateLocked()
 	m.noteTaken(mocksToSend)
 	// Owed before the mocks go (mappings_owed.go).

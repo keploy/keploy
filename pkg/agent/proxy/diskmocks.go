@@ -108,9 +108,11 @@ type DiskMocks struct {
 	// (residentBudgetBytes); the first records up to it stay there, in mem by
 	// offset, and once one does not fit, it and every record after it go to
 	// the file, at their offset less memEnd.
-	budget int64
-	mem    map[int64][]byte
-	memEnd int64
+	budget     int64
+	mem        map[int64][]byte
+	memEnd     int64
+	fileBuf    []byte // buffered disk writes flushed in chunks or before read-back
+	fileBufOff int64  // file offset corresponding to fileBuf[0]
 
 	// records decodes what the store reads, with decoders that live as long
 	// as it does (gobRecords).
@@ -191,7 +193,7 @@ func newDiskMocks(logger *zap.Logger, budget int64) (*DiskMocks, error) {
 // valid timestamps. Reusable/config and missing-timestamp mocks stay resident
 // (the filter routes them without a window check). Call DeriveLifetime first.
 func EligibleForDisk(m *models.Mock) bool {
-	if m == nil || m.TestModeInfo.Lifetime != models.LifetimePerTest {
+	if m == nil || m.TestModeInfo.Lifetime != models.LifetimePerTest || m.IsReadThrough() {
 		return false
 	}
 	req := m.Spec.ReqTimestampMock
@@ -348,10 +350,37 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	return nil
 }
 
+// diskWriteBufSize batches sequential disk appends into larger WriteAt calls
+// to minimize per-mock write syscalls while keeping buffering bounded.
+const diskWriteBufSize = 256 << 10
+
+// flushFileBufLocked writes any buffered disk bytes to d.f. Caller holds d.mu.
+func (d *DiskMocks) flushFileBufLocked() error {
+	if len(d.fileBuf) == 0 {
+		return nil
+	}
+	if _, err := d.f.WriteAt(d.fileBuf, d.fileBufOff); err != nil {
+		return err
+	}
+	d.fileBuf = d.fileBuf[:0]
+	return nil
+}
+
+// Flush flushes any buffered disk writes to the backing file.
+func (d *DiskMocks) Flush() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	return d.flushFileBufLocked()
+}
+
 // writeLocked appends b at the running offset and advances it: in memory
-// while the records so far and b fit the budget, else to the file, and so is
-// every record after it, as the offset only grows. The store keeps b, which
-// nothing may change after. Caller holds mu.
+// while the records so far and b fit the budget, else to the file (buffered
+// in up to diskWriteBufSize chunks), and so is every record after it, as the
+// offset only grows. The store keeps b, which nothing may change after.
+// Caller holds mu.
 func (d *DiskMocks) writeLocked(b []byte) (int64, int, error) {
 	off := d.offset
 	if off+int64(len(b)) <= d.budget {
@@ -363,12 +392,27 @@ func (d *DiskMocks) writeLocked(b []byte) (int64, int, error) {
 		d.memEnd = d.offset
 		return off, len(b), nil
 	}
-	n, err := d.f.WriteAt(b, off-d.memEnd)
-	if err != nil {
-		return 0, 0, err
+	fileOff := off - d.memEnd
+	if len(d.fileBuf) == 0 {
+		d.fileBufOff = fileOff
 	}
-	d.offset += int64(n)
-	return off, n, nil
+	if len(d.fileBuf)+len(b) > diskWriteBufSize {
+		if err := d.flushFileBufLocked(); err != nil {
+			return 0, 0, err
+		}
+		if len(b) >= diskWriteBufSize {
+			n, err := d.f.WriteAt(b, fileOff)
+			if err != nil {
+				return 0, 0, err
+			}
+			d.offset += int64(n)
+			return off, n, nil
+		}
+		d.fileBufOff = fileOff
+	}
+	d.fileBuf = append(d.fileBuf, b...)
+	d.offset += int64(len(b))
+	return off, len(b), nil
 }
 
 // bytesAt returns the n bytes stored at off: the record itself while it is
@@ -388,6 +432,12 @@ func (d *DiskMocks) bytesAt(off int64, n int) ([]byte, error) {
 		}
 		return b, nil
 	}
+	if len(d.fileBuf) > 0 {
+		if err := d.flushFileBufLocked(); err != nil {
+			d.mu.Unlock()
+			return nil, err
+		}
+	}
 	f, fileOff := d.f, off-d.memEnd
 	d.mu.Unlock()
 	buf := make([]byte, n)
@@ -397,18 +447,24 @@ func (d *DiskMocks) bytesAt(off int64, n int) ([]byte, error) {
 	return buf, nil
 }
 
-// Finalize sorts the index and the answer-placed one by place
-// (models.PlaceOf: the request timestamp, or the answer's for a mock placed
-// at its answer) for binary search, and the carry-over and staged indexes by
-// request timestamp, which their loads search by, the mocks of one time in
-// the order they were added (sortRecorded). A carry-over or staged mock is
-// never placed at its answer (models.IsAnswerPlaced, held so by
+// Finalize flushes any buffered disk writes and sorts the index and the
+// answer-placed one by place (models.PlaceOf: the request timestamp, or the
+// answer's for a mock placed at its answer) for binary search, and the
+// carry-over and staged indexes by request timestamp, which their loads search
+// by, the mocks of one time in the order they were added (sortRecorded). A
+// carry-over or staged mock is never placed at its answer
+// (models.IsAnswerPlaced, held so by
 // models.TestPlaceOfIsTheAnswerForAMockPlacedAtItsAnswer), so its place is
 // its request time, and a sort of those two by place would order them
 // alike. Idempotent.
 func (d *DiskMocks) Finalize() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if len(d.fileBuf) > 0 {
+		if err := d.flushFileBufLocked(); err != nil && d.logger != nil {
+			d.logger.Warn("disk mocks: flush buffered writes during finalize failed", zap.Error(err))
+		}
+	}
 	if d.finalize {
 		return
 	}
@@ -472,6 +528,10 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 // DecodersBuilt returns how many gob decoders the store has made to read
 // what it holds (gobRecords; diagnostics/tests).
 func (d *DiskMocks) DecodersBuilt() int64 { return d.records.built.Load() }
+
+// Encodes returns how many gob encode calls the store has performed
+// (gobRecords; diagnostics/tests).
+func (d *DiskMocks) Encodes() int64 { return d.records.encodes.Load() }
 
 // SetOnLoad has f applied to every mock the store reads from now on, as it is
 // decoded, before any caller holds it: the agent puts on them what a test
@@ -1127,6 +1187,7 @@ func (d *DiskMocks) Close() error {
 	}
 	d.closed = true
 	d.mem = nil
+	d.fileBuf = nil
 	var firstErr error
 	if d.f != nil {
 		if err := d.f.Close(); err != nil {

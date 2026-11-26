@@ -2338,6 +2338,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		agentLost := r.captureLost.Load()
 		storeWrote := true // false once the mock store said it could not write every mock
 		if recordDrainedCleanly {
+			roll.finalize(persistCtx)
 			if err := r.closeMockStore(r.mockDB, drainProgressEvery); err != nil {
 				r.mocksNotWritten(err)
 				storeWrote = false
@@ -3076,7 +3077,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		for testCase := range frames.Incoming {
 			r.frameProgress.Add(1)
 			// The set the test goes to, by its request's time (setRoll).
-			set := roll.test(testCase)
+			set := roll.test(persistCtx, testCase)
 			capture := live.arrive(testCase)
 			if capture == nil {
 				// One of its mocks is already known lost: saved, it would

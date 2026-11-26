@@ -198,6 +198,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				raw:     reqBuf,
 				client:  clientConn,
 				arrived: arrived,
+				tls:     isHTTPExchangeTLS(dstCfg, clientConn, opts.TLS, request.URL),
 			}
 
 			// Under the proven switch the request's destination is read once,
@@ -363,7 +364,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				diag  *matchDiag
 				lmiss *learnMiss
 				// repeat is set where the answer is a recording answered
-				// again (AnswerRepeatRead): it is written at once, never
+				// again (AnswerRepeatRead) or served from the session
+				// read-through tier: it is written at once, never
 				// held for its place (heldAnswerOf).
 				repeat bool
 				// extra is the full round's own-repeat check (extraCall),
@@ -593,6 +595,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					h.Logger.Info("answered a repeated read once more than its test recorded it: the test's mapping names it a read recorded at least twice, every time with one answer",
 						zap.String("test", again.Test), zap.String("call", shapeSummary(request)), utils.PathTagField(models.URLPathTag(ctx, request.Method, request.URL)), zap.String("read", again.Mock.TestModeInfo.ReadMark().Name), zap.Int("recorded", again.Recorded), zap.String("mock", again.Mock.Name))
 					stub, ok, diag, lmiss, repeat = again.Mock, true, nil, nil, true
+				}
+				// Deduplicated session read-through exact fallback: runs
+				// strictly AFTER primary matching, OwnRepeat, extra-call
+				// diagnosis, and AnswerRepeatRead miss, and never masks an
+				// extra call, moved/restaged/unheld view, changed call
+				// (MatchPhaseStrict or full-round learnMiss), variable
+				// mismatch, or exhausted stateful walk.
+				if !ok && extra == 0 && !restaged() && integrations.UnheldWhy(db) == "" {
+					if rt, hit := h.tryReadThrough(reqCtx, input, db, diag, lmiss); hit {
+						stub, ok, diag, lmiss, repeat = rt, true, nil, nil, true
+					}
 				}
 			}
 

@@ -52,6 +52,9 @@ type req struct {
 	// arrived is when keploy had read the whole request (zero: unknown):
 	// the app sent it, and read whatever clock it carries, no later.
 	arrived time.Time
+	// tls is true when the live outgoing HTTP request arrived over a TLS
+	// connection (dstCfg.TLSCfg != nil, *tls.Conn, or explicit https scheme).
+	tls bool
 	// written is, for a call of another parser that the learn step decides
 	// (LearnMatch), the answer that parser writes for a recording the learn
 	// step serves it: it may write another one than the learn step gives it

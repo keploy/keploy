@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,6 +87,19 @@ type DecodeContext struct {
 	BoundWindow            time.Time
 	AutocommitOff          bool
 	AutocommitOffAtConnect bool
+
+	// Database tracks the connection's active MySQL schema (initialized from
+	// HandshakeResponse41.Database and updated on successful COM_INIT_DB or
+	// USE <db> COM_QUERY) so recorded and replayed read-through queries stay
+	// isolated per database/tenant. DatabaseUnknown fails closed whenever the
+	// connection joined mid-stream, ran COM_CHANGE_USER, executed a multi-
+	// statement batch, or ran an unparseable USE statement.
+	Database        string
+	DatabaseUnknown bool
+	// DestPort holds the destination TCP port of the MySQL server for replay
+	// read-through key scoping (extracted from dst host:port, omitting the
+	// ephemeral pod IP).
+	DestPort string
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000
@@ -259,6 +274,342 @@ func IsNoResponseCommand(command string) bool {
 	default:
 		return false
 	}
+}
+
+// DestPortFromCfg returns the destination TCP port string from dstCfg,
+// preferring dstCfg.Port over dstCfg.Addr so record and replay derive the same
+// port even when AddrFabricated is set (and destinationOf returns "").
+func DestPortFromCfg(dstCfg *models.ConditionalDstCfg) string {
+	if dstCfg == nil {
+		return ""
+	}
+	if dstCfg.Port > 0 {
+		return strconv.FormatUint(uint64(dstCfg.Port), 10)
+	}
+	if addr := strings.TrimSpace(dstCfg.Addr); addr != "" {
+		if _, port, err := net.SplitHostPort(addr); err == nil && strings.TrimSpace(port) != "" {
+			return strings.TrimSpace(port)
+		}
+	}
+	return ""
+}
+
+// SetDestPortFromCfg records the destination TCP port from dstCfg when
+// DestPort is not already set.
+func (d *DecodeContext) SetDestPortFromCfg(dstCfg *models.ConditionalDstCfg) {
+	if d == nil || d.DestPort != "" {
+		return
+	}
+	if port := DestPortFromCfg(dstCfg); port != "" {
+		d.DestPort = port
+	}
+}
+
+// SetDestPortFromAddr records the destination TCP port from addr (host:port)
+// when DestPort is not already set.
+func (d *DecodeContext) SetDestPortFromAddr(addr string) {
+	if d == nil || d.DestPort != "" || strings.TrimSpace(addr) == "" {
+		return
+	}
+	if _, port, err := net.SplitHostPort(strings.TrimSpace(addr)); err == nil && strings.TrimSpace(port) != "" {
+		d.DestPort = strings.TrimSpace(port)
+	}
+}
+
+// MarkDatabaseUnknown marks the connection's active MySQL database unknown
+// fail-closed until an explicit COM_INIT_DB or clean USE <db> establishes it.
+func (d *DecodeContext) MarkDatabaseUnknown() {
+	if d == nil {
+		return
+	}
+	d.Database = ""
+	d.DatabaseUnknown = true
+}
+
+// MayChangeDatabase reports whether req could change the connection's active
+// MySQL database (COM_INIT_DB, COM_CHANGE_USER, or a COM_QUERY containing USE,
+// multiple statements, or MySQL executable comments). Used on skip/unrecorded
+// paths so failing to record such a command always fails closed.
+func (d *DecodeContext) MayChangeDatabase(req *mysql.PacketBundle) bool {
+	if req == nil {
+		return false
+	}
+	switch msg := req.Message.(type) {
+	case *mysql.InitDBPacket, mysql.InitDBPacket, *mysql.ChangeUserPacket, mysql.ChangeUserPacket:
+		return true
+	case *mysql.QueryPacket:
+		if msg == nil {
+			return false
+		}
+		_, isUse, ambiguous, _ := parseMySQLUseDatabase(msg.Query)
+		return isUse || ambiguous
+	case mysql.QueryPacket:
+		_, isUse, ambiguous, _ := parseMySQLUseDatabase(msg.Query)
+		return isUse || ambiguous
+	default:
+		return false
+	}
+}
+
+// UpdateDatabaseFromCommand updates d.Database / d.DatabaseUnknown when req
+// changes or may have changed the connection's active MySQL database. Fails
+// closed (DatabaseUnknown=true) on COM_CHANGE_USER, multi-statement queries,
+// MySQL executable comments, and unparseable USE statements so cross-tenant
+// collisions cannot occur.
+func (d *DecodeContext) UpdateDatabaseFromCommand(req, resp *mysql.PacketBundle) {
+	if d == nil || req == nil {
+		return
+	}
+	if resp != nil {
+		switch resp.Message.(type) {
+		case *mysql.ERRPacket, mysql.ERRPacket:
+			return
+		}
+	}
+	switch msg := req.Message.(type) {
+	case *mysql.ChangeUserPacket, mysql.ChangeUserPacket:
+		d.MarkDatabaseUnknown()
+	case *mysql.InitDBPacket:
+		if msg != nil {
+			d.Database = strings.TrimSpace(msg.Schema)
+			d.DatabaseUnknown = false
+		}
+	case mysql.InitDBPacket:
+		d.Database = strings.TrimSpace(msg.Schema)
+		d.DatabaseUnknown = false
+	case *mysql.QueryPacket:
+		if msg != nil {
+			d.applyUseQuery(msg.Query)
+		}
+	case mysql.QueryPacket:
+		d.applyUseQuery(msg.Query)
+	}
+}
+
+func (d *DecodeContext) applyUseQuery(query string) {
+	db, isUse, ambiguous, ok := parseMySQLUseDatabase(query)
+	if ambiguous {
+		d.MarkDatabaseUnknown()
+		return
+	}
+	if !isUse {
+		return
+	}
+	if ok {
+		d.Database = db
+		d.DatabaseUnknown = false
+		return
+	}
+	d.MarkDatabaseUnknown()
+}
+
+func isMySQLSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f' || b == '\v'
+}
+
+// skipMySQLSpaceAndComments advances past ASCII whitespace and plain MySQL
+// comments (/* ... */, #, -- <space>). Returns (rest, ok); ok is false on
+// MySQL executable comments (/*! ... */) or unterminated block comments.
+func skipMySQLSpaceAndComments(s string) (string, bool) {
+	i := 0
+	for i < len(s) {
+		if isMySQLSpace(s[i]) {
+			i++
+			continue
+		}
+		if s[i] == '/' && i+1 < len(s) && s[i+1] == '*' {
+			if i+2 < len(s) && s[i+2] == '!' {
+				return "", false
+			}
+			end := strings.Index(s[i+2:], "*/")
+			if end < 0 {
+				return "", false
+			}
+			i += 2 + end + 2
+			continue
+		}
+		if s[i] == '#' || (s[i] == '-' && i+1 < len(s) && s[i+1] == '-' && (i+2 >= len(s) || isMySQLSpace(s[i+2]))) {
+			nl := strings.IndexByte(s[i:], '\n')
+			if nl < 0 {
+				return "", true
+			}
+			i += nl + 1
+			continue
+		}
+		break
+	}
+	return s[i:], true
+}
+
+// hasMultipleMySQLStatements reports whether query contains a semicolon outside
+// quoted strings, backtick identifiers, and SQL comments that is followed by
+// any non-whitespace/non-comment token.
+func hasMultipleMySQLStatements(query string) bool {
+	inSingle, inDouble, inBacktick := false, false, false
+	for i := 0; i < len(query); {
+		ch := query[i]
+		if inSingle {
+			if ch == '\\' && i+1 < len(query) {
+				i += 2
+				continue
+			}
+			if ch == '\'' {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					i += 2
+					continue
+				}
+				inSingle = false
+			}
+			i++
+			continue
+		}
+		if inDouble {
+			if ch == '\\' && i+1 < len(query) {
+				i += 2
+				continue
+			}
+			if ch == '"' {
+				if i+1 < len(query) && query[i+1] == '"' {
+					i += 2
+					continue
+				}
+				inDouble = false
+			}
+			i++
+			continue
+		}
+		if inBacktick {
+			if ch == '`' {
+				if i+1 < len(query) && query[i+1] == '`' {
+					i += 2
+					continue
+				}
+				inBacktick = false
+			}
+			i++
+			continue
+		}
+		if ch == '\'' {
+			inSingle = true
+			i++
+			continue
+		}
+		if ch == '"' {
+			inDouble = true
+			i++
+			continue
+		}
+		if ch == '`' {
+			inBacktick = true
+			i++
+			continue
+		}
+		if ch == '/' && i+1 < len(query) && query[i+1] == '*' {
+			// MySQL executable comments (/*! ... */) can execute USE or
+			// multi-statement SQL; fail closed as ambiguous.
+			if i+2 < len(query) && query[i+2] == '!' {
+				return true
+			}
+			end := strings.Index(query[i+2:], "*/")
+			if end < 0 {
+				return true
+			}
+			i += 2 + end + 2
+			continue
+		}
+		if ch == '#' || (ch == '-' && i+1 < len(query) && query[i+1] == '-' && (i+2 >= len(query) || isMySQLSpace(query[i+2]))) {
+			nl := strings.IndexByte(query[i:], '\n')
+			if nl < 0 {
+				return false
+			}
+			i += nl + 1
+			continue
+		}
+		if ch == ';' {
+			rest, ok := skipMySQLSpaceAndComments(query[i+1:])
+			if !ok || rest != "" {
+				return true
+			}
+		}
+		i++
+	}
+	return false
+}
+
+// parseMySQLUseDatabase parses a single-statement MySQL USE command (including
+// backtick-quoted schema names and comments before, between, or after tokens).
+// Reports (schema, isUse, multiStmt, ok).
+func parseMySQLUseDatabase(query string) (string, bool, bool, bool) {
+	if hasMultipleMySQLStatements(query) {
+		return "", false, true, false
+	}
+	s, ok := skipMySQLSpaceAndComments(query)
+	if !ok {
+		return "", false, true, false
+	}
+	if len(s) < 3 || !strings.EqualFold(s[:3], "USE") {
+		return "", false, false, false
+	}
+	if len(s) == 3 {
+		return "", true, false, false
+	}
+	// Require delimiter (whitespace, comment start, or backtick) after USE so
+	// identifiers like USER_SETTINGS do not look like USE.
+	next := s[3]
+	if !isMySQLSpace(next) && next != '`' && next != '/' && next != '#' && next != '-' {
+		return "", false, false, false
+	}
+	rest, ok := skipMySQLSpaceAndComments(s[3:])
+	if !ok || rest == "" {
+		return "", true, false, false
+	}
+	var db string
+	var after string
+	if rest[0] == '`' {
+		var b strings.Builder
+		closed := false
+		for i := 1; i < len(rest); i++ {
+			if rest[i] == '`' {
+				if i+1 < len(rest) && rest[i+1] == '`' {
+					b.WriteByte('`')
+					i++
+					continue
+				}
+				after = rest[i+1:]
+				closed = true
+				break
+			}
+			b.WriteByte(rest[i])
+		}
+		if !closed {
+			return "", true, false, false
+		}
+		db = strings.TrimSpace(b.String())
+	} else {
+		i := 0
+		for i < len(rest) && !isMySQLSpace(rest[i]) && rest[i] != ';' && rest[i] != '/' && rest[i] != '#' && rest[i] != '-' {
+			i++
+		}
+		db = strings.TrimSpace(rest[:i])
+		after = rest[i:]
+	}
+	if db == "" {
+		return "", true, false, false
+	}
+	tail, ok := skipMySQLSpaceAndComments(after)
+	if !ok {
+		return "", true, false, false
+	}
+	if strings.HasPrefix(tail, ";") {
+		tail, ok = skipMySQLSpaceAndComments(tail[1:])
+		if !ok {
+			return "", true, false, false
+		}
+	}
+	if tail != "" {
+		return "", true, false, false
+	}
+	return db, true, false, true
 }
 
 // PrintByteArray is only for debugging purpose

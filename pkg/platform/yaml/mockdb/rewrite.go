@@ -265,6 +265,13 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 		mergeLearned(mock, st, nil)
 		return true
 	}
+	// Session read-through mocks (deduplicated read-only cache-warming calls)
+	// may not be consumed in every batch or subset replay, so RemoveUnusedMocks
+	// must retain them for future cold-cache replays. Checked AFTER mergeLearned
+	// so noise learned on a consumed read-through mock is still persisted.
+	if mock.IsReadThrough() {
+		return true
+	}
 	// Preserve mocks written after replay start.
 	if !mock.Spec.ReqTimestampMock.IsZero() && mock.Spec.ReqTimestampMock.After(pruneBefore) {
 		return true

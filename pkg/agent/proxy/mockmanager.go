@@ -162,6 +162,7 @@ type MockManager struct {
 	treesMu          sync.RWMutex
 	filteredByKind   map[models.Kind]*TreeDb
 	unfilteredByKind map[models.Kind]*TreeDb
+	readThrough      readThroughStore
 
 	logger *zap.Logger
 
@@ -913,6 +914,9 @@ func (m *MockManager) ResetForReplaySession() {
 	m.spentMu.Lock()
 	m.spent = nil
 	m.spentMu.Unlock()
+	m.treesMu.Lock()
+	m.readThrough.clear()
+	m.treesMu.Unlock()
 	m.clearWindowReclaim()
 	m.connMu.Lock()
 	m.connectionTrees = make(map[string]*TreeDb)
@@ -2124,6 +2128,16 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 			}
 		}
 	}
+	// Partition deduplicated session read-through mocks out of the per-test,
+	// session, and explicit-startup inputs so they live exclusively in
+	// m.readThrough and never pollute per-test pools or handshake trees.
+	var readThroughIn []readThroughStaged
+	filtered = extractReadThrough(filtered, &readThroughIn)
+	unfiltered = extractReadThrough(unfiltered, &readThroughIn)
+	explicitStartup = extractReadThrough(explicitStartup, &readThroughIn)
+	for _, rt := range readThroughIn {
+		rt.mock.MarkPooled()
+	}
 	if isInitialStaging {
 		// A set boundary installs the set's background recordings as of the
 		// epoch this staging starts, before it starts it: no call can be
@@ -2507,6 +2521,18 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 	// Initial staging files the session pool in the startup tier too; an
 	// explicit startup slice may share mocks with it as well.
 	m.startupShared.Store(isInitialStaging || len(explicitStartup) > 0)
+	if setBoundary || fenced {
+		for _, prev := range m.readThrough.order {
+			if prev != nil {
+				outgoingKinds[prev.Kind] = struct{}{}
+			}
+		}
+		m.readThrough.clear()
+	}
+	for _, rt := range readThroughIn {
+		m.readThrough.upsertKey(rt.mock, rt.key, models.DefaultReadThroughMaxEntries, m.logger)
+		outgoingKinds[rt.mock.Kind] = struct{}{}
+	}
 	m.treesMu.Unlock()
 	if m.logger != nil && len(startupInit) > 0 {
 		m.logger.Debug("routed startup-init mocks into startup tree",
@@ -4993,6 +5019,13 @@ func (m *MockManager) deleteStartupTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
+	// Session read-through mocks are reusable across tests on a cold replay
+	// pod: record usage (Updated, ReadThrough=true) without deleting them from
+	// m.readThrough. observe=false because consumeValueAt already calls observeServed.
+	if m.isReadThroughMock(&mock) {
+		m.recordReadThroughHit(&mock, false)
+		return true
+	}
 	m.treesMu.RLock()
 	tree := m.startup
 	m.treesMu.RUnlock()
@@ -6367,7 +6400,7 @@ func (m *MockManager) recordConsumeLocked(mock models.MockState, staged uint64, 
 	if served && m.servedCount != nil {
 		m.servedCount[mock.Name]++
 	}
-	if served && mock.Lifetime == models.LifetimePerTest {
+	if served && mock.Lifetime == models.LifetimePerTest && !mock.ReadThrough {
 		if m.setServed == nil {
 			m.setServed = make(map[string]uint64)
 		}

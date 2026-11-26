@@ -1,7 +1,6 @@
 package replayer
 
 import (
-	"encoding/binary"
 	"strings"
 	"time"
 
@@ -185,11 +184,7 @@ func terminatorStatus(t *mysql.GenericResponse) (status uint16, ok bool) {
 	if t == nil {
 		return 0, false
 	}
-	eof41 := mysqlutils.IsEOFPacket(t.Data) && len(t.Data) >= 9
-	if !eof41 && !mysqlutils.IsOKReplacingEOF(t.Data) {
-		return 0, false
-	}
-	return binary.LittleEndian.Uint16(t.Data[7:9]), true
+	return mysqlutils.TerminatorStatus(t.Data)
 }
 
 // startSession sets a live connection's transaction state as it connects,

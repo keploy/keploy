@@ -75,6 +75,31 @@ func TestGlobalNoiseKeysAreReadAsWritten(t *testing.T) {
 	}
 }
 
+func TestEndpointNoiseIsReadAsWritten(t *testing.T) {
+	body := `test:
+  globalNoise:
+    global: {}
+    endpoints:
+      - method: GET
+        path: /apps/{id}/Config
+        body: {"data.heartbeats[].At": [], "Version": ["^[0-9a-f]{8}$"]}
+        header: {X-Build: []}
+      - Path: /version
+        Body: {version: []}
+`
+	cfg, err := readWithFiles(writeConfig(t, body, ""))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := []config.EndpointNoise{
+		{Method: "GET", Path: "/apps/{id}/Config", Body: config.Noise{"data.heartbeats[].At": {}, "Version": {"^[0-9a-f]{8}$"}}, Header: config.Noise{"X-Build": {}}},
+		{Path: "/version", Body: config.Noise{"version": {}}},
+	}
+	if !reflect.DeepEqual(cfg.Test.GlobalNoise.Endpoints, want) {
+		t.Fatalf("endpoints read as\n%#v\nwant\n%#v", cfg.Test.GlobalNoise.Endpoints, want)
+	}
+}
+
 // The override's test.globalNoise is merged over keploy.yml's as viper
 // merges the rest: an entry it writes is added, or replaces keploy.yml's of
 // the same key, and keys are compared as written, so "^/Users/" and

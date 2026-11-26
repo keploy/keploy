@@ -30,6 +30,9 @@ func BodyNoiseCovering(keys []string, tcNoise map[string][]string, global map[st
 		return "body." + k + " (this test case)"
 	}
 	if k := bodyKeyCovering(keys, global["body"]); k != "" {
+		if p, ok := strings.CutPrefix(k, ExactKeyPrefix); ok {
+			return "body." + p + " (globalNoise.endpoints)"
+		}
 		return "body." + k + " (globalNoise)"
 	}
 	return ""
@@ -48,8 +51,20 @@ func bodyKeyCovering(keys []string, noise map[string][]string) string {
 	for k := range noise {
 		names = append(names, k)
 	}
-	sort.Strings(names)
+	sort.Slice(names, func(i, j int) bool {
+		ri, rj := strings.HasPrefix(names[i], ExactKeyPrefix), strings.HasPrefix(names[j], ExactKeyPrefix)
+		if ri != rj {
+			return rj
+		}
+		return names[i] < names[j]
+	})
 	for _, k := range names {
+		if _, covers, exact := ExactKeyCovers(path, k); exact {
+			if covers {
+				return k
+			}
+			continue
+		}
 		lk := strings.ToLower(k)
 		if !strings.Contains(lk, ".") {
 			for _, seg := range keys {

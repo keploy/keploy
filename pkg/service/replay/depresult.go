@@ -182,6 +182,12 @@ func consumedOutsideAssertion(m models.MockState) bool {
 	if m.CreditTo != "" {
 		return true
 	}
+	// Session read-through mocks are reusable cache-warming reads shared across
+	// tests on cold replay pods; serving one must never mark a test OBSOLETE or
+	// count as an unexpected per-test dependency mismatch.
+	if m.ReadThrough {
+		return true
+	}
 	if provenswitch.On() {
 		return models.ExcludedFromDependencyAssertion(m.Kind) || ((m.Type == "config" || m.Type == "connection") && !m.DataPlane)
 	}
