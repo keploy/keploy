@@ -104,7 +104,10 @@ n="$(curl -s "http://127.0.0.1:$APP/slots?q=lisbon" | yq -p=json -r '.options | 
 [ "$n" = 3 ] || fail "GET /slots answered $n options while recording, want 3"
 n="$(curl -s "http://127.0.0.1:$APP/seen?q=lisbon" | yq -p=json -r '.lastSeen | length')"
 [ "$n" = 2 ] || fail "GET /seen answered $n ids while recording, want 2"
-wait_tests 4 "$REC_PID" || fail "keploy record wrote $(test_files) test cases, want 4"
+for p in /version /about /apps/7/version; do
+    [ "$(curl -s "http://127.0.0.1:$APP$p" | yq -p=json -r '.version')" = fixed ] || fail "GET $p did not answer the label while recording"
+done
+wait_tests 7 "$REC_PID" || fail "keploy record wrote $(test_files) test cases, want 7"
 stop_pid "$REC_PID"
 REC_PID=""
 own
@@ -151,6 +154,19 @@ replay() {
     fi
 }
 
+cat >keploy.yml <<'CFG'
+test:
+    globalNoise:
+        endpoints:
+            - method: GET
+              path: /version
+              body: {"version": []}
+              header: {"X-Build": []}
+            - path: /apps/{id}/version
+              body: {"version": []}
+              header: {"X-Build": []}
+CFG
+
 # 2. Every time moved, nothing else did.
 sleep 1
 replay same fixed
@@ -167,6 +183,13 @@ replay changed other
     fail "3: GET /options passed with another label: the label under an id key is no longer compared"
 [ "$(case_test '/holds' .status)" = FAILED ] ||
     fail "3: GET /holds passed with another holdReason: an entry for the hold silences it"
+[ "$(case_test ':8093/version$' .status)" = PASSED ] ||
+    fail "3: GET /version failed with another label: its rule in test.globalNoise.endpoints did not ignore version and X-Build"
+[ "$(case_test '/apps/7/version$' .status)" = PASSED ] ||
+    fail "3: GET /apps/7/version failed with another label: the rule for /apps/{id}/version did not apply"
+[ "$(case_test '/about$' .status)" = FAILED ] ||
+    fail "3: GET /about passed with another label: the rule for GET /version ignored version on another endpoint"
+echo "== /version: $(case_test ':8093/version$' .status), /apps/7/version: $(case_test '/apps/7/version$' .status), /about: $(case_test '/about$' .status)"
 # added_reported <path> <case file>: the test of GET <path> failed, or keploy
 # test passed it as a response that only gained fields, naming it.
 added_reported() {

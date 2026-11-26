@@ -664,7 +664,7 @@ jobs:
       # with another option's time field. A key the recording lacks (a new
       # id, the time field under an id that did not carry it) is still a
       # difference.
-      - name: Run noise id-keys e2e (one noise entry for a field under every id key)
+      - name: Run noise id-keys e2e (one noise entry for a field under every id key; a noise rule for one endpoint)
         if: ${{ !cancelled() }}
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
