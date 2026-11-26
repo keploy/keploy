@@ -51,3 +51,77 @@ func TestAUsesCheckByFormHoldsOnlyWhereNoLearningChecksItExactly(t *testing.T) {
 		t.Fatal("a clone's check by form is the original's map")
 	}
 }
+
+func TestCanonicalTimeFormAndClockOffsetOffsetEquivalence(t *testing.T) {
+	const canon = "text 9999-99-99a99:99:99a"
+	for _, tc := range []struct {
+		in, want string
+	}{
+		{"text 9999-99-99a99:99:99a", canon},
+		{"text 9999-99-99a99:99:99+99:99", canon},
+		{"text 9999-99-99a99:99:99-99:99", canon},
+		{"text 9999-99-99a99:99:99+9999", canon},
+		{"text 9999-99-99a99:99:99-9999", canon},
+		{"text 9999-99-99a99:99:99+99", canon},
+		{"text 9999-99-99a99:99:99-99", canon},
+		{"typed 9999-99-99a99:99:99+99:99", "typed 9999-99-99a99:99:99a"},
+		{"text 9999-99-99 99:99:99+99:99", "text 9999-99-99 99:99:99a"},
+		{"text 9999-99-99 99:99:99 +99:99", "text 9999-99-99 99:99:99 a"},
+		{"text 9999-99-99 99:99:99 -9999", "text 9999-99-99 99:99:99 a"},
+		{"text 9999-99-99a99:99+99:99", "text 9999-99-99a99:99a"},
+		{"text 9999-99-99a99+99:99", "text 9999-99-99a99a"},
+		{"text 9999-99-99+99:99", "text 9999-99-99a"},
+		{"text 9999-99-99-99:99", "text 9999-99-99a"},
+		{"text 9999-99-99+9999", "text 9999-99-99a"},
+		// Unchanged non-offset / non-ISO forms.
+		{"text 9999-99-99a99:99:99", "text 9999-99-99a99:99:99"},
+		{"text 9999-99-99", "text 9999-99-99"},
+		{"text 9999-99-99 +99:99", "text 9999-99-99 +99:99"},
+		{"text 9999-99-99a99:99:99 aaa", "text 9999-99-99a99:99:99 aaa"},
+		{"text aaa, 99 aaa 9999 99:99:99 +9999", "text aaa, 99 aaa 9999 99:99:99 +9999"},
+		{"number 9999999999", "number 9999999999"},
+		{FormApart, FormApart},
+		{"", ""},
+	} {
+		if got := CanonicalTimeForm(tc.in); got != tc.want {
+			t.Errorf("CanonicalTimeForm(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+		if got := CanonicalTimeForm(tc.want); got != tc.want {
+			t.Errorf("CanonicalTimeForm not idempotent on %q: got %q", tc.want, got)
+		}
+	}
+
+	// FormsOf preserves raw forms on disk (so prior releases pass either zone).
+	const rawIST = "text 9999-99-99a99:99:99+99:99"
+	const rawEST = "text 9999-99-99a99:99:99-99:99"
+	if f, ff := FormsOf(rawIST, canon); f != rawIST || ff != canon {
+		t.Fatalf("FormsOf(+99:99, a) = (%q, %q); want raw (%q, %q)", f, ff, rawIST, canon)
+	}
+	if f, ff := FormsOf(rawIST, rawIST); f != rawIST || ff != "" {
+		t.Fatalf("FormsOf(+99:99, +99:99) = (%q, %q); want (%q, \"\")", f, ff, rawIST)
+	}
+
+	// WrittenAs matches persisted IST form against UTC Z and vice versa.
+	legacyIST := ClockOffset{Form: rawIST}
+	utc := ClockOffset{Form: canon}
+	est := ClockOffset{Form: rawEST}
+	if !legacyIST.WrittenAs(canon) || !utc.WrittenAs(rawIST) || !legacyIST.WrittenAs(rawEST) {
+		t.Fatal("WrittenAs did not treat +99:99, -99:99, and a as equivalent")
+	}
+	if legacyIST.WrittenAs("text 9999-99-99 99:99:99a") || legacyIST.WrittenAs("text 9999-99-99a99:99:99") || legacyIST.WrittenAs("") {
+		t.Fatal("FALSE GREEN: WrittenAs matched distinct layout or empty form")
+	}
+
+	// Meet preserves raw form when identical, keeps both raw forms when 2
+	// share a canonical class (order-independent, v3.7.26 compatible), and
+	// falls back to canonical when >2 distinct raw forms meet.
+	if m := legacyIST.Meet(legacyIST); m.Form != rawIST || m.FormF != "" || m.Empty() {
+		t.Fatalf("Meet(rawIST, rawIST) = %+v; want raw %q preserved", m, rawIST)
+	}
+	if m1, m2 := legacyIST.Meet(utc), utc.Meet(legacyIST); m1 != m2 || m1.Form != rawIST || m1.FormF != canon || m1.Empty() {
+		t.Fatalf("Meet(rawIST, utc) = %+v / %+v; want commutative (%q, %q)", m1, m2, rawIST, canon)
+	}
+	if m1, m2 := legacyIST.Meet(est).Meet(utc), legacyIST.Meet(est.Meet(utc)); m1 != m2 || m1.Form != canon || m1.FormF != "" {
+		t.Fatalf("3-way Meet(+99:99, -99:99, a) = %+v / %+v; want canonical %q", m1, m2, canon)
+	}
+}

@@ -16,13 +16,17 @@ func TestAUseCheckedByFormPassesOnlyATimeOfItsFormUnderTheTimeDefault(t *testing
 	text := Leaf{Type: String, Value: "2026-11-11T18:35:46Z"}
 	o := models.ClockOffset{Form: TimeForm(text)}
 	next := Leaf{Type: String, Value: "2026-11-12T01:00:01Z"}
-	// A time its record runs wrote in two forms (FormF): Z in one, a zone
-	// offset in the other.
+	// A time its record runs wrote in two forms (FormF): T in one, a space in
+	// the other; RFC 3339 offset forms (Z vs +05:30) share one form.
+	spaced := Leaf{Type: String, Value: "2026-11-12 01:00:01Z"}
 	zoned := Leaf{Type: String, Value: "2026-11-12T06:30:01+05:30"}
-	if TimeForm(zoned) == o.Form {
-		t.Fatalf("%q and %q are of one form, %q; the rows need two", text.Value, zoned.Value, o.Form)
+	if TimeForm(spaced) == o.Form {
+		t.Fatalf("%q and %q are of one form, %q; the rows need two", text.Value, spaced.Value, o.Form)
 	}
-	form, formF := models.FormsOf(o.Form, TimeForm(zoned))
+	if !o.WrittenAs(TimeForm(zoned)) {
+		t.Fatalf("%q (%q) does not match %q via WrittenAs; RFC 3339 offsets must match", zoned.Value, TimeForm(zoned), o.Form)
+	}
+	form, formF := models.FormsOf(o.Form, TimeForm(spaced))
 	two := models.ClockOffset{Form: form, FormF: formF}
 	for _, tc := range []struct {
 		what     string
@@ -32,20 +36,22 @@ func TestAUseCheckedByFormPassesOnlyATimeOfItsFormUnderTheTimeDefault(t *testing
 		want     bool
 	}{
 		{what: "the next second", o: o, live: next, timeForm: true, want: true},
+		{what: "IST offset against UTC Z form", o: o, live: zoned, timeForm: true, want: true},
+		{what: "UTC Z against legacy IST +99:99 form", o: models.ClockOffset{Form: "text 9999-99-99a99:99:99+99:99"}, live: next, timeForm: true, want: true},
 		{what: "the next second under strict times", o: o, live: next},
 		{what: "no form", o: models.ClockOffset{}, live: next, timeForm: true},
 		{what: "no form, of a value that is no time", o: models.ClockOffset{}, live: Leaf{Type: String, Value: "6732f0f0c3d4e5f60123aaaa"}, timeForm: true},
 		{what: "a word's check", o: models.ClockOffset{Form: o.Form, Word: models.ClockWord{Start: 1, End: 2}}, live: next, timeForm: true},
-		{what: "another form", o: o, live: Leaf{Type: String, Value: "2026-11-12 01:00:01Z"}, timeForm: true},
+		{what: "another form", o: o, live: spaced, timeForm: true},
 		{what: "an epoch number", o: o, live: Leaf{Type: Number, Value: "1794429703"}, timeForm: true},
 		{what: "an ObjectId", o: o, live: Leaf{Type: String, Value: "6732f0f0c3d4e5f60123aaaa"}, timeForm: true},
 		{what: "the recorded form of two", o: two, live: next, timeForm: true, want: true},
-		{what: "round F's form of two", o: two, live: zoned, timeForm: true, want: true},
-		{what: "round F's form of two, its FormF only", o: models.ClockOffset{Form: o.Form, FormF: TimeForm(zoned)}, live: zoned, timeForm: true, want: true},
-		{what: "a third form beside two", o: two, live: Leaf{Type: String, Value: "2026-11-12 01:00:01Z"}, timeForm: true},
+		{what: "round F's form of two", o: two, live: spaced, timeForm: true, want: true},
+		{what: "round F's form of two, its FormF only", o: models.ClockOffset{Form: o.Form, FormF: TimeForm(spaced)}, live: spaced, timeForm: true, want: true},
+		{what: "a third form beside two", o: two, live: Leaf{Type: String, Value: "2026-11-12T01:00:01"}, timeForm: true},
 		{what: "an epoch number beside two", o: two, live: Leaf{Type: Number, Value: "1794429703"}, timeForm: true},
-		{what: "round F's form of two under strict times", o: two, live: zoned},
-		{what: "a word's check of two forms", o: models.ClockOffset{Form: two.Form, FormF: two.FormF, Word: models.ClockWord{Start: 1, End: 2}}, live: zoned, timeForm: true},
+		{what: "round F's form of two under strict times", o: two, live: spaced},
+		{what: "a word's check of two forms", o: models.ClockOffset{Form: two.Form, FormF: two.FormF, Word: models.ClockWord{Start: 1, End: 2}}, live: spaced, timeForm: true},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			if got := HoldsByForm(tc.o, tc.live, tc.timeForm); got != tc.want {

@@ -348,7 +348,9 @@ type ClockOffset struct {
 	// zone or provenance checked (learn's TimeForm names it: the decoder's
 	// type, and the text's layout with every digit and letter abstracted, so
 	// an epoch keeps its unit and a text its field order, separators and zone
-	// form; a fraction of a second is no part of a form). "" checks the read
+	// form; RFC 3339 / ISO 8601 timezone offset forms such as Z, +hh:mm,
+	// -hh:mm, +hhmm and -hhmm share one canonical form via CanonicalTimeForm;
+	// a fraction of a second is no part of a form). "" checks the read
 	// by every field above, as before the default was. Two learnings of one
 	// place meet with the forms both checked by (Meet): FormApart, which
 	// Empty refuses, where they share none; one with a Form and one without
@@ -1617,7 +1619,10 @@ func (o ClockOffset) signed() bool {
 // hour in UTC, and refuses any other (learn's CheckClockRead). Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
-// pairings came in. Two at different Steps meet as StepApart (Empty), and
+// pairings came in (except when three or more raw RFC 3339 / ISO 8601
+// offset spellings meet: the raw Form/FormF spelling kept on disk can
+// vary by grouping, while WrittenAs matches the same canonical class).
+// Two at different Steps meet as StepApart (Empty), and
 // so do a phase lock (Step above Res) and an offset read at its values' own
 // cut that is that step (Step is Res, the same Step): the second holds no
 // phase, and a meet read at its Res would drop the first's. So do two each
@@ -1683,38 +1688,128 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 		// either zone held, met with one in UTC) names none.
 		m.AppZone = ""
 	}
-	// The forms both learnings checked by are kept: of a learning that
-	// passes two (FormF) and one that passes one of them, that one, the
-	// stricter. Two that share none are no one check (FormApart; a meet
-	// that was apart shares none, as no time's form is FormApart). One
-	// learning that checked the read by its range keeps that check (Form
-	// ""), the stricter of the two.
+	// The form classes both learnings accept are kept, comparing via
+	// CanonicalTimeForm. Up to two deduplicated raw forms from either side
+	// that fall in a shared class are kept on disk (Form / FormF) so older
+	// binaries can still match them; past two, the sorted canonical classes
+	// are stored. Two learnings that share no class meet as FormApart (no
+	// time's form matches FormApart). One learning that checked the read by
+	// its range keeps that check (Form ""), the stricter of the two.
 	switch {
 	case o.Form == "" || p.Form == "":
 	default:
-		var both []string
+		var sharedCanon []string
 		for _, f := range []string{o.Form, o.FormF} {
-			if p.WrittenAs(f) {
-				both = append(both, f)
+			if f == "" || !p.WrittenAs(f) {
+				continue
+			}
+			cf := CanonicalTimeForm(f)
+			if len(sharedCanon) == 0 || sharedCanon[0] != cf {
+				sharedCanon = append(sharedCanon, cf)
 			}
 		}
-		switch len(both) {
-		case 0:
+		if len(sharedCanon) == 0 {
 			m.Form = FormApart
-		case 1:
-			m.Form = both[0]
-		default:
-			m.Form, m.FormF = FormsOf(both[0], both[1])
+		} else {
+			inShared := func(cf string) bool {
+				for _, sc := range sharedCanon {
+					if sc == cf {
+						return true
+					}
+				}
+				return false
+			}
+			var raws []string
+			for _, f := range []string{o.Form, o.FormF, p.Form, p.FormF} {
+				if f == "" || !inShared(CanonicalTimeForm(f)) {
+					continue
+				}
+				seen := false
+				for _, r := range raws {
+					if r == f {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					raws = append(raws, f)
+				}
+			}
+			sort.Strings(raws)
+			switch len(raws) {
+			case 1:
+				m.Form = raws[0]
+			case 2:
+				m.Form, m.FormF = raws[0], raws[1]
+			default:
+				sort.Strings(sharedCanon)
+				m.Form = sharedCanon[0]
+				if len(sharedCanon) > 1 {
+					m.FormF = sharedCanon[1]
+				}
+			}
 		}
 	}
 	return m
 }
 
+// CanonicalTimeForm folds RFC 3339 / ISO 8601 numeric timezone offset
+// suffixes (+99:99, -99:99, +9999, -9999, +99, -99) on an ISO 8601 date or
+// date-time form onto the single offset token "a" (the form of "Z"), so a
+// recording made with a local offset (+05:30, -05:00) and a replay in UTC
+// (Z) or another zone match when compared. Non-ISO forms, naive dates and
+// date-times with no zone, named zones (UTC, GMT), and every other layout
+// difference (type, date/time separator, precision) stay distinct.
+func CanonicalTimeForm(form string) string {
+	kind, skel, ok := strings.Cut(form, " ")
+	if !ok || !strings.HasPrefix(skel, "9999-99-99") {
+		return form
+	}
+	base, rest, spaceBeforeOffset := isoDateTimeBase(skel)
+	if base == "" || !isISOOffsetSkeleton(rest, spaceBeforeOffset) {
+		return form
+	}
+	if spaceBeforeOffset {
+		return kind + " " + base + " a"
+	}
+	return kind + " " + base + "a"
+}
+
+func isoDateTimeBase(skel string) (base, rest string, spaceBeforeOffset bool) {
+	for _, p := range []string{
+		"9999-99-99a99:99:99",
+		"9999-99-99 99:99:99",
+		"9999-99-99a99:99",
+		"9999-99-99 99:99",
+		"9999-99-99a99",
+		"9999-99-99",
+	} {
+		if strings.HasPrefix(skel, p) {
+			r := skel[len(p):]
+			if strings.HasPrefix(r, " ") && len(p) >= len("9999-99-99a99:99") {
+				return p, r[1:], true
+			}
+			return p, r, false
+		}
+	}
+	return "", "", false
+}
+
+func isISOOffsetSkeleton(rest string, spaceBeforeOffset bool) bool {
+	switch rest {
+	case "+99:99", "-99:99", "+9999", "-9999":
+		return true
+	case "+99", "-99":
+		return !spaceBeforeOffset
+	}
+	return false
+}
+
 // FormsOf is the Form and FormF of a time two record runs wrote in forms a
-// and b (learn's TimeForm): the one form where a and b are one, else the
-// two, the lesser first, so that two learnings of one place that saw the
-// same two forms hold one ClockOffset whichever run wrote which (Meet is
-// the same in either order).
+// and b (learn's TimeForm): the one form where a and b are identical, else
+// the two raw forms, the lesser first, so recordings written by this build
+// keep raw forms on disk (compatible with prior releases) while WrittenAs
+// compares RFC 3339 / ISO 8601 offset forms canonically.
 func FormsOf(a, b string) (form, formF string) {
 	switch {
 	case a == b:
@@ -1726,10 +1821,16 @@ func FormsOf(a, b string) (form, formF string) {
 }
 
 // WrittenAs reports whether form, a time's form (learn's TimeForm), is one
-// o's time default checks by: its Form, or FormF beside it. False for "",
-// which names no time.
+// o's time default checks by: its Form, or FormF beside it, comparing
+// RFC 3339 / ISO 8601 offset forms canonically (CanonicalTimeForm) so
+// recordings made in a local offset (+05:30) and replays in UTC (Z) match.
+// False for "", which names no time.
 func (o ClockOffset) WrittenAs(form string) bool {
-	return form != "" && (form == o.Form || form == o.FormF)
+	if form == "" {
+		return false
+	}
+	f := CanonicalTimeForm(form)
+	return f == CanonicalTimeForm(o.Form) || o.FormF != "" && f == CanonicalTimeForm(o.FormF)
 }
 
 // Forms is how a message names the forms o checks by: its Form, or "Form

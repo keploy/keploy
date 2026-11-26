@@ -17,8 +17,8 @@ import (
 // tForm is the form of cR, cF: an RFC 3339 text at the microsecond in UTC.
 const tForm = "text 9999-99-99a99:99:99a"
 
-// tzForm is cF's form written with a zone offset where Z was.
-const tzForm = "text 9999-99-99a99:99:99+99:99"
+// spaceForm is cF's form written with a space where T was.
+const spaceForm = "text 9999-99-99 99:99:99a"
 
 // tTwoForms reports whether o is checked by the two forms a and b, in the
 // one order models.FormsOf gives them.
@@ -214,14 +214,21 @@ func TestTheTimeDefaultLeavesWhatIsNoTime(t *testing.T) {
 		in.TimeForm = true
 		return in
 	}
-	// Two runs that write the value in two forms (a zone offset where Z
-	// was): checked by its two forms alone, never by the clock checks.
-	tz := cFAt.Add(-50 * time.Millisecond).UTC().Format("2006-01-02T15:04:05.000000-07:00")
-	if ds := Decide(declare(cCall(cR, tz, []Raw{cAns(cR, tz)}, true))); len(ds) != 1 || !tTwoForms(ds[0].Clock, tForm, tzForm) || !strings.Contains(ds[0].Line, "checked by its form alone ("+tzForm+" or "+tForm+",") {
+	// Two runs that write the value in two forms (a space where T was):
+	// checked by its two forms alone, never by the clock checks.
+	sp := cFAt.Add(-50 * time.Millisecond).UTC().Format("2006-01-02 15:04:05.000000Z")
+	if ds := Decide(declare(cCall(cR, sp, []Raw{cAns(cR, sp)}, true))); len(ds) != 1 || !tTwoForms(ds[0].Clock, tForm, spaceForm) || !strings.Contains(ds[0].Line, "checked by its form alone ("+spaceForm+" or "+tForm+",") {
 		t.Errorf("two forms: %s; want a time checked by both forms, its line naming them", oDescribe(ds))
 	}
-	if ds := Decide(cCall(cR, tz, []Raw{cAns(cR, tz)}, true)); len(ds) != 1 || ds[0].Outcome == OutcomeClock {
+	if ds := Decide(cCall(cR, sp, []Raw{cAns(cR, sp)}, true)); len(ds) != 1 || ds[0].Outcome == OutcomeClock {
 		t.Errorf("FALSE GREEN? two forms, strict times: %s; want refused", oDescribe(ds))
+	}
+	// Two runs that write the value with Z and an RFC 3339 offset (+05:30):
+	// raw forms are preserved on disk (so prior releases pass either), while
+	// replay treats any RFC 3339 / ISO 8601 offset form as matching.
+	tz := cFAt.Add(-50 * time.Millisecond).In(time.FixedZone("IST", 5*3600+30*60)).Format("2006-01-02T15:04:05.000000-07:00")
+	if ds := Decide(declare(cCall(cR, tz, []Raw{cAns(cR, tz)}, true))); len(ds) != 1 || !tTwoForms(ds[0].Clock, tForm, "text 9999-99-99a99:99:99+99:99") {
+		t.Errorf("Z and +05:30 offset: %s; want raw forms preserved on disk", oDescribe(ds))
 	}
 	// A time inside a text whose words around it changed too: a replay
 	// reads no clock there.
@@ -346,7 +353,11 @@ func TestATimeFormPassesAnyInstantOfItsForm(t *testing.T) {
 		{"a comma's fraction dropped", s("2026-11-11 08:00:00,123"), s("2026-11-11 08:00:00"), true},
 		{"an epoch with its fraction dropped", n("1762848000.5"), n("1762848000"), true},
 		{"a time of day with its fraction dropped", s("08:00:00.250"), s("08:00:00"), true},
-		{"a zone offset where Z was", s("2026-11-11T08:00:00Z"), s("2026-11-11T13:30:00+05:30"), false},
+		{"a zone offset where Z was", s("2026-11-11T08:00:00Z"), s("2026-11-11T13:30:00+05:30"), true},
+		{"Z where a zone offset was", s("2026-11-11T13:30:00+05:30"), s("2026-11-11T08:00:00Z"), true},
+		{"a negative zone offset where +05:30 was", s("2026-11-11T13:30:00+05:30"), s("2026-11-11T03:00:00-05:00"), true},
+		{"a compact ISO offset where Z was", s("2026-11-11T08:00:00Z"), s("2026-11-11T13:30:00+0530"), true},
+		{"a naive time where Z was", s("2026-11-11T08:00:00Z"), s("2026-11-11T08:00:00"), false},
 		{"a space where T was", s("2026-11-11T08:00:00Z"), s("2026-11-11 08:00:00Z"), false},
 		{"seconds where milliseconds were", n("1762848000000"), n("1762848000"), false},
 		{"a text where a number was", n("1762848000000"), s("1762848000000"), false},
@@ -496,14 +507,14 @@ func TestAValueThatIsATimeCarriesItsCheckByForm(t *testing.T) {
 	} {
 		in := call(c.clock, c.declared, c.typed, c.tform)
 		if c.twoForms {
-			// Round F wrote the moment with a zone offset, the earlier send
-			// with it: a time its two runs wrote in two forms, checked by
+			// Round F wrote the moment with a space where T was, the earlier
+			// send with it: a time its two runs wrote in two forms, checked by
 			// either (FormF), as a Clock of two forms is.
-			liveZone := fAt.Add(-610 * time.Microsecond).In(time.FixedZone("", 5*3600+1800)).Format("2006-01-02T15:04:05.000000-07:00")
-			in.Live.Leaves[p] = Leaf{Path: p, Noise: p, Type: String, Value: liveZone}
-			in.Earlier[0].Seen[0].Live = liveZone
+			liveSpace := fAt.Add(-610 * time.Microsecond).UTC().Format("2006-01-02 15:04:05.000000Z")
+			in.Live.Leaves[p] = Leaf{Path: p, Noise: p, Type: String, Value: liveSpace}
+			in.Earlier[0].Seen[0].Live = liveSpace
 			ds := Decide(in)
-			form, formF := models.FormsOf(TimeForm(Leaf{Type: String, Value: rec}), TimeForm(Leaf{Type: String, Value: liveZone}))
+			form, formF := models.FormsOf(TimeForm(Leaf{Type: String, Value: rec}), TimeForm(Leaf{Type: String, Value: liveSpace}))
 			if len(ds) != 1 || ds[0].ByForm == nil || formF == "" || ds[0].ByForm.Form != form || ds[0].ByForm.FormF != formF ||
 				!strings.Contains(ds[0].ByForm.Why, form+" or "+formF) {
 				t.Errorf("%s: %s, by form %+v; want %q or %q", c.what, oDescribe(ds), ds[0].ByForm, form, formF)
@@ -656,26 +667,26 @@ func TestABoundTimeLearnedIsCheckedByFormOnlyWhereItIsATime(t *testing.T) {
 }
 
 // Under the time default a time whose two record runs wrote it in two forms
-// (a zone offset in one where the other wrote Z) is checked by its forms
+// (a space in one where the other wrote T) is checked by its forms
 // alone: a replay passes a value written in either, with a fraction or
 // without, never its range, and refuses any other form, naming both.
 // keploy.yml's mock.times: strict refuses it, saying to record it again.
 func TestATimeItsRunsWroteInTwoFormsPassesEither(t *testing.T) {
-	form, formF := models.FormsOf(tForm, tzForm)
+	form, formF := models.FormsOf(tForm, spaceForm)
 	o := models.ClockOffset{Form: form, FormF: formF}
-	if form != tzForm || formF != tForm {
-		t.Fatalf("precondition: forms %q, %q; want the lesser, %q, first", form, formF, tzForm)
+	if form != spaceForm || formF != tForm {
+		t.Fatalf("precondition: forms %q, %q; want the lesser, %q, first", form, formF, spaceForm)
 	}
 	for _, c := range []struct {
 		what string
 		live string
 		pass bool
 	}{
-		{"the form written with Z", "2001-02-03T04:05:06.789Z", true},
-		{"the form written with a zone offset", "2001-02-03T04:05:06.789+05:30", true},
-		{"the form written with Z, its fraction dropped", "2001-02-03T04:05:06Z", true},
-		{"the form written with a zone offset, its fraction dropped", "2001-02-03T04:05:06+05:30", true},
-		{"a third form", "2001-02-03 04:05:06Z", false},
+		{"the form written with T", "2001-02-03T04:05:06.789Z", true},
+		{"the form written with a space", "2001-02-03 04:05:06.789+05:30", true},
+		{"the form written with T, its fraction dropped", "2001-02-03T04:05:06Z", true},
+		{"the form written with a space, its fraction dropped", "2001-02-03 04:05:06+05:30", true},
+		{"a third form", "2001-02-03 04:05:06", false},
 		{"no instant", "me", false},
 	} {
 		live := Leaf{Type: String, Value: c.live}
@@ -683,13 +694,13 @@ func TestATimeItsRunsWroteInTwoFormsPassesEither(t *testing.T) {
 		if ok != c.pass {
 			t.Errorf("%s: %q passed %v (%s); want %v", c.what, c.live, ok, why, c.pass)
 		}
-		if !ok && !strings.Contains(why, "learned as a time written as "+tzForm+" or "+tForm) {
+		if !ok && !strings.Contains(why, "learned as a time written as "+spaceForm+" or "+tForm) {
 			t.Errorf("%s: refusal %q; want it to name both forms", c.what, why)
 		}
 		if got := ReadsAsClockRead(o, live); got != c.pass {
 			t.Errorf("%s: ReadsAsClockRead %v; want %v", c.what, got, c.pass)
 		}
-		if ok, why := CheckClockRead("body.at", o, live, Span{}, false); ok || !strings.Contains(why, "written as "+tzForm+" or "+tForm+", checked by its form alone: learned under the time default; re-record with mock.times: strict") {
+		if ok, why := CheckClockRead("body.at", o, live, Span{}, false); ok || !strings.Contains(why, "written as "+spaceForm+" or "+tForm+", checked by its form alone: learned under the time default; re-record with mock.times: strict") {
 			t.Errorf("%s, strict times: passed %v (%q); want refused, naming both forms and saying to record again", c.what, ok, why)
 		}
 	}
@@ -706,10 +717,10 @@ func TestATimeItsRunsWroteInTwoFormsPassesEither(t *testing.T) {
 		p           models.ClockOffset
 		form, formF string
 	}{
-		{"the same two forms", o, tzForm, tForm},
-		{"the same two forms, written the other way round", models.ClockOffset{Form: tForm, FormF: tzForm}, tzForm, tForm},
+		{"the same two forms", o, spaceForm, tForm},
+		{"the same two forms, written the other way round", models.ClockOffset{Form: tForm, FormF: spaceForm}, spaceForm, tForm},
 		{"one of the two forms", models.ClockOffset{Form: tForm}, tForm, ""},
-		{"the other of the two forms", models.ClockOffset{Form: tzForm}, tzForm, ""},
+		{"the other of the two forms", models.ClockOffset{Form: spaceForm}, spaceForm, ""},
 		{"one of the two forms beside another", models.ClockOffset{Form: epochForm, FormF: tForm}, tForm, ""},
 		{"another form", models.ClockOffset{Form: epochForm}, models.FormApart, ""},
 		{"two other forms", models.ClockOffset{Form: epochForm, FormF: millisForm}, models.FormApart, ""},
@@ -725,19 +736,26 @@ func TestATimeItsRunsWroteInTwoFormsPassesEither(t *testing.T) {
 	}
 	// However its learnings are grouped: two forms met with each of the two
 	// alone hold no one form, as the two alone do.
-	z, f := models.ClockOffset{Form: tzForm}, models.ClockOffset{Form: tForm}
+	z, f := models.ClockOffset{Form: spaceForm}, models.ClockOffset{Form: tForm}
 	if l, r := o.Meet(z).Meet(f), o.Meet(z.Meet(f)); l.Form != models.FormApart || r != l {
 		t.Errorf("grouped two ways: %+v and %+v; want both apart", l, r)
 	}
 
 	// Learning keeps both forms of a read of the clock in the span that round
-	// F wrote with a zone offset, and one form of a decoder-typed time whose
-	// round F value dropped its fraction (a cached time cut to the second,
-	// which the clock checks refuse).
-	read := cCall(cR, cFAt.Add(-50*time.Millisecond).UTC().Format("2006-01-02T15:04:05.000000-07:00"), nil, false)
+	// F wrote with a named UTC zone where Z was, one form where round F wrote
+	// an RFC 3339 offset where Z was, and one form of a decoder-typed time
+	// whose round F value dropped its fraction (a cached time cut to the
+	// second, which the clock checks refuse).
+	const utcNamedForm = "text 9999-99-99a99:99:99 aaa"
+	read := cCall(cR, cFAt.Add(-50*time.Millisecond).UTC().Format("2006-01-02T15:04:05.000000 UTC"), nil, false)
 	read.TimeForm = true
-	if ds := Decide(read); len(ds) != 1 || ds[0].Outcome != OutcomeClock || !tTwoForms(ds[0].Clock, tForm, tzForm) {
-		t.Errorf("a read in the span round F wrote with a zone offset, the time default: %s; want a time checked by both forms", oDescribe(ds))
+	if ds := Decide(read); len(ds) != 1 || ds[0].Outcome != OutcomeClock || !tTwoForms(ds[0].Clock, tForm, utcNamedForm) {
+		t.Errorf("a read in the span round F wrote with named UTC, the time default: %s; want a time checked by both forms", oDescribe(ds))
+	}
+	readTZ := cCall(cR, cFAt.Add(-50*time.Millisecond).In(time.FixedZone("IST", 5*3600+30*60)).Format("2006-01-02T15:04:05.000000-07:00"), nil, false)
+	readTZ.TimeForm = true
+	if ds := Decide(readTZ); len(ds) != 1 || ds[0].Outcome != OutcomeClock || !tTwoForms(ds[0].Clock, tForm, "text 9999-99-99a99:99:99+99:99") {
+		t.Errorf("a read in the span round F wrote with +05:30, the time default: %s; want raw forms preserved on disk", oDescribe(ds))
 	}
 	stale := cFAt.Add(-time.Minute).UTC().Format(time.RFC3339)
 	in := tTyped(cCall(cR, stale, nil, false))

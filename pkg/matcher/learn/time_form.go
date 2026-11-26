@@ -54,12 +54,16 @@ import (
 // value and every other refusal stay as learned: a moment an earlier answer
 // or request also holds (pick, unknown, two sources that are no reads) is a
 // bound value, which variables decide, never the time default. A value
-// whose two runs write it in two forms of an instant (a zone offset in one
-// run where the other wrote Z, an epoch in seconds in one and milliseconds
-// in the other) is checked by its forms alone too: a replay passes a value
-// of either form (models.ClockOffset's FormF), never its range. A fraction
-// of a second is no part of a form (TimeForm), so a time a run wrote with
-// its all-zero fraction dropped is of one form with the other. One a run
+// whose two runs write it in two forms of an instant (a space in one run
+// where the other wrote T, an epoch in seconds in one and milliseconds in
+// the other) is checked by its forms alone too: a replay passes a value of
+// either form (models.ClockOffset's FormF), never its range. RFC 3339 /
+// ISO 8601 offset spellings (Z, +hh:mm, -hh:mm, +hhmm, -hhmm) compare as
+// one form class (models.CanonicalTimeForm), while raw skeletons are kept
+// on disk (Form / FormF) for compatibility with older binaries. A fraction
+// of a second is no part of a
+// form (TimeForm), so a time a run wrote with its all-zero fraction dropped
+// is of one form with the other. One a run
 // writes in no form of an instant keeps its refusal: a time of another type
 // or form is refused, as is anything that is no time.
 //
@@ -433,7 +437,11 @@ func nearSpan(l Leaf, s Span, by *models.ClockOffset) bool {
 // (models.ClockOffset.Form): its leaf's type, then its text with every
 // digit written 9 and every letter a, so that a form keeps an epoch's unit
 // (its count of digits), a text's field order, separators and zone form
-// ("Z", "+99:99", a zone's name). A fraction of a second is no part of it:
+// ("Z", "+99:99", a zone's name). Raw forms are stored on disk so prior
+// releases can still replay recordings made by this build; WrittenAs and
+// Meet compare RFC 3339 / ISO 8601 offset forms canonically via
+// models.CanonicalTimeForm while keeping named zones and other layouts
+// distinct. A fraction of a second is no part of it:
 // a Go application's RFC 3339 drops a fraction's trailing zeros, and the
 // whole fraction where every digit is 0, so one application writes a time
 // with a fraction or without as its moment falls (a time read at the

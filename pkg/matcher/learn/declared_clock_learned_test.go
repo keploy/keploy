@@ -177,6 +177,7 @@ func TestDeclaredClockLearnedKeepsTwoFormsBesideARangeThatHolds(t *testing.T) {
 		live        string
 		form, formF string
 	}{
+		{"a named UTC zone where Z was", fAt.Truncate(time.Second).Format("2006-01-02T15:04:05.000 UTC"), "text 9999-99-99a99:99:99 aaa", "text 9999-99-99a99:99:99a"},
 		{"a zone offset where Z was", fAt.Truncate(time.Second).Format("2006-01-02T15:04:05.000-07:00"), "text 9999-99-99a99:99:99+99:99", "text 9999-99-99a99:99:99a"},
 		{"a zero fraction where none was", fAt.Truncate(time.Second).Format("2006-01-02T15:04:05.000Z07:00"), "text 9999-99-99a99:99:99a", ""},
 	} {
