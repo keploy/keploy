@@ -714,6 +714,32 @@ func (d *DiskMocks) RangeRecordedBefore(t time.Time, visit func(m *models.Mock) 
 	return nil
 }
 
+// StreamRecorded visits every mock in the store in recorded request-time order
+// (tie-broken by store offset), decoding one mock at a time directly without
+// caching into the learn RecordingKeeper. Each decoded mock is eligible for GC
+// as soon as visit returns unless visit retains it.
+func (d *DiskMocks) StreamRecorded(visit func(m *models.Mock) bool) error {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	sel := append([]diskEntry(nil), d.entries...)
+	d.mu.Unlock()
+	sortRecorded(sel, entryRequest)
+	for _, e := range sel {
+		d.recordedReads.Add(1)
+		m, err := d.readAt(e)
+		if err != nil {
+			return err
+		}
+		if !visit(m) {
+			return nil
+		}
+	}
+	return nil
+}
+
 // RecordingKeeper keeps a recording key names as decode reads it, for the
 // learn step's reads of the set's recordings (learn.Tracker.KeepRecording):
 // size is about the bytes the decoded recording holds. It hands each read a

@@ -248,6 +248,55 @@ func TestRangeRecordedBefore_TellsAFailedRead(t *testing.T) {
 	}
 }
 
+func TestStreamRecorded_OrderBypassKeeperAndErrors(t *testing.T) {
+	s := newDiskWith(t, perTestMockAt("m30", 30), perTestMockAt("m10-a", 10), perTestMockAt("m10-b", 10), perTestMockAt("m20", 20))
+	t.Cleanup(func() { _ = s.Close() })
+
+	keeperCalls := 0
+	s.SetRecordingKeeper(func(_ string, _ int64, decode func() (*models.Mock, error)) (*models.Mock, error) {
+		keeperCalls++
+		return decode()
+	})
+
+	var order []string
+	if err := s.StreamRecorded(func(m *models.Mock) bool {
+		order = append(order, m.Name)
+		return true
+	}); err != nil {
+		t.Fatalf("StreamRecorded: %v", err)
+	}
+	if got, want := strings.Join(order, ","), "m10-a,m10-b,m20,m30"; got != want {
+		t.Fatalf("StreamRecorded order = %q; want %q", got, want)
+	}
+	if keeperCalls != 0 {
+		t.Fatalf("StreamRecorded invoked RecordingKeeper %d times; want 0", keeperCalls)
+	}
+	if got := s.RecordedReads(); got != 4 {
+		t.Fatalf("RecordedReads = %d; want 4", got)
+	}
+
+	// Early stop terminates immediately without decoding remaining entries.
+	order = nil
+	if err := s.StreamRecorded(func(m *models.Mock) bool {
+		order = append(order, m.Name)
+		return len(order) < 2
+	}); err != nil {
+		t.Fatalf("StreamRecorded early stop: %v", err)
+	}
+	if got, want := strings.Join(order, ","), "m10-a,m10-b"; got != want {
+		t.Fatalf("StreamRecorded early stop = %q; want %q", got, want)
+	}
+	if got := s.RecordedReads(); got != 6 {
+		t.Fatalf("RecordedReads after early stop = %d; want 6", got)
+	}
+
+	// Closed store returns error.
+	_ = s.Close()
+	if err := s.StreamRecorded(func(*models.Mock) bool { return true }); err == nil {
+		t.Fatal("StreamRecorded on closed store returned nil error")
+	}
+}
+
 func TestLoadByNames_And_All(t *testing.T) {
 	s := newDiskWith(t,
 		perTestMockAt("m10", 10), perTestMockAt("m20", 20), perTestMockAt("m30", 30),
