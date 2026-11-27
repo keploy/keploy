@@ -433,17 +433,22 @@ func TestOnKernelAnchorCalmRemoval(t *testing.T) {
 		t.Fatalf("anchor disappeared on agent exit (CountAnchorLinks=%d, want 1)", got)
 	}
 
-	// Idle cleanup MUST reap dead grace dirs (0 leftover grace dirs) AND KEEP
-	// anchor -link and -prog pinned until reboot (with StaleTrampolineDetected==false)!
+	// Idle cleanup MUST reap owner.dir (and on 5.12+ with visible kallsyms
+	// leave 0 leftover grace dirs; on 5.10..5.11 at most 1 mapless rebuild
+	// no-op dir may remain safely pinned) AND KEEP anchor -link and -prog
+	// pinned until reboot (with StaleTrampolineDetected==false)!
 	if err := cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 10*time.Second, nil); err != nil {
 		t.Fatalf("idle CleanupAnchors failed: %v", err)
 	}
 	if StaleTrampolineDetected() {
 		t.Fatal("idle CleanupAnchors wrongly raised StaleTrampolineDetected")
 	}
-	if hasAnyDeadGraceDir(root) {
+	if _, serr := os.Stat(owner.dir); !os.IsNotExist(serr) {
+		t.Fatalf("expected exited agent dir %s to be reaped, err=%v", owner.dir, serr)
+	}
+	if kernelHasDynamicTrampImage() && hasAnyDeadGraceDir(root) {
 		ents, _ := os.ReadDir(root)
-		t.Fatalf("expected 0 leftover grace dirs after idle cleanup, found entries=%v", ents)
+		t.Fatalf("expected 0 leftover grace dirs after idle cleanup on 5.12+, found entries=%v", ents)
 	}
 	if _, err := os.Stat(linkPath); err != nil {
 		t.Fatalf("anchor link %s was removed by CleanupAnchors (MUST stay until reboot!): %v", linkPath, err)
@@ -1692,9 +1697,12 @@ func TestOnKernelCleanupAnchorsIdleWithDeadDirAndOtherLink(t *testing.T) {
 	if StaleTrampolineDetected() {
 		t.Fatal("cleanupAnchorsInRoot raised false StaleTrampolineDetected with another tracing link attached")
 	}
-	if hasAnyDeadGraceDir(root) {
+	if _, serr := os.Stat(owner.dir); !os.IsNotExist(serr) {
+		t.Fatalf("dead ENOMEM dir %s was not reaped by cleanupAnchorsInRoot: err=%v", owner.dir, serr)
+	}
+	if kernelHasDynamicTrampImage() && hasAnyDeadGraceDir(root) {
 		ents, _ := os.ReadDir(root)
-		t.Fatalf("leftover grace dir(s) remained after cleanupAnchorsInRoot: %v", ents)
+		t.Fatalf("leftover grace dir(s) remained after cleanupAnchorsInRoot on 5.12+: %v", ents)
 	}
 	if got := CountAnchorLinks(root); got != 1 {
 		t.Fatalf("CountAnchorLinks = %d, want 1 (anchor MUST stay pinned until reboot)", got)
@@ -1706,6 +1714,342 @@ func TestOnKernelCleanupAnchorsIdleWithDeadDirAndOtherLink(t *testing.T) {
 	if c2 != c1 {
 		t.Fatalf("stale image still called prog after idle cleanup: c1=%d c2=%d", c1, c2)
 	}
+}
+
+// TestOnKernelIdleTmpNoopENOMEMNeverPanics proves across all 4 debug kernels
+// (5.10, 5.15, 5.19, 6.12) that if `keploy agent cleanup`'s temporary rebuild
+// no-op N hits -ENOMEM on link close while the hooked function is idle (no
+// traffic during cleanup), reapDeadDirsIdle NEVER unpins N on flat run_cnt
+// alone — it keeps N safely pinned and 1,000 subsequent calls complete with
+// zero page fault / KASAN / panic.
+func TestOnKernelIdleTmpNoopENOMEMNeverPanics(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if _, err := os.Stat("/sys/kernel/debug/failslab"); err != nil {
+		t.Skip("requires CONFIG_FAILSLAB=y")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-tmp-enomem-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	hitMap, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hitMap.Close() }()
+
+	p := makeCountingFexitProg(t, "tmp_enomem_p", "unix_dgram_sendmsg", hitMap)
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		_ = p.Close()
+		t.Fatal(err)
+	}
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	l, err := AttachTracing(p, "tmp_enomem", "unix_dgram_sendmsg", "p")
+	if err != nil {
+		_ = p.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatal(err)
+	}
+	injectFailslabClose(t, func() { _ = l.Close() })
+	_ = p.Close()
+	_ = unix.Close(owner.lockFD)
+	stateMu.Lock()
+	activeOwner = nil
+	stateMu.Unlock()
+
+	sendUnixDgramsHelper(t, 20)
+	var c1 uint64
+	_ = hitMap.Lookup(uint32(0), &c1)
+
+	// Arm failslab around every rebuild no-op link close during idle cleanup,
+	// with ZERO unix_dgram_sendmsg traffic while cleanup runs.
+	noopCloses := 0
+	hooks := &anchorCleanupHooks{
+		wrapNoopClose: func(closeFn func()) {
+			noopCloses++
+			injectFailslabClose(t, closeFn)
+		},
+	}
+	if err := cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 8*time.Second, hooks); err != nil {
+		t.Fatalf("cleanupAnchorsInRoot = %v, want nil", err)
+	}
+	if noopCloses == 0 {
+		t.Fatal("expected cleanupAnchorsInRoot to run at least one rebuild no-op close")
+	}
+	if !hasAnyDeadGraceDir(root) {
+		t.Fatal("reapDeadDirsIdle unpinned tmp rebuild no-op despite -ENOMEM on its close (would panic on next call!)")
+	}
+
+	time.Sleep(1 * time.Second)
+	sendUnixDgramsHelper(t, 1000)
+}
+
+// TestOnKernelAnchorPinFailNeverClosesLastLink proves across all 4 debug
+// kernels (5.10, 5.15, 5.19, 6.12) that if l.Pin(linkPath) fails with -ENOMEM
+// right after ensureAnchor attaches the function's ONLY link:
+//  1. ensureAnchor NEVER closes l (zero 6.12 KASAN slab-UAF in
+//     ftrace_ops_trampoline and zero 5.10 trampoline page fault).
+//  2. 1,000 subsequent unix_dgram_sendmsg calls complete cleanly.
+//  3. Once memory pressure clears, the next reaper round retries pinning and
+//     pins unix_dgram_sendmsg-link onto host bpffs!
+func TestOnKernelAnchorPinFailNeverClosesLastLink(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	failslabDir := "/sys/kernel/debug/failslab"
+	if _, err := os.Stat(failslabDir); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y (%s missing: %v)", failslabDir, err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-apinfail-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(owner.lockFD) }()
+
+	// Use bpf_fentry_test3 so no earlier test has pinned or attached a link on it
+	// (guaranteeing this anchor is the trampoline's true ONLY link).
+	const fn = "bpf_fentry_test3"
+	runtime.LockOSThread()
+	tidFailPath := fmt.Sprintf("/proc/self/task/%d/make-it-fail", unix.Gettid())
+	failFD, err := unix.Open(tidFailPath, unix.O_WRONLY, 0)
+	if err != nil {
+		runtime.UnlockOSThread()
+		t.Fatalf("open %s: %v", tidFailPath, err)
+	}
+	_ = os.WriteFile(filepath.Join(failslabDir, "task-filter"), []byte("Y"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "ignore-gfp-wait"), []byte("N"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("100"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "interval"), []byte("1"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("20"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "space"), []byte("0"), 0o644)
+
+	hookRan := false
+	owner.onBeforeAnchorPin = func() {
+		hookRan = true
+		_, _ = unix.Pwrite(failFD, []byte("1\n"), 0)
+	}
+	owner.ensureAnchor(fn, zap.NewNop())
+	_, _ = unix.Pwrite(failFD, []byte("0\n"), 0)
+	remRaw, _ := os.ReadFile(filepath.Join(failslabDir, "times"))
+	_ = unix.Close(failFD)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+	runtime.UnlockOSThread()
+	owner.onBeforeAnchorPin = nil
+
+	if !hookRan {
+		t.Fatal("onBeforeAnchorPin hook did not run")
+	}
+	if rem, perr := strconv.Atoi(strings.TrimSpace(string(remRaw))); perr == nil && rem >= 20 {
+		t.Fatalf("failslab did not inject -ENOMEM during anchor link pin (times remained %d)", rem)
+	}
+	if got := CountAnchorLinks(root); got != 0 {
+		t.Fatalf("expected 0 pinned anchor links immediately after ENOMEM pin failure, got %d", got)
+	}
+	owner.anchorMu.Lock()
+	pending := len(owner.unpinnedAnchors)
+	owner.anchorMu.Unlock()
+	if pending != 1 {
+		t.Fatalf("expected 1 retained unpinned anchor link FD on owner, got %d", pending)
+	}
+
+	// Next reaper round (after memory pressure passes) MUST pin the retained anchor link!
+	owner.reaper.round()
+	if got := CountAnchorLinks(root); got != 1 {
+		t.Fatalf("expected deferred anchor link to be pinned on reaper retry, CountAnchorLinks=%d", got)
+	}
+	owner.anchorMu.Lock()
+	pendingAfter := len(owner.unpinnedAnchors)
+	owner.anchorMu.Unlock()
+	if pendingAfter != 0 {
+		t.Fatalf("expected 0 pending unpinned anchors after retry, got %d", pendingAfter)
+	}
+}
+
+// TestOnKernelLegacyMixedDirUnresolvedProgDead reproduces a dead grace dir left
+// by an older agent (64-byte un-keyed target_funcs holding only
+// ["unix_dgram_sendmsg"]) mixing resolved prog A and unresolved/legacy-named
+// prog B on unix_stream_connect whose close hits -ENOMEM. Proves on 5.10, 5.15,
+// and 5.19 that un-keyed legacy target_funcs entries NEVER satisfy per-pin
+// lookup (kills M24!), the whole dir stays pinned, and 500 connect() calls
+// survive with zero kernel panic.
+func TestOnKernelLegacyMixedDirUnresolvedProgDead(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if _, err := os.Stat("/sys/kernel/debug/failslab"); err != nil {
+		t.Skip("requires CONFIG_FAILSLAB=y")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	probeP := makeCountingFexitProg(t, "leg_probe", "unix_stream_connect", nil)
+	info, err := queryProgInfo(probeP.FD())
+	_ = probeP.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.AttachBtfID != 0 {
+		t.Skip("Linux 6.0+ populates attach_btf_id directly; legacy un-keyed target_funcs check applies to 5.10..5.19")
+	}
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-legmix-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	hitB, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hitB.Close() }()
+
+	pa := makeCountingFexitProg(t, "leg_a", "unix_dgram_sendmsg", nil)
+	pb := makeCountingFexitProg(t, "leg_b", "unix_stream_connect", hitB)
+	pbInfo, _ := pb.Info()
+	pbID, _ := pbInfo.ID()
+
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		_ = pa.Close()
+		_ = pb.Close()
+		t.Fatal(err)
+	}
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	la, err := AttachTracing(pa, "legacy_test", "unix_dgram_sendmsg", "p")
+	if err != nil {
+		_ = pa.Close()
+		_ = pb.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatal(err)
+	}
+
+	// Pin prog B under an ELF-style name without per-pin record, and replace
+	// target_funcs with a legacy 64-byte-slot un-keyed map ["unix_dgram_sendmsg"].
+	other := makeCountingFexitProg(t, "leg_other", "unix_stream_connect", nil)
+	defer func() { _ = other.Close() }()
+	lo, err := link.AttachTracing(link.TracingOptions{Program: other})
+	if err != nil {
+		_ = la.Close()
+		_ = pa.Close()
+		_ = pb.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatal(err)
+	}
+	defer func() { _ = lo.Close() }()
+
+	if err := pb.Pin(filepath.Join(owner.dir, "000002-review-keploy_stream_connect-p")); err != nil {
+		_ = la.Close()
+		_ = pa.Close()
+		_ = pb.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatal(err)
+	}
+	lb, err := link.AttachTracing(link.TracingOptions{Program: pb})
+	if err != nil {
+		_ = la.Close()
+		_ = pa.Close()
+		_ = pb.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatal(err)
+	}
+
+	// Write legacy 64-byte un-keyed target_funcs map containing ONLY "unix_dgram_sendmsg".
+	tfPath := filepath.Join(owner.dir, targetFuncsFileName)
+	_ = os.Remove(tfPath)
+	legMap, err := ebpf.NewMap(&ebpf.MapSpec{Name: "grace_targets", Type: ebpf.Array, KeySize: 4, ValueSize: 64, MaxEntries: 128})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slot [64]byte
+	copy(slot[:63], "unix_dgram_sendmsg")
+	if err := legMap.Update(uint32(0), slot[:], ebpf.UpdateAny); err != nil {
+		_ = legMap.Close()
+		t.Fatal(err)
+	}
+	if err := legMap.Pin(tfPath); err != nil {
+		_ = legMap.Close()
+		t.Fatal(err)
+	}
+	_ = legMap.Close()
+
+	connectUnixStreamHelper(t, 10)
+	var c0 uint64
+	_ = hitB.Lookup(uint32(0), &c0)
+
+	_ = la.Close()
+	injectFailslabClose(t, func() { _ = lb.Close() })
+	_ = pa.Close()
+	_ = pb.Close()
+	_ = unix.Close(owner.lockFD)
+	stateMu.Lock()
+	activeOwner = nil
+	stateMu.Unlock()
+
+	time.Sleep(300 * time.Millisecond)
+	connectUnixStreamHelper(t, 50)
+	var c1 uint64
+	_ = hitB.Lookup(uint32(0), &c1)
+	if c1 <= c0 {
+		t.Fatalf("expected stale image to keep calling B (c0=%d c1=%d)", c0, c1)
+	}
+
+	ro, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { ro.reaper.closeNoopCache(); _ = unix.Close(ro.lockFD) }()
+
+	for i := 0; i < 10; i++ {
+		ro.reaper.round()
+		time.Sleep(250 * time.Millisecond)
+	}
+	if _, err := os.Stat(owner.dir); err != nil {
+		t.Fatalf("legacy mixed dir with un-keyed target_funcs was prematurely reaped (M24!): %v", err)
+	}
+	if pAlive, aerr := ebpf.NewProgramFromID(pbID); aerr != nil {
+		t.Fatalf("unresolved prog B %d was freed despite legacy un-keyed target_funcs: %v", pbID, aerr)
+	} else {
+		_ = pAlive.Close()
+	}
+	connectUnixStreamHelper(t, 500)
 }
 
 // TestOnKernelSlotReuseConvergence proves that on Linux 6.12 (where

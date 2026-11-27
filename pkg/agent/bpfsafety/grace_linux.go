@@ -186,6 +186,7 @@ var (
 	disarmHooks             []func()
 	detachHooks             []func()
 	unpinnedLockFDs         []int
+	retainedAnchorLinks     []link.Link
 	privateOverlayDevs      = map[uint64]bool{}
 	staleTargets            = map[string]bool{}
 	metricsObserver         MetricsObserver
@@ -659,7 +660,8 @@ func GracefulShutdown(_ context.Context, logger *zap.Logger) {
 	utils.TeardownStep()
 
 	// 1. Cancel and drain the background reaper BEFORE detaching any links so
-	//    it cannot trigger a trampoline rebuild mid-teardown.
+	//    it cannot trigger a trampoline rebuild mid-teardown, and retry pinning
+	//    any anchor link whose earlier pin failed under memory pressure.
 	if owner != nil {
 		if owner.reaper != nil {
 			owner.reaper.stopAndWait(owner.reaperCancel)
@@ -667,6 +669,7 @@ func GracefulShutdown(_ context.Context, logger *zap.Logger) {
 		} else if owner.reaperCancel != nil {
 			owner.reaperCancel()
 		}
+		owner.retainUnpinnedAnchorsOnShutdown()
 	}
 
 	// 2. Disarm filter/targeting maps BEFORE closing any tracing links.
@@ -913,6 +916,8 @@ type graceOwner struct {
 	pinPaths           map[*ebpf.Program]string
 	anchorMu           sync.Mutex
 	anchoredFuncs      map[string]bool
+	unpinnedAnchors    []pendingAnchor
+	onBeforeAnchorPin  func()
 	logger             *zap.Logger
 	reaper             *graceReaper
 	reaperCancel       context.CancelFunc
@@ -1212,6 +1217,7 @@ func openGraceOwnerInRoot(root string, logger *zap.Logger) (*graceOwner, error) 
 	reaper.pinNoop = func(prog *ebpf.Program, funcName string) error {
 		return owner.pinProgram(prog, "bpfsafety_reaper", funcName, "rb")
 	}
+	reaper.retryAnchorsFn = owner.retryUnpinnedAnchors
 	owner.reaper = reaper
 	return owner, nil
 }
@@ -1256,6 +1262,8 @@ type graceReaper struct {
 	readKallsymsFn      func() (map[uint64][]uint64, bool, error)
 	onBeforeNoopAttach  func()
 	onBeforeNoopClose   func()
+	wrapNoopClose       func(closeFn func())
+	retryAnchorsFn      func()
 	noopMu              sync.Mutex
 	noopCache           map[string]*ebpf.Program
 	warnedMu            sync.Mutex
@@ -1364,6 +1372,9 @@ func matchesReapScope(name, reapPrefix string) bool {
 
 // round executes one image-liveness reaper scan and notifies the metrics observer.
 func (r *graceReaper) round() (dirsPresent, pinnedProgs int) {
+	if r.retryAnchorsFn != nil {
+		r.retryAnchorsFn()
+	}
 	entries, err := os.ReadDir(r.root)
 	if err != nil {
 		return 0, 0

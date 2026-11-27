@@ -457,7 +457,11 @@ func (r *graceReaper) forceRebuildTarget(funcName string) error {
 	if r.onBeforeNoopClose != nil {
 		r.onBeforeNoopClose()
 	}
-	_ = l.Close()
+	if r.wrapNoopClose != nil {
+		r.wrapNoopClose(func() { _ = l.Close() })
+	} else {
+		_ = l.Close()
+	}
 	return nil
 }
 

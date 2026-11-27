@@ -49,16 +49,18 @@ Both OSS `keploy` and `enterprise` share a single implementation in `go.keploy.i
 2. **Pinned Trampoline Anchor Links (`<host-bpffs>/keploy-grace/anchors/<func>-link`):**
    - While Keploy is installed on a node with host bpffs, Keploy pins one tiny 2-instruction no-op `fentry` link (`mov r0, 0; exit`) per hooked kernel function (`vmlinux` and `tls.ko`, e.g., `tls_sw_sendmsg` / `tls_sw_recvmsg`) under `<host-bpffs>/keploy-grace/anchors/<func>-link` (alongside `<func>-prog`) **before** the first real attach on that function.
    - **Why:** On a DaemonSet or sidecar node, Keploy is usually the only BPF trampoline user on those functions. Keeping one no-op anchor link pinned guarantees the kernel trampoline's refcount never drops to 0 when an agent exits, rolls, self-updates, or is `SIGKILL`ed — preventing Linux 6.0+'s unrecoverable last-link `ftrace_ops_trampoline` UAF and permanent `EBUSY` until reboot, preventing Linux 5.10–5.11's static trampoline page free under `-ENOMEM`, and ensuring any failed `-ENOMEM` unlink is cleanly repaired by the next trampoline update.
-   - **Measured idle overhead (Linux `6.12.63+deb13-amd64`, `PREEMPT_DYNAMIC`, 15 interleaved rounds each):**
-     - `unix_dgram_connect` (15×50,000 calls): baseline median `917.8 ns`, anchored median `963.4 ns`, **delta `+45.6 ns/call`**.
-     - `unix_stream_connect` (15×20,000 calls): baseline median `5140.2 ns`, anchored median `5224.4 ns`, **delta `+84.1 ns/call`**.
-     - `unix_dgram_sendmsg` (15×100,000 calls): baseline median `1796.9 ns`, anchored median `1993.1 ns`, **delta `+196.2 ns/call` (~200 ns/call upper bound)**.
-     - `tcp_sendmsg` + `tcp_recvmsg` (15×50,000 loopback round-trips, 4 hook calls/RT): baseline median `88004.2 ns`, anchored median `84622.2 ns` (within loopback scheduler noise).
-     - Memory footprint: **~4 KiB total** across all anchored functions (no maps).
+   - **Measured idle overhead & memory footprint:**
+     - Idle per-call overhead is **tens of nanoseconds per call** (within normal host/VM jitter). In an interleaved 21×200,000-call pinned-CPU KVM measurement on non-debug Linux `6.12.11`:
+       - `unix_dgram_sendmsg` paired-delta median: `+72.6 ns` (IQR `+27.8..+117.9 ns`) and `+78.0 ns` (IQR `-87..+187 ns`).
+       - `unix_dgram_connect` paired-delta median: `-1.0 ns` (IQR `-148..+43 ns`) and `+64.4 ns` (IQR `-14..+115 ns`).
+       - The 2-instruction no-op program itself measures `24.5–26.1 ns/run` via `BPF_ENABLE_STATS`.
+       - Reproducible benchmark source: `pkg/agent/bpfsafety/anchor_bench_linux_test.go` (`KEPLOY_RUN_ANCHOR_BENCH=1 go test -v -tags=integration -run TestAnchorIdleOverheadBenchmark ./pkg/agent/bpfsafety` inside a disposable VM).
+     - Memory footprint: anchors hold **no BPF maps**; each anchored function occupies one BPF trampoline image (`~64–256 B` sub-page slot in `bpf_prog_pack` on Linux `6.x`, or one `4 KiB` page per anchored function on Linux `5.x` — up to ~21 functions across full enterprise capture = `~84 KiB` on `5.x`, `<8 KiB` on `6.x`).
      - Note for kTLS: anchoring `tls_sw_sendmsg`/`tls_sw_recvmsg` holds a kernel module reference on `tls.ko` until reboot.
-   - **Lifecycle & removal (same on every Linux kernel):** **No Keploy path ever removes an anchor's last link on any kernel** — not the reaper, not `CleanupAnchors`, not `keploy agent cleanup`, and not an uninstall hook. Detaching an anchor's last link under memory pressure reaches the kernel's last-link `-ENOMEM` bug on both `5.10–5.11` and `6.0+`, so anchors stay pinned safely until the next node reboot. Running `keploy agent cleanup --host-bpffs /sys/fs/bpf` after stopping all Keploy agents safely reaps any dead `grace2-*`/`grace-*` directories left behind by exited agents and prints:
+     - **Note for kernel livepatching on Linux `5.x` (`< 6.0`):** Prior to Linux `6.0` (which lifted the restriction via `host klp and bpf trampoline together`), ftrace direct calls carry `FTRACE_OPS_FL_IPMODIFY`. On Linux `5.x` nodes (such as Ubuntu 22.04 `5.15` with Canonical Livepatch or RHEL 8/9 with `kpatch`), a livepatch touching any anchored function (`tcp_sendmsg`, `tcp_recvmsg`, `udp_*`, `unix_*`, `do_splice`, etc.) will return `EBUSY` until the node reboots — including after Keploy is uninstalled. Leaving anchors pinned until reboot is deliberate: deferring a livepatch until reboot is strictly preferable to a node kernel panic.
+   - **Lifecycle & removal (same on every Linux kernel):** **No Keploy path ever removes an anchor's last link on any kernel** — not the reaper, not `CleanupAnchors`, not `keploy agent cleanup`, not an uninstall hook, and not a failed `l.Pin()` under memory pressure (if `l.Pin` fails in `ensureAnchor`, Keploy retains the live link FD in-process and retries pinning on subsequent reaper rounds and at shutdown, never closing the last link; only a `SIGKILL` occurring inside the microsecond attach-to-pin window before a successful pin would cause the kernel to close an unpinned link FD at process exit). Running `keploy agent cleanup --host-bpffs /sys/fs/bpf` after stopping all Keploy agents safely reaps dead map-bearing agent grace directories (on `5.12+` with visible kallsyms it also reaps its temporary rebuild directory once `/proc/kallsyms` clears; on `5.10–5.11`, hidden kallsyms, or `-ENOMEM` during cleanup, it never reaps on `BPF_ENABLE_STATS` alone and leaves at most one tiny mapless rebuild no-op directory pinned for the next agent's reaper or reboot) and prints:
      ```text
-     N idle keploy anchors stay until the next reboot (safe; per-call cost 200 ns)
+     N idle keploy anchors stay until the next reboot (safe; idle overhead tens of ns/call; on Linux 5.x livepatches touching anchored functions wait for a reboot)
      ```
 
 3. **Pre-Detach Disarm + First-in-Teardown Fast Link Close:**
@@ -101,8 +103,8 @@ Both OSS `keploy` and `enterprise` share a single implementation in `go.keploy.i
 8. **Kernel Memory Cost and Steady-State Bounds:**
    - A pinned `bpf_prog` holds references to its `aux->used_maps` (`~185 MiB` at default 1 GiB container / 64 MiB ringbuf; `~377 MiB` at 256 MiB ringbuf; `~4–5 MiB` for OSS `unixconn` alone) only until its trampoline image disappears from `/proc/kallsyms`.
    - Because `/proc/kallsyms` image-liveness reaping runs every `15s` and kernel trampoline images normally free within `~1s` after link close, a dead directory from a rollout, self-update swap, or crash is typically reaped within **15–30 seconds** (rather than sitting for 15+ minutes).
-   - Anchor links hold **no maps** (`~4 KiB` total across the node) and remain pinned until the next node reboot.
-   - On an uninstalled node with no successor agent, the last exited agent's `grace2-*` directory is safely reaped by `keploy agent cleanup` (which runs the zero-timer image-liveness / `BPF_ENABLE_STATS` reaper and leaves idle anchors untouched until reboot) or cleared automatically on node reboot.
+   - Anchor links hold **no BPF maps** (`~64–256 B` sub-page slot per anchored function on Linux `6.x`, or one `4 KiB` page per anchored function on Linux `5.x`) and remain pinned until the next node reboot.
+   - On an uninstalled node with no successor agent, the last exited agent's map-bearing `grace2-*` directory is safely reaped by `keploy agent cleanup` (which runs the zero-timer `/proc/kallsyms` image-liveness reaper, leaves idle anchors untouched until reboot, and on `5.10–5.11` / hidden kallsyms / `-ENOMEM` keeps at most one tiny mapless rebuild no-op directory pinned safely until the next agent or reboot rather than reaping on stats alone).
 
 9. **Cold Start-Up Probe (`pkg/kernelcap`):**
    - `ProbeTracingAttach` attaches to `bpf_fentry_test1` (invoked only by `BPF_PROG_TEST_RUN`, never by live workload traffic) instead of `tcp_close`, eliminating the start-time detach race on `tcp_close`.
@@ -118,7 +120,7 @@ Both OSS `keploy` and `enterprise` share a single implementation in `go.keploy.i
 keploy agent cleanup --host-bpffs /sys/fs/bpf
 ```
 
-`keploy agent cleanup` refuses to run while any live Keploy agent holds a grace lock, safely reaps any dead `grace2-*`/`grace-*` directories left behind by exited agents, never detaches any anchor link, and prints how many idle anchors remain until the next node reboot (`N idle keploy anchors stay until the next reboot (safe; per-call cost 200 ns)`).
+`keploy agent cleanup` refuses to run while any live Keploy agent holds a grace lock, safely reaps exited map-bearing `grace2-*`/`grace-*` directories (never unpinning a rebuild no-op on stats alone), never detaches any anchor link, and prints how many idle anchors remain until the next node reboot (`N idle keploy anchors stay until the next reboot (safe; idle overhead tens of ns/call; on Linux 5.x livepatches touching anchored functions wait for a reboot)`).
 
 ## Third-Party eBPF Tools Sharing Trampolines
 

@@ -31,21 +31,29 @@ const (
 	// so anchor link and prog pins use '-' suffixes.
 	anchorLinkSuffix = "-link"
 	anchorProgSuffix = "-prog"
-
-	// anchorIdlePerCallCostNs is the measured median per-call overhead (ns) of
-	// an idle 2-instruction no-op fentry anchor on Linux 6.12 (15x100k
-	// interleaved unix_dgram_sendmsg benchmark: +196.2 ns/call).
-	anchorIdlePerCallCostNs = 200
 )
+
+type pendingAnchor struct {
+	funcName string
+	linkPath string
+	lnk      link.Link
+}
 
 // ensureAnchor ensures one pinned no-op fentry anchor link exists under
 // <host-bpffs>/keploy-grace/anchors/<funcName>-link (alongside <funcName>-prog)
 // BEFORE the first real tracing attach on funcName. Works for both vmlinux and
 // kernel-module functions (e.g. tls.ko).
 //
-// No Keploy path ever removes an anchor's last link on any kernel — anchors are
-// released only by node reboot (preventing last-link -ENOMEM ftrace_ops UAF on
-// 6.0+ and static-trampoline page free on 5.10–5.11).
+// Safety invariants:
+//   - No Keploy path ever removes an anchor's last link on any kernel — anchors
+//     are released only by node reboot (preventing last-link -ENOMEM ftrace_ops
+//     UAF on 6.0+ and static-trampoline page free on 5.10–5.11).
+//   - If LoadPinnedLink fails with any non-ENOENT error (e.g. EMFILE, ENOMEM,
+//     EACCES), linkPath is NEVER unlinked because it may hold a live anchor.
+//   - If l.Pin(linkPath) fails after attachPinnedAnchorNoop succeeds, l is NEVER
+//     closed (closing it would drop the function's only link under memory
+//     pressure). Instead l is retained on the owner and re-pinned on subsequent
+//     reaper rounds and at shutdown.
 func (g *graceOwner) ensureAnchor(funcName string, logger *zap.Logger) {
 	if g == nil || funcName == "" {
 		return
@@ -83,15 +91,19 @@ func (g *graceOwner) ensureAnchor(funcName string, logger *zap.Logger) {
 	progPath := filepath.Join(anchorsDir, tok+anchorProgSuffix)
 
 	// Fast path: anchor link already pinned by an earlier agent on this node.
+	// NEVER unlink linkPath on EMFILE, ENOMEM, EACCES, or any non-ENOENT error
+	// because it may be a live pinned anchor link!
 	if existing, lerr := link.LoadPinnedLink(linkPath, nil); lerr == nil {
 		_ = existing.Close()
 		g.markAnchored(funcName)
 		return
+	} else if !errors.Is(lerr, os.ErrNotExist) {
+		if logger != nil {
+			logger.Warn("bpf-safety: failed to inspect existing anchor link on host bpffs; leaving it untouched",
+				zap.String("function", funcName), zap.String("linkPath", linkPath), zap.Error(lerr))
+		}
+		return
 	}
-
-	// Clean any orphaned .link (without touching a .prog that may be held for a
-	// prior stale last-link condition!).
-	_ = os.Remove(linkPath)
 
 	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
 		Name:       "kp_anchor",
@@ -112,12 +124,9 @@ func (g *graceOwner) ensureAnchor(funcName string, logger *zap.Logger) {
 	}
 	defer func() { _ = prog.Close() }()
 
-	// Pin the no-op program BEFORE attaching so that even if a future calm
-	// removal of the anchor link hits -ENOMEM, the program stays pinned until
-	// reboot.
+	// Pin the no-op program BEFORE attaching so the anchor prog stays pinned
+	// until reboot.
 	if _, serr := os.Stat(progPath); serr == nil {
-		// Previous .prog already exists (e.g. preserved from a stale removal);
-		// use a unique suffix so we never unpin a previously preserved prog.
 		progPath = filepath.Join(anchorsDir, fmt.Sprintf("%s-%s%s", tok, randomNonce()[:6], anchorProgSuffix))
 	}
 	if err := prog.Pin(progPath); err != nil {
@@ -139,21 +148,112 @@ func (g *graceOwner) ensureAnchor(funcName string, logger *zap.Logger) {
 		}
 		return
 	}
-	defer func() { _ = l.Close() }()
 
+	if g.onBeforeAnchorPin != nil {
+		g.onBeforeAnchorPin()
+	}
+
+	// Pin l BEFORE closing our process FD. If l.Pin fails (e.g. ENOMEM under
+	// memcg pressure), NEVER call l.Close(): closing the function's only link
+	// under memory pressure hits Linux 6.0+'s last-link ftrace_ops UAF and
+	// Linux 5.10's static-trampoline page free. Retain the live link FD on the
+	// owner and retry pinning on every reaper round and at shutdown.
 	if err := l.Pin(linkPath); err != nil {
+		g.anchorMu.Lock()
+		if g.anchoredFuncs == nil {
+			g.anchoredFuncs = make(map[string]bool)
+		}
+		g.anchoredFuncs[funcName] = true
+		g.unpinnedAnchors = append(g.unpinnedAnchors, pendingAnchor{
+			funcName: funcName,
+			linkPath: linkPath,
+			lnk:      l,
+		})
+		g.anchorMu.Unlock()
 		if logger != nil {
-			logger.Warn("bpf-safety: failed to pin anchor link on host bpffs", zap.String("function", funcName), zap.Error(err))
+			logger.Warn("bpf-safety: failed to pin anchor link on host bpffs; keeping live link FD open and retrying on reaper rounds",
+				zap.String("function", funcName), zap.String("linkPath", linkPath), zap.Error(err))
 		}
 		return
 	}
 
+	// Safe to close our process FD now that the bpffs pin holds a permanent ref.
+	_ = l.Close()
 	g.markAnchored(funcName)
 	if logger != nil {
 		logger.Debug("bpf-safety: pinned trampoline anchor link on host bpffs",
 			zap.String("function", funcName),
 			zap.String("linkPath", linkPath))
 	}
+}
+
+// retryUnpinnedAnchors retries pinning any anchor links whose initial l.Pin
+// failed (e.g. transient memcg -ENOMEM). On success, closes the process FD
+// (now backed by the bpffs pin); on failure, keeps the live link FD open so
+// the trampoline's last link is never dropped.
+func (g *graceOwner) retryUnpinnedAnchors() {
+	if g == nil {
+		return
+	}
+	g.anchorMu.Lock()
+	if len(g.unpinnedAnchors) == 0 {
+		g.anchorMu.Unlock()
+		return
+	}
+	pending := g.unpinnedAnchors
+	g.unpinnedAnchors = nil
+	g.anchorMu.Unlock()
+
+	var remaining []pendingAnchor
+	for _, p := range pending {
+		if p.lnk == nil {
+			continue
+		}
+		err := p.lnk.Pin(p.linkPath)
+		if err != nil && errors.Is(err, os.ErrExist) {
+			altPath := filepath.Join(filepath.Dir(p.linkPath), fmt.Sprintf("%s-%s%s", sanitizeToken(p.funcName), randomNonce()[:6], anchorLinkSuffix))
+			err = p.lnk.Pin(altPath)
+		}
+		if err != nil {
+			remaining = append(remaining, p)
+			continue
+		}
+		_ = p.lnk.Close()
+		if g.logger != nil {
+			g.logger.Info("bpf-safety: pinned deferred trampoline anchor link on retry",
+				zap.String("function", p.funcName), zap.String("linkPath", p.linkPath))
+		}
+	}
+
+	if len(remaining) > 0 {
+		g.anchorMu.Lock()
+		g.unpinnedAnchors = append(remaining, g.unpinnedAnchors...)
+		g.anchorMu.Unlock()
+	}
+}
+
+// retainUnpinnedAnchorsOnShutdown retries pinning deferred anchors and keeps
+// any still-unpinned link FDs referenced until process exit so they are never
+// closed prematurely before tracing teardown finishes.
+func (g *graceOwner) retainUnpinnedAnchorsOnShutdown() {
+	if g == nil {
+		return
+	}
+	g.retryUnpinnedAnchors()
+	g.anchorMu.Lock()
+	left := g.unpinnedAnchors
+	g.unpinnedAnchors = nil
+	g.anchorMu.Unlock()
+	if len(left) == 0 {
+		return
+	}
+	stateMu.Lock()
+	for _, p := range left {
+		if p.lnk != nil {
+			retainedAnchorLinks = append(retainedAnchorLinks, p.lnk)
+		}
+	}
+	stateMu.Unlock()
 }
 
 func (g *graceOwner) markAnchored(funcName string) {
@@ -214,12 +314,13 @@ func CleanupAnchors(ctx context.Context, logger *zap.Logger, hostBPFFS string) e
 type anchorCleanupHooks struct {
 	beforeLinkClose     func(funcName string)
 	afterLinkClose      func(funcName string)
+	wrapNoopClose       func(closeFn func())
 	dynamicTrampImageFn func() bool
 	kallsymsSysctlFn    func() bool
 	readKallsymsFn      func() (map[uint64][]uint64, bool, error)
 }
 
-func cleanupAnchorsInRoot(ctx context.Context, logger *zap.Logger, root string, waitTimeout time.Duration, _ *anchorCleanupHooks) error {
+func cleanupAnchorsInRoot(ctx context.Context, logger *zap.Logger, root string, waitTimeout time.Duration, hooks *anchorCleanupHooks) error {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -237,21 +338,25 @@ func cleanupAnchorsInRoot(ctx context.Context, logger *zap.Logger, root string, 
 	// Safely reap any dead grace directories left behind by exited agents
 	// (using the same zero-timer image-liveness / BPF_ENABLE_STATS reaper,
 	// never blind removal).
-	reapDeadDirsIdle(ctx, logger, root, waitTimeout)
+	var wrapClose func(func())
+	if hooks != nil {
+		wrapClose = hooks.wrapNoopClose
+	}
+	reapDeadDirsIdle(ctx, logger, root, waitTimeout, wrapClose)
 
 	// No Keploy path ever removes an anchor's last link on any kernel —
 	// anchors stay pinned until the next reboot.
 	n := CountAnchorLinks(root)
-	msg := fmt.Sprintf("%d idle keploy anchors stay until the next reboot (safe; per-call cost %d ns)", n, anchorIdlePerCallCostNs)
+	msg := fmt.Sprintf("%d idle keploy anchors stay until the next reboot (safe; idle overhead tens of ns/call; on Linux 5.x livepatches touching anchored functions wait for a reboot)", n)
 	fmt.Println(msg)
-	logger.Info(msg, zap.Int("anchors", n), zap.Int("perCallCostNs", anchorIdlePerCallCostNs))
+	logger.Info(msg, zap.Int("anchors", n))
 	return nil
 }
 
 // reapDeadDirsIdle safely reaps any dead grace directories left behind after
 // all Keploy agents have stopped (using the same zero-timer image-liveness /
 // BPF_ENABLE_STATS reaper with a real pinned no-op owner, never blind removal).
-func reapDeadDirsIdle(ctx context.Context, logger *zap.Logger, root string, waitTimeout time.Duration) {
+func reapDeadDirsIdle(ctx context.Context, logger *zap.Logger, root string, waitTimeout time.Duration, wrapNoopClose func(func())) {
 	if !autoStateStore.isBPFFS(autoStateStore{}, root) {
 		return
 	}
@@ -261,6 +366,9 @@ func reapDeadDirsIdle(ctx context.Context, logger *zap.Logger, root string, wait
 	tmpOwner, err := openGraceOwnerInRoot(root, logger)
 	if err != nil {
 		return
+	}
+	if wrapNoopClose != nil {
+		tmpOwner.reaper.wrapNoopClose = wrapNoopClose
 	}
 	var (
 		preAttachRefs    []trampImageRef
@@ -313,53 +421,32 @@ func reapDeadDirsIdle(ctx context.Context, logger *zap.Logger, root string, wait
 	tmpOwner.persistCleanSnapshot(noopPreCloseRefs, logger)
 	_ = unix.Close(tmpOwner.lockFD)
 
+	// Reap tmpOwner.dir ONLY when /proc/kallsyms proves every snapshotted
+	// trampoline image containing our rebuild no-op has been freed.
+	// NEVER reap tmpOwner.dir on BPF_ENABLE_STATS run_cnt alone: if the
+	// rebuild no-op's own link close hit -ENOMEM, it stays in the current
+	// trampoline image and a flat run_cnt on an idle function would unpin
+	// live code and panic the node. On Linux 5.10..5.11, hidden kallsyms, or
+	// -ENOMEM during cleanup, tmpOwner.dir (a tiny mapless 2-insn no-op) stays
+	// pinned safely for the next agent's reaper or node reboot.
+	if len(noopPreCloseRefs) == 0 {
+		return
+	}
 	cleaner := newGraceReaper(root, "", DefaultReapInterval, logger)
-	// On Linux 5.12+ with visible kallsyms, poll until every rebuild no-op
-	// trampoline image has cleared from /proc/kallsyms (typically ~1s).
-	if len(noopPreCloseRefs) > 0 {
-		cleanDeadline := time.Now().Add(5 * time.Second)
-		if deadline.After(cleanDeadline) {
-			cleanDeadline = deadline
+	cleanDeadline := time.Now().Add(5 * time.Second)
+	if deadline.After(cleanDeadline) {
+		cleanDeadline = deadline
+	}
+	for time.Now().Before(cleanDeadline) {
+		if ctx.Err() != nil {
+			return
 		}
-		for time.Now().Before(cleanDeadline) {
-			if ctx.Err() != nil {
-				return
-			}
-			cleaner.round()
-			if _, serr := os.Stat(tmpOwner.dir); os.IsNotExist(serr) {
-				return
-			}
-			time.Sleep(300 * time.Millisecond)
+		cleaner.round()
+		if _, serr := os.Stat(tmpOwner.dir); os.IsNotExist(serr) {
+			return
 		}
+		time.Sleep(300 * time.Millisecond)
 	}
-
-	// Fallback for Linux 5.10..5.11 (static trampoline page), hidden kallsyms,
-	// or 6.12 bpf_prog_pack slot reuse: verify tmpOwner.dir's own pinned
-	// rebuild no-op is no longer executing via BPF_ENABLE_STATS (~2s flat
-	// run_cnt) before removing tmpOwner.dir (fail closed if stats fail or
-	// run_cnt moves).
-	if ctx.Err() != nil {
-		return
-	}
-	if _, serr := os.Stat(tmpOwner.dir); os.IsNotExist(serr) {
-		return
-	}
-	closer, serr := cleaner.enableStatsFn()
-	if serr != nil {
-		logger.Warn("bpf-safety: BPF_ENABLE_STATS unavailable during idle cleanup; keeping temporary rebuild grace dir",
-			zap.String("graceDir", tmpOwner.dir), zap.Error(serr))
-		return
-	}
-	c1, err1 := cleaner.sumDirRunCnt(tmpOwner.dir)
-	time.Sleep(cleaner.statsProbeWait)
-	c2, err2 := cleaner.sumDirRunCnt(tmpOwner.dir)
-	_ = closer.Close()
-	if err1 != nil || err2 != nil || c2 > c1 {
-		logger.Warn("bpf-safety: temporary rebuild no-op still active or unreadable; keeping temporary grace dir",
-			zap.String("graceDir", tmpOwner.dir), zap.Uint64("runCntBefore", c1), zap.Uint64("runCntAfter", c2))
-		return
-	}
-	cleaner.reapDir(tmpOwner.dir, countPinnedProgs(tmpOwner.dir), "idle cleanup rebuild noop confirmed idle via BPF_ENABLE_STATS")
 }
 
 func hasAnyDeadGraceDir(root string) bool {

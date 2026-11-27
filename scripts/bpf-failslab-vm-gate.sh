@@ -24,7 +24,8 @@ if [ -z "${QEMU_ACCEL:-}" ]; then
 fi
 QEMU_MEM="${QEMU_MEM:-1536}"
 VM_TIMEOUT="${VM_TIMEOUT:-300}"
-TEST_REGEX="${TEST_REGEX:-^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$}"
+TEST_REGEX="${TEST_REGEX:-^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|AnchorPinFailNeverClosesLastLink|IdleTmpNoopENOMEMNeverPanics|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|LegacyMixedDirUnresolvedProgDead|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$}"
+HOOKS_TEST_REGEX="${HOOKS_TEST_REGEX:-^TestOnKernelUnixconnRealObjectFexitPinsResolve$}"
 
 if [ "$#" -gt 0 ]; then
   KERNELS=("$@")
@@ -35,8 +36,9 @@ fi
 WORK="$(mktemp -d /tmp/bpf-failslab-gate.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "=== Building static bpfsafety integration test binary (accel=${QEMU_ACCEL}) ==="
+echo "=== Building static bpfsafety & hooks/linux integration test binaries (accel=${QEMU_ACCEL}) ==="
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -tags=integration -c -o "$WORK/bpfsafety.test" ./pkg/agent/bpfsafety
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -tags=integration -c -o "$WORK/hooks_linux.test" ./pkg/agent/hooks/linux
 
 echo "=== Building minimal QEMU init binary ==="
 cat >"$WORK/init.go" <<'EOF'
@@ -75,12 +77,22 @@ func main() {
 
 	regex := os.Getenv("TEST_REGEX")
 	if regex == "" {
-		regex = "^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$"
+		regex = "^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|AnchorPinFailNeverClosesLastLink|IdleTmpNoopENOMEMNeverPanics|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|LegacyMixedDirUnresolvedProgDead|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$"
 	}
 	cmd := exec.Command("/bpfsafety.test", "-test.v", "-test.count=1", "-test.timeout=240s", "-test.run="+regex)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Run()
+	if err == nil {
+		hregex := os.Getenv("HOOKS_TEST_REGEX")
+		if hregex == "" {
+			hregex = "^TestOnKernelUnixconnRealObjectFexitPinsResolve$"
+		}
+		hcmd := exec.Command("/hooks_linux.test", "-test.v", "-test.count=1", "-test.timeout=60s", "-test.run="+hregex)
+		hcmd.Stdout = os.Stdout
+		hcmd.Stderr = os.Stderr
+		err = hcmd.Run()
+	}
 	if err != nil {
 		fmt.Printf("VM_TESTS_RESULT=FAIL err=%v\n", err)
 	} else {
@@ -97,10 +109,11 @@ build_initrd() {
   mkdir -p "$rdir/proc" "$rdir/sys" "$rdir/dev" "$rdir/tmp"
   cp "$WORK/init" "$rdir/init"
   cp "$WORK/bpfsafety.test" "$rdir/bpfsafety.test"
+  cp "$WORK/hooks_linux.test" "$rdir/hooks_linux.test"
   if [ -f "$KERNEL_DIR/tls-${k}.ko" ]; then
     cp "$KERNEL_DIR/tls-${k}.ko" "$rdir/tls.ko"
   fi
-  chmod +x "$rdir/init" "$rdir/bpfsafety.test"
+  chmod +x "$rdir/init" "$rdir/bpfsafety.test" "$rdir/hooks_linux.test"
   (cd "$rdir" && find . -print0 | cpio --null -ov --format=newc 2>/dev/null | gzip -1 >"$WORK/initramfs-${k}.cpio.gz")
 }
 
@@ -144,10 +157,13 @@ for K in "${KERNELS[@]}"; do
     TestOnKernelReaperSurvivesENOMEMUnlinkViaForceRebuild
     TestOnKernelAnchorPreventsLastLinkENOMEM
     TestOnKernelAnchorCleanupNeverDetachesLastLinkUnderFailslab
+    TestOnKernelAnchorPinFailNeverClosesLastLink
+    TestOnKernelIdleTmpNoopENOMEMNeverPanics
     TestOnKernelCleanSnapshotRace
     TestOnKernelCleanSnapshotTwoProgsSameFunc
     TestOnKernelCleanupAnchorsIdleWithDeadDirAndOtherLink
     TestOnKernelSlotReuseConvergence
+    TestOnKernelUnixconnRealObjectFexitPinsResolve
   )
   case "$K" in
     5.10|5.15|5.19)
@@ -155,6 +171,7 @@ for K in "${KERNELS[@]}"; do
         TestOnKernelUnresolvedNameFailsClosed
         TestOnKernelMixedDirUnresolvedProgDead
         TestOnKernelMixedDirUnresolvedProgClean
+        TestOnKernelLegacyMixedDirUnresolvedProgDead
       )
       ;;
   esac

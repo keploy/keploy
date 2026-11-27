@@ -194,10 +194,18 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 		}
 	}
 	// Enforce that unixconn.go passes the resolved AttachTo target obtained
-	// directly from unixFexitAttachTarget(...) to bpfsafety.AttachTracing
-	// (killing both M12 and M12b: direct `name`, closure returning `name`, or
-	// `targetFunc := name`).
+	// directly from unixFexitAttachTarget(spec, ...) with a non-nil spec to
+	// bpfsafety.AttachTracing (killing M12, M12b, and M29).
 	if rel == "pkg/agent/hooks/linux/unixconn.go" {
+		isValidHelperCall := func(ce *ast.CallExpr) bool {
+			if !isIdentOrSel(ce.Fun, "unixFexitAttachTarget") || len(ce.Args) < 2 {
+				return false
+			}
+			if arg0, ok := ce.Args[0].(*ast.Ident); ok && arg0.Name == "nil" {
+				return false
+			}
+			return true
+		}
 		assignedFromHelper := map[string]bool{}
 		ast.Inspect(file, func(n ast.Node) bool {
 			as, ok := n.(*ast.AssignStmt)
@@ -208,7 +216,7 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 			if !ok {
 				return true
 			}
-			if ce, ok := as.Rhs[0].(*ast.CallExpr); ok && isIdentOrSel(ce.Fun, "unixFexitAttachTarget") {
+			if ce, ok := as.Rhs[0].(*ast.CallExpr); ok && isValidHelperCall(ce) {
 				assignedFromHelper[lhs.Name] = true
 			} else {
 				delete(assignedFromHelper, lhs.Name)
@@ -220,35 +228,66 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 			if !ok || !isIdentOrSel(ce.Fun, "AttachTracing") || len(ce.Args) < 3 {
 				return true
 			}
-			if argCall, ok := ce.Args[2].(*ast.CallExpr); ok && isIdentOrSel(argCall.Fun, "unixFexitAttachTarget") {
+			if argCall, ok := ce.Args[2].(*ast.CallExpr); ok && isValidHelperCall(argCall) {
 				return true
 			}
 			id, ok := ce.Args[2].(*ast.Ident)
 			if !ok || !assignedFromHelper[id.Name] {
-				out = append(out, fmt.Sprintf("%s:%d: bpfsafety.AttachTracing 3rd arg must be assigned directly from unixFexitAttachTarget(...)", rel, fset.Position(ce.Pos()).Line))
+				out = append(out, fmt.Sprintf("%s:%d: bpfsafety.AttachTracing 3rd arg must be assigned directly from unixFexitAttachTarget(spec, ...) with non-nil spec", rel, fset.Position(ce.Pos()).Line))
 			}
 			return true
 		})
 	}
 	// Enforce the never-remove-anchor-last-link invariant in anchors_linux.go:
-	// CleanupAnchors / cleanupAnchorsInRoot MUST NEVER load-and-close or unlink
-	// any pinned anchor link or anchor prog (anchors are released only by reboot).
+	//  - CleanupAnchors / cleanupAnchorsInRoot MUST NEVER load-and-close or
+	//    unlink any pinned anchor link or anchor prog (released only by reboot).
+	//  - ensureAnchor MUST NEVER os.Remove(linkPath) (which would unlink a live
+	//    anchor on transient EMFILE/ENOMEM) and MUST NEVER defer closing the
+	//    newly attached anchor link before l.Pin succeeds.
 	if rel == "pkg/agent/bpfsafety/anchors_linux.go" {
 		for _, decl := range file.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
-			if !ok || (fd.Name.Name != "CleanupAnchors" && fd.Name.Name != "cleanupAnchorsInRoot") || fd.Body == nil {
+			if !ok || fd.Body == nil {
 				continue
 			}
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				ce, ok := n.(*ast.CallExpr)
-				if !ok {
+			switch fd.Name.Name {
+			case "CleanupAnchors", "cleanupAnchorsInRoot":
+				ast.Inspect(fd.Body, func(n ast.Node) bool {
+					ce, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					if isIdentOrSel(ce.Fun, "LoadPinnedLink") || isIdentOrSel(ce.Fun, "Remove") || isIdentOrSel(ce.Fun, "RemoveAll") || isIdentOrSel(ce.Fun, "Unlink") {
+						out = append(out, fmt.Sprintf("%s:%d (%s): anchor cleanup must never unlink or detach pinned anchor links (released only by reboot)", rel, fset.Position(ce.Pos()).Line, fd.Name.Name))
+					}
 					return true
-				}
-				if isIdentOrSel(ce.Fun, "LoadPinnedLink") || isIdentOrSel(ce.Fun, "Remove") || isIdentOrSel(ce.Fun, "RemoveAll") || isIdentOrSel(ce.Fun, "Unlink") {
-					out = append(out, fmt.Sprintf("%s:%d (%s): anchor cleanup must never unlink or detach pinned anchor links (released only by reboot)", rel, fset.Position(ce.Pos()).Line, fd.Name.Name))
-				}
-				return true
-			})
+				})
+			case "ensureAnchor":
+				ast.Inspect(fd.Body, func(n ast.Node) bool {
+					switch x := n.(type) {
+					case *ast.CallExpr:
+						if (isIdentOrSel(x.Fun, "Remove") || isIdentOrSel(x.Fun, "RemoveAll") || isIdentOrSel(x.Fun, "Unlink")) && len(x.Args) > 0 {
+							if id, ok := x.Args[0].(*ast.Ident); ok && id.Name == "linkPath" {
+								out = append(out, fmt.Sprintf("%s:%d (ensureAnchor): must never remove linkPath (could unlink live anchor on transient EMFILE/ENOMEM)", rel, fset.Position(x.Pos()).Line))
+							}
+						}
+					case *ast.DeferStmt:
+						ast.Inspect(x.Call, func(dn ast.Node) bool {
+							dce, ok := dn.(*ast.CallExpr)
+							if !ok {
+								return true
+							}
+							if sel, ok := dce.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Close" {
+								if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == "l" {
+									out = append(out, fmt.Sprintf("%s:%d (ensureAnchor): must never defer l.Close() before l.Pin succeeds (would close last link on pin failure)", rel, fset.Position(x.Pos()).Line))
+								}
+							}
+							return true
+						})
+					}
+					return true
+				})
+			}
 		}
 	}
 	return out
@@ -429,6 +468,31 @@ func cleanupAnchorsInRoot(p string) {
 	l, _ := link.LoadPinnedLink(p, nil)
 	_ = os.Remove(p)
 	_ = l.Close()
+}`,
+		},
+		{
+			name: "M29_unixconn_nil_spec",
+			rel:  "pkg/agent/hooks/linux/unixconn.go",
+			src: `package linux
+func bad(bpfsafety any, name string) {
+	targetFunc := unixFexitAttachTarget(nil, name)
+	bpfsafety.AttachTracing(nil, "unixconn", targetFunc, "p")
+}`,
+		},
+		{
+			name: "ensureAnchor_removes_linkPath",
+			rel:  "pkg/agent/bpfsafety/anchors_linux.go",
+			src: `package bpfsafety
+func (g *graceOwner) ensureAnchor(linkPath string) {
+	_ = os.Remove(linkPath)
+}`,
+		},
+		{
+			name: "ensureAnchor_defers_link_close",
+			rel:  "pkg/agent/bpfsafety/anchors_linux.go",
+			src: `package bpfsafety
+func (g *graceOwner) ensureAnchor(l any) {
+	defer func() { _ = l.Close() }()
 }`,
 		},
 	}

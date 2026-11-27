@@ -33,6 +33,7 @@ func resetStateForTest(t *testing.T) {
 	prevDisarms := disarmHooks
 	prevHooks := detachHooks
 	prevLockFDs := unpinnedLockFDs
+	prevRetained := retainedAnchorLinks
 	prevOverlays := make(map[uint64]bool, len(privateOverlayDevs))
 	for k, v := range privateOverlayDevs {
 		prevOverlays[k] = v
@@ -42,6 +43,7 @@ func resetStateForTest(t *testing.T) {
 	disarmHooks = nil
 	detachHooks = nil
 	unpinnedLockFDs = nil
+	retainedAnchorLinks = nil
 	privateOverlayDevs = map[uint64]bool{}
 	stateMu.Unlock()
 	prevUnprot := unprotectedTrampolines.Swap(false)
@@ -59,6 +61,7 @@ func resetStateForTest(t *testing.T) {
 		disarmHooks = prevDisarms
 		detachHooks = prevHooks
 		unpinnedLockFDs = prevLockFDs
+		retainedAnchorLinks = prevRetained
 		privateOverlayDevs = prevOverlays
 		stateMu.Unlock()
 		unprotectedTrampolines.Store(prevUnprot)
@@ -1164,7 +1167,9 @@ func TestCleanupAnchorsNeverRemovesAnchorLinksOnAnyKernel(t *testing.T) {
 		}
 		foundMsg := false
 		for _, e := range logs.All() {
-			if strings.Contains(e.Message, "1 idle keploy anchors stay until the next reboot") && strings.Contains(e.Message, "per-call cost") {
+			if strings.Contains(e.Message, "1 idle keploy anchors stay until the next reboot") &&
+				strings.Contains(e.Message, "tens of ns/call") &&
+				strings.Contains(e.Message, "livepatches") {
 				foundMsg = true
 				break
 			}
