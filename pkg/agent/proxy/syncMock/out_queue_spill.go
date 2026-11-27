@@ -64,6 +64,11 @@ type OutQueueSpillLane interface {
 	Discard() int
 }
 
+// spillItemMetaBaseBytes conservatively covers the spillItemMeta struct,
+// slice growth slack, done closure, and Go allocator/GC overhead per spilled
+// mock (measured ~603-681 B/mock live heap for 1 KiB mocks with metadata).
+const spillItemMetaBaseBytes int64 = 512
+
 // spillItemMeta retains only lightweight attribution and fail-closed metadata
 // for each spilled mock (never payload bytes) so a corrupt spill read can
 // still attribute drops (ConnectionID, Metadata) and open the exact same
@@ -81,6 +86,21 @@ type spillItemMeta struct {
 	undeliv   bool
 	async     *models.AsyncMeta
 	reusable  bool
+	metaBytes int64
+}
+
+func (im spillItemMeta) ramBytes() int64 {
+	n := spillItemMetaBaseBytes + int64(len(im.owner)+len(im.name)+len(im.connID)+len(im.kind))
+	if len(im.metadata) > 0 {
+		n += 256
+		for k, v := range im.metadata {
+			n += int64(len(k)+len(v)) + 32
+		}
+	}
+	if im.async != nil {
+		n += 128 + int64(len(im.async.Lane)+len(im.async.AnchorAfter))
+	}
+	return n
 }
 
 func newSpillItemMeta(mock *models.Mock, owner string, done func(delivered bool, epoch uint64)) spillItemMeta {
@@ -102,6 +122,7 @@ func newSpillItemMeta(mock *models.Mock, owner string, done func(delivered bool,
 		}
 		meta.reusable = attributedReusable(mock)
 	}
+	meta.metaBytes = meta.ramBytes()
 	return meta
 }
 

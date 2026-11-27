@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1288,4 +1289,150 @@ func TestOutQueueSpill_SendDuringDrainerExitDiscardNotStranded(t *testing.T) {
 	if got := processOutQueued.Load(); got != baseQueued {
 		t.Fatalf("processOutQueued = %d, want %d", got, baseQueued)
 	}
+}
+
+// TestOutQueueSpill_ManySmallMocksBoundedInRAM proves B3 (R5): each spilled
+// mock's in-RAM spillItemMeta is counted against processOutQueued, so a burst
+// of many small mocks with realistic metadata cannot outgrow the process RAM
+// bound (outQueueMaxBytes / outQueueMaxBytes-outQueueSharedRoom). Once
+// metadata reaches the bound, spilling stops and fail-closed drops take over,
+// and draining, corrupt-peek, or consumer-stall returns processOutQueued to
+// its exact baseline (killing MR5_no_meta_check, MR5_no_meta_add,
+// MR5_no_meta_pop_sub, MR5_no_meta_giveup_sub, MR5_no_meta_corrupt_sub).
+func TestOutQueueSpill_ManySmallMocksBoundedInRAM(t *testing.T) {
+	SetDefaultOutQueueSpill(nil)
+	makeSmallMetaMock := func(i int, ts time.Time) *models.Mock {
+		return &models.Mock{
+			Version:      models.GetVersion(),
+			Kind:         models.GENERIC,
+			Name:         fmt.Sprintf("small-%06d", i),
+			ConnectionID: fmt.Sprintf("conn-%06d", i),
+			Spec: models.MockSpec{
+				Metadata: map[string]string{
+					"type":              "mocks",
+					"connID":            fmt.Sprintf("conn-%06d", i),
+					"keploy.pod":        "orders-0",
+					"keploy.ns":         "shop",
+					"keploy.deployment": "orders",
+					"operation":         "find",
+				},
+				ReqTimestampMock: ts,
+				ResTimestampMock: ts.Add(time.Millisecond),
+				GenericRequests: []models.Payload{{
+					Message: []models.OutputBinary{{Data: strings.Repeat("x", 1024)}},
+				}},
+			},
+		}
+	}
+
+	t.Run("bounded_heap_and_fail_closed_drop", func(t *testing.T) {
+		base := processOutQueued.Load()
+		ch := make(chan *models.Mock, 1)
+		ch <- &models.Mock{Name: "filler"}
+		mgr := New(zap.NewNop())
+		mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
+		mgr.SetOutputChannel(ch)
+		// nonRetainingSpillFactory discards payload bytes just like an on-disk
+		// spill, isolating OSS's in-RAM spillItemMeta growth.
+		mgr.SetOutQueueSpill(&nonRetainingSpillFactory{ramLimit: 8 << 20})
+
+		var onDropCount atomic.Int64
+		mgr.OnDrop(func(*models.Mock) { onDropCount.Add(1) })
+
+		runtime.GC()
+		var beforeMS runtime.MemStats
+		runtime.ReadMemStats(&beforeMS)
+
+		const total = 100_000
+		nonSharedBound := outQueueMaxBytes - outQueueSharedRoom
+		now := time.Now().Add(-time.Minute)
+		var kept, dropped int64
+		var droppedOwners []string
+		for i := 0; i < total; i++ {
+			owner := fmt.Sprintf("tc-%d", i%64)
+			res := mgr.send(makeSmallMetaMock(i, now.Add(time.Duration(i)*time.Microsecond)), owner, nil)
+			cur := processOutQueued.Load() - base
+			if cur > nonSharedBound {
+				t.Fatalf("at mock %d: processOutQueued delta %d exceeded non-shared bound %d", i, cur, nonSharedBound)
+			}
+			switch res {
+			case MockTaken:
+				kept++
+			case MockDroppedOutputFull:
+				dropped++
+				if len(droppedOwners) < 16 {
+					droppedOwners = append(droppedOwners, owner)
+				}
+			default:
+				t.Fatalf("mock %d: unexpected send decision %v", i, res)
+			}
+		}
+		if kept == 0 || dropped == 0 {
+			t.Fatalf("expected bounded spill then fail-closed drop across %d small mocks: kept=%d dropped=%d", total, kept, dropped)
+		}
+		if onDropCount.Load() != dropped {
+			t.Fatalf("OnDrop=%d != dropped=%d", onDropCount.Load(), dropped)
+		}
+		for _, o := range droppedOwners {
+			if !mgr.WasMockDroppedForTC(o) {
+				t.Fatalf("dropped owner %q missing from WasMockDroppedForTC", o)
+			}
+		}
+
+		runtime.GC()
+		var peakMS runtime.MemStats
+		runtime.ReadMemStats(&peakMS)
+		var heapGrowth int64
+		if peakMS.HeapAlloc > beforeMS.HeapAlloc {
+			heapGrowth = int64(peakMS.HeapAlloc - beforeMS.HeapAlloc)
+		}
+		t.Logf("100k small mocks: kept=%d dropped=%d poqDelta=%d MiB heapGrowth=%.1f MiB",
+			kept, dropped, (processOutQueued.Load()-base)/(1<<20), float64(heapGrowth)/(1<<20))
+		if heapGrowth > 64<<20 {
+			t.Fatalf("live heap grew %.1f MiB for %d small mocks (want <= 64 MiB)", float64(heapGrowth)/(1<<20), total)
+		}
+
+		// Drain every kept mock and confirm processOutQueued returns exactly to base.
+		<-ch // filler
+		for i := int64(0); i < kept; i++ {
+			select {
+			case <-ch:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("timed out draining kept mock %d/%d", i, kept)
+			}
+		}
+		waitOutQueue(t, mgr)
+		mgr.CloseOutChan()
+		if delta := processOutQueued.Load() - base; delta != 0 {
+			t.Fatalf("processOutQueued leaked %d bytes after draining %d small mocks", delta, kept)
+		}
+	})
+
+	t.Run("corrupt_peek_releases_meta_bytes", func(t *testing.T) {
+		base := processOutQueued.Load()
+		ch := make(chan *models.Mock, 1)
+		ch <- &models.Mock{Name: "filler"}
+		mgr := New(zap.NewNop())
+		mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
+		mgr.SetOutputChannel(ch)
+		mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1024, failPeekAt: 1})
+
+		now := time.Now().Add(-time.Minute)
+		for i := 0; i < 6; i++ {
+			if res := mgr.send(makeSmallMetaMock(i, now.Add(time.Duration(i)*time.Millisecond)), "tc-corrupt", nil); res != MockTaken {
+				t.Fatalf("send %d = %v, want MockTaken", i, res)
+			}
+		}
+		<-ch // filler
+		select {
+		case <-ch: // head mock delivered; next Peek fails corrupt and discards spilled meta
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for head mock")
+		}
+		waitOutQueue(t, mgr)
+		mgr.CloseOutChan()
+		if delta := processOutQueued.Load() - base; delta != 0 {
+			t.Fatalf("processOutQueued leaked %d bytes after corrupt spill discard", delta)
+		}
+	})
 }

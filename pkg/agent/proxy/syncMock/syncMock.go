@@ -1675,12 +1675,13 @@ type outLane struct {
 	// RAM queueBound in strict FIFO order (queue -> spill -> tail).
 	tail      []queuedMock
 	tailBytes int64
-	// spillMu serializes lane.spill and lane.spillMeta outside outQueueMu so
-	// spill Put/Peek I/O never blocks RAM operations or OutQueued. Never
-	// nested with outQueueMu.
-	spillMu   sync.Mutex
-	spill     OutQueueSpillLane
-	spillMeta []spillItemMeta
+	// spillMu serializes lane.spill, lane.spillMeta, and lane.spillMetaBytes
+	// outside outQueueMu so spill Put/Peek I/O never blocks RAM operations or
+	// OutQueued. Never nested with outQueueMu.
+	spillMu        sync.Mutex
+	spill          OutQueueSpillLane
+	spillMeta      []spillItemMeta
+	spillMetaBytes int64
 	// spillCount mirrors len(spillMeta) (updated under spillMu); spillInFlight
 	// and spillWait are guarded by outQueueMu so drainOutQueue never exits
 	// while a Put is in progress outside outQueueMu.
@@ -1885,49 +1886,60 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 	overRAM := (len(lane.queue) > 0 || lane.inHand) && processOutQueued.Load()+size > ramCap
 	if alreadySpilled || overRAM {
 		if spillFactory != nil {
-			// Run Put outside outQueueMu (serialized by lane.spillMu) so disk
-			// I/O and encryption never hold outQueueMu.
-			lane.spillInFlight++
-			startDrainerLocked()
-			m.outQueueMu.Unlock()
+			meta := newSpillItemMeta(mock, owner, done)
+			if processOutQueued.Load()+meta.metaBytes <= bound {
+				// Reserve each spilled item's in-RAM metadata bytes against
+				// processOutQueued under outQueueMu before releasing it so a
+				// burst of many small mocks cannot outgrow the process RAM
+				// bound; once metadata reaches bound, spilling stops and the
+				// bounded RAM tail / fail-closed drop path takes over.
+				processOutQueued.Add(meta.metaBytes)
+				// Run Put outside outQueueMu (serialized by lane.spillMu) so disk
+				// I/O and encryption never hold outQueueMu.
+				lane.spillInFlight++
+				startDrainerLocked()
+				m.outQueueMu.Unlock()
 
-			lane.spillMu.Lock()
-			if lane.spill == nil {
-				lane.spill = spillFactory.NewLane()
-			}
-			spilled := lane.spill != nil && lane.spill.Put(mock, owner, size)
-			if spilled {
-				lane.spillMeta = append(lane.spillMeta, newSpillItemMeta(mock, owner, done))
-				lane.spillCount.Add(1)
-			}
-			lane.spillMu.Unlock()
+				lane.spillMu.Lock()
+				if lane.spill == nil {
+					lane.spill = spillFactory.NewLane()
+				}
+				spilled := lane.spill != nil && lane.spill.Put(mock, owner, size)
+				if spilled {
+					lane.spillMeta = append(lane.spillMeta, meta)
+					lane.spillMetaBytes += meta.metaBytes
+					lane.spillCount.Add(1)
+				}
+				lane.spillMu.Unlock()
 
-			m.outQueueMu.Lock()
-			lane.spillInFlight--
-			lane.wakeSpillLocked()
-			if spilled {
+				m.outQueueMu.Lock()
+				lane.spillInFlight--
+				lane.wakeSpillLocked()
+				if spilled {
+					m.outQueueMu.Unlock()
+					m.outChanMu.RUnlock()
+					return MockTaken
+				}
+				processOutQueued.Add(-meta.metaBytes)
+				// Spill declined (e.g. shared disk budget exhausted): keep using
+				// RAM up to bound so spilling never drops worse than no spill.
+				// Place behind any active spill in lane.tail to preserve strict FIFO.
+				if processOutQueued.Load()+size > bound {
+					return dropFullLocked()
+				}
+				if lane.spillCount.Load() > 0 || lane.spillInFlight > 0 || len(lane.tail) > 0 {
+					lane.tail = append(lane.tail, queuedMock{mock: mock, owner: owner, size: size, done: done})
+					lane.tailBytes += size
+				} else {
+					lane.queue = append(lane.queue, queuedMock{mock: mock, owner: owner, size: size, done: done})
+					lane.bytes += size
+				}
+				processOutQueued.Add(size)
+				startDrainerLocked()
 				m.outQueueMu.Unlock()
 				m.outChanMu.RUnlock()
 				return MockTaken
 			}
-			// Spill declined (e.g. shared disk budget exhausted): keep using
-			// RAM up to bound so spilling never drops worse than no spill.
-			// Place behind any active spill in lane.tail to preserve strict FIFO.
-			if processOutQueued.Load()+size > bound {
-				return dropFullLocked()
-			}
-			if lane.spillCount.Load() > 0 || lane.spillInFlight > 0 || len(lane.tail) > 0 {
-				lane.tail = append(lane.tail, queuedMock{mock: mock, owner: owner, size: size, done: done})
-				lane.tailBytes += size
-			} else {
-				lane.queue = append(lane.queue, queuedMock{mock: mock, owner: owner, size: size, done: done})
-				lane.bytes += size
-			}
-			processOutQueued.Add(size)
-			startDrainerLocked()
-			m.outQueueMu.Unlock()
-			m.outChanMu.RUnlock()
-			return MockTaken
 		}
 		if processOutQueued.Load()+size > bound {
 			return dropFullLocked()
@@ -2002,6 +2014,10 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 				lane.spill = nil
 				lostMeta := lane.spillMeta
 				lane.spillMeta = nil
+				if lane.spillMetaBytes > 0 {
+					processOutQueued.Add(-lane.spillMetaBytes)
+					lane.spillMetaBytes = 0
+				}
 				lane.spillCount.Store(0)
 				lane.spillMu.Unlock()
 				m.dropCorruptSpill(lostMeta, lostCount, epoch, err)
@@ -2013,6 +2029,8 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 				meta = lane.spillMeta[0]
 				lane.spillMeta[0] = spillItemMeta{}
 				lane.spillMeta = lane.spillMeta[1:]
+				lane.spillMetaBytes -= meta.metaBytes
+				processOutQueued.Add(-meta.metaBytes)
 				if len(lane.spillMeta) == 0 {
 					lane.spillMeta = nil
 				}
@@ -2050,6 +2068,10 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 				lane.spill.Discard()
 				lane.spill = nil
 				lane.spillMeta = nil
+				if lane.spillMetaBytes > 0 {
+					processOutQueued.Add(-lane.spillMetaBytes)
+					lane.spillMetaBytes = 0
+				}
 			}
 			lane.spillMu.Unlock()
 
@@ -2169,6 +2191,10 @@ func (m *SyncMockManager) giveUpOutQueue(lane *outLane, hand queuedMock, why str
 		} else {
 			lane.spill.Discard()
 			lane.spillMeta = nil
+		}
+		if lane.spillMetaBytes > 0 {
+			processOutQueued.Add(-lane.spillMetaBytes)
+			lane.spillMetaBytes = 0
 		}
 		lane.spill = nil
 		lane.spillCount.Store(0)
