@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/internal/testnet"
+	"go.keploy.io/server/v3/pkg/agent/bpfsafety"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -234,4 +235,15 @@ func TestUnixFexitAttachTargetUsesKernelAttachTo(t *testing.T) {
 		}
 	}
 	clearBPFMapAllKeys(nil) // nil-safe
+}
+
+func TestUnixFallbackReasonForAnchorUnpinned(t *testing.T) {
+	why := "attach k_unix_stream_connect: " + bpfsafety.ErrAnchorUnpinned.Error() + ": refusing to attach tracing program"
+	got := unixFallbackReason(why)
+	if strings.Contains(got, "has no BPF trampoline") {
+		t.Fatalf("unixFallbackReason(%q) = %q, must not claim kernel lacks BPF trampolines", why, got)
+	}
+	if !strings.Contains(got, "trampoline anchor not pinned") || !strings.Contains(got, "withheld for this run") {
+		t.Fatalf("unixFallbackReason(%q) = %q, want clear anchor-unpinned fallback reason", why, got)
+	}
 }

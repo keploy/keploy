@@ -265,6 +265,9 @@ func loadUnixConnWith(logger *zap.Logger, objs *bpfObjects, fallback bool) (*uni
 			})
 			if err != nil {
 				u.close()
+				if errors.Is(err, bpfsafety.ErrAnchorUnpinned) {
+					return nil, fmt.Errorf("attach %s: %w", name, err)
+				}
 				return nil, fmt.Errorf("attach %s (a kernel without BPF trampolines?): %w", name, err)
 			}
 			u.links = append(u.links, l)
@@ -587,6 +590,9 @@ func clearBPFMapAllKeys(m *ebpf.Map) {
 }
 
 func unixFallbackReason(why string) string {
+	if why != "" && strings.Contains(why, bpfsafety.ErrAnchorUnpinned.Error()) {
+		return "the syscall tracepoints: trampoline anchor not pinned on host bpffs (static-trampoline kernel); fexit withheld for this run"
+	}
 	if why != "" && (strings.Contains(why, "shutting down") || strings.Contains(why, "safety gate") || strings.Contains(why, "trampoline grace")) {
 		return "the syscall tracepoints: " + why
 	}

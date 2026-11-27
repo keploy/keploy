@@ -47,7 +47,8 @@ type pendingAnchor struct {
 // Safety invariants:
 //   - No Keploy path ever removes an anchor's last link on any kernel — anchors
 //     are released only by node reboot (preventing last-link -ENOMEM ftrace_ops
-//     UAF on 6.0+ and static-trampoline page free on 5.10–5.11).
+//     UAF on 6.0+ and static-trampoline page free on 5.10.0–5.10.27 and
+//     5.11.0–5.11.10).
 //   - If LoadPinnedLink fails with any non-ENOENT error (e.g. EMFILE, ENOMEM,
 //     EACCES), linkPath is NEVER unlinked because it may hold a live anchor.
 //   - If l.Pin(linkPath) fails after attachPinnedAnchorNoop succeeds, l is NEVER
@@ -317,20 +318,21 @@ func CountAnchorLinks(root string) int {
 //  1. Refuses to run if ANY live grace-* / grace2-* directory currently holds
 //     flock(LOCK_EX) (an active Keploy agent is running on the node).
 //  2. Safely reaps dead map-bearing grace directories using the zero-timer
-//     image-liveness / BPF_ENABLE_STATS reaper. On Linux 5.12+ with visible
-//     kallsyms, it also reaps its temporary rebuild no-op directory once
-//     /proc/kallsyms confirms the rebuild image is freed; on Linux 5.10–5.11,
-//     hidden kallsyms, or -ENOMEM during cleanup, it never reaps that
-//     temporary directory on BPF_ENABLE_STATS alone and leaves at most one
-//     tiny mapless 2-insn rebuild no-op directory pinned safely for the next
-//     agent's reaper or node reboot.
+//     image-liveness / BPF_ENABLE_STATS reaper. On dynamic-trampoline kernels
+//     (Linux 5.10.28+, 5.11.11+, 5.12+) with visible kallsyms, it also reaps
+//     its temporary rebuild no-op directory once /proc/kallsyms confirms the
+//     rebuild image is freed; on static-trampoline kernels (5.10.0–5.10.27,
+//     5.11.0–5.11.10), hidden kallsyms, or -ENOMEM during cleanup, it never
+//     reaps that temporary directory on BPF_ENABLE_STATS alone and leaves at
+//     most one tiny mapless 2-insn rebuild no-op directory pinned safely for
+//     the next agent's reaper or node reboot.
 //  3. NEVER removes or detaches an anchor's last link on ANY kernel. Anchors
 //     (mapless idle no-op fentry; at least one 4 KiB bpf_prog page per
 //     anchored function on every kernel plus bpf_prog_aux, JIT image, and
 //     trampoline image — sub-page bpf_prog_pack trampoline slot on x86 6.8+ /
 //     arm64 6.9+, or a 4 KiB trampoline page on x86 5.10–6.7 / arm64
 //     5.10–6.8) are released only by node reboot, preventing Linux 6.0+
-//     last-link -ENOMEM ftrace_ops UAF and 5.10.0–5.10.27 / 5.11
+//     last-link -ENOMEM ftrace_ops UAF and 5.10.0–5.10.27 / 5.11.0–5.11.10
 //     static-trampoline page free.
 func CleanupAnchors(ctx context.Context, logger *zap.Logger, hostBPFFS string) error {
 	if logger == nil {
@@ -457,9 +459,10 @@ func reapDeadDirsIdle(ctx context.Context, logger *zap.Logger, root string, wait
 	// NEVER reap tmpOwner.dir on BPF_ENABLE_STATS run_cnt alone: if the
 	// rebuild no-op's own link close hit -ENOMEM, it stays in the current
 	// trampoline image and a flat run_cnt on an idle function would unpin
-	// live code and panic the node. On Linux 5.10..5.11, hidden kallsyms, or
-	// -ENOMEM during cleanup, tmpOwner.dir (a tiny mapless 2-insn no-op) stays
-	// pinned safely for the next agent's reaper or node reboot.
+	// live code and panic the node. On static-trampoline kernels
+	// (5.10.0–5.10.27, 5.11.0–5.11.10), hidden kallsyms, or -ENOMEM during
+	// cleanup, tmpOwner.dir (a tiny mapless 2-insn no-op) stays pinned safely
+	// for the next agent's reaper or node reboot.
 	if len(noopPreCloseRefs) == 0 {
 		return
 	}

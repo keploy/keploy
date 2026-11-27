@@ -176,11 +176,11 @@ var ErrPinFailed = errors.New("bpf trampoline grace pin failed")
 var ErrUnresolvedTarget = errors.New("bpf tracing program target function could not be resolved")
 
 // ErrAnchorUnpinned is returned by PinBeforeAttach on static-trampoline
-// kernels (Linux 5.10.0–5.10.27 and 5.11, lacking struct bpf_tramp_image) when
-// the host-bpffs trampoline anchor link for the target function could not be
-// pinned. Failing closed prevents attaching fexit programs onto an unpinned
-// anchor whose clean exit-time close would free the static trampoline page
-// while tasks are sleeping in the hooked function.
+// kernels (Linux 5.10.0–5.10.27 and 5.11.0–5.11.10, lacking struct
+// bpf_tramp_image) when the host-bpffs trampoline anchor link for the target
+// function could not be pinned. Failing closed prevents attaching fexit
+// programs onto an unpinned anchor whose clean exit-time close would free the
+// static trampoline page while tasks are sleeping in the hooked function.
 var ErrAnchorUnpinned = errors.New("bpf trampoline anchor is not pinned on host bpffs")
 
 // MetricsObserver receives updated host-bpffs grace counts, anchor link count,
@@ -925,6 +925,7 @@ type graceOwner struct {
 	pinPaths           map[*ebpf.Program]string
 	anchorMu           sync.Mutex
 	anchoredFuncs      map[string]bool
+	warnedUnpinned     map[string]bool
 	unpinnedAnchors    []pendingAnchor
 	onBeforeAnchorPin  func()
 	logger             *zap.Logger
@@ -1035,13 +1036,15 @@ func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) e
 		// Pin a no-op anchor link on this function BEFORE the first real
 		// attach (skip for the reaper's own rebuild no-op so we don't recurse).
 		g.ensureAnchor(resolvedFunc, g.logger)
-		// On static-trampoline kernels (5.10.0–5.10.27 and 5.11, lacking
-		// struct bpf_tramp_image), a clean exit-time close of an unpinned
-		// anchor frees tr->image after synchronize_rcu_tasks(), which does not
-		// wait for tasks sleeping inside an fexit-hooked function. Fail closed
-		// until a retry pins the anchor; an fentry-only anchor image has no
-		// sleepers on the stack, so its exit close is safe.
-		if g.rootIsBPFFS && !g.dynamicTrampImage() && !g.isAnchorPinned(resolvedFunc) {
+		// On static-trampoline kernels (5.10.0–5.10.27 and 5.11.0–5.11.10,
+		// lacking struct bpf_tramp_image), a clean exit-time close of an
+		// unpinned anchor frees tr->image after synchronize_rcu_tasks(), which
+		// does not wait for tasks sleeping inside an fexit-hooked function.
+		// Fail closed unconditionally whenever the anchor is not pinned, for
+		// any reason; an fentry-only anchor image has no sleepers on the stack,
+		// so its exit close is safe.
+		if !g.dynamicTrampImage() && !g.isAnchorPinned(resolvedFunc) {
+			g.warnAnchorUnpinnedOnce(resolvedFunc)
 			return fmt.Errorf("%w: refusing to attach tracing program %s (%s) on static-trampoline kernel until anchor for %s is pinned on host bpffs", ErrAnchorUnpinned, name, object, resolvedFunc)
 		}
 	}
@@ -1095,6 +1098,24 @@ func (g *graceOwner) dynamicTrampImage() bool {
 		return g.reaper.dynamicTrampImageFn()
 	}
 	return kernelHasDynamicTrampImage()
+}
+
+func (g *graceOwner) warnAnchorUnpinnedOnce(funcName string) {
+	if g == nil || g.logger == nil || funcName == "" {
+		return
+	}
+	g.anchorMu.Lock()
+	if g.warnedUnpinned == nil {
+		g.warnedUnpinned = make(map[string]bool)
+	}
+	if g.warnedUnpinned[funcName] {
+		g.anchorMu.Unlock()
+		return
+	}
+	g.warnedUnpinned[funcName] = true
+	g.anchorMu.Unlock()
+	g.logger.Warn("bpf-safety: refusing tracing attach on static-trampoline kernel because trampoline anchor is not pinned on host bpffs",
+		zap.String("function", funcName))
 }
 
 func (g *graceOwner) captureKallsymsSnapshot() []trampImageRef {
@@ -1230,9 +1251,16 @@ func openGraceOwnerInRoot(root string, logger *zap.Logger) (*graceOwner, error) 
 		}
 	}
 
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(root, &stfs); err != nil {
+		_ = unix.Close(fd)
+		_ = os.RemoveAll(finalDir)
+		return nil, fmt.Errorf("statfs grace root %s: %w", root, err)
+	}
+
 	owner := &graceOwner{
 		root:        root,
-		rootIsBPFFS: autoStateStore.isBPFFS(autoStateStore{}, root),
+		rootIsBPFFS: stfs.Type == unix.BPF_FS_MAGIC,
 		dir:         finalDir,
 		self:        self,
 		lockFD:      fd,

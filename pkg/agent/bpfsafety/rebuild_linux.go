@@ -109,12 +109,13 @@ var (
 )
 
 // kernelHasDynamicTrampImage reports whether this kernel allocates a distinct
-// `struct bpf_tramp_image` per trampoline update (Linux 5.12+, or any distro
-// kernel carrying that commit). On Linux 5.10..5.11, a single static trampoline
-// page is rewritten in place at the same /proc/kallsyms address for the life of
-// the trampoline while any anchor or neighbor link remains attached, so
-// kallsyms address changes cannot distinguish old vs rebuilt trampolines there;
-// the reaper instead forces a synchronous rebuild + BPF_ENABLE_STATS run_cnt
+// `struct bpf_tramp_image` per trampoline update (Linux 5.10.28+, 5.11.11+,
+// 5.12+, or any distro kernel carrying that commit). On static-trampoline
+// kernels (5.10.0–5.10.27 and 5.11.0–5.11.10), a single static trampoline page
+// is rewritten in place at the same /proc/kallsyms address for the life of the
+// trampoline while any anchor or neighbor link remains attached, so kallsyms
+// address changes cannot distinguish old vs rebuilt trampolines there; the
+// reaper instead forces a synchronous rebuild + BPF_ENABLE_STATS run_cnt
 // verification on those kernels.
 func kernelHasDynamicTrampImage() bool {
 	dynamicTrampImageOnce.Do(func() {

@@ -2230,17 +2230,16 @@ func TestOnKernelShutdownRetainsUnpinnedAnchor(t *testing.T) {
 }
 
 // TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives
-// proves on static-trampoline kernels (5.10.0–5.10.27 and 5.11, where
-// !kernelHasDynamicTrampImage()) that when ensureAnchor leaves an anchor
-// unpinned under memory pressure:
-//  1. AttachTracing / PinBeforeAttach FAILS CLOSED with ErrAnchorUnpinned
-//     (refusing to attach fexit onto an unpinned anchor and leaking 0 pins).
-//  2. Closing that unpinned fentry-only anchor cleanly (simulating process
-//     exit) while a task sleeps in unix_stream_recvmsg does NOT panic the node
-//     (unlike an fexit trampoline image, which frees tr->image under the sleeper
-//     and panics 5.10.23).
-//  3. Once memory pressure clears and a retry pins the anchor onto host bpffs,
-//     AttachTracing for fexit/unix_stream_recvmsg succeeds cleanly.
+// proves both halves of the unpinned-anchor exit-close policy across all 4
+// debug kernels (5.10, 5.15, 5.19, 6.12):
+//   - On static-trampoline kernels (Linux 5.10.0–5.10.27 and 5.11.0–5.11.10,
+//     where !kernelHasDynamicTrampImage()): AttachTracing FAILS CLOSED with
+//     ErrAnchorUnpinned (0 leaked pins), closing the unpinned fentry-only
+//     anchor while a task sleeps in unix_stream_recvmsg causes zero panic, and
+//     once pressure clears AttachTracing pins the anchor and captures cleanly.
+//   - On dynamic-trampoline kernels (5.10.28+, 5.11.11+, 5.12+): AttachTracing
+//     proceeds while the anchor is unpinned, a sleeper under fexit survives
+//     fexit detach + clean unpinned anchor exit-close with zero panic.
 func TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root/CAP_BPF")
@@ -2251,15 +2250,13 @@ func TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives(
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Fatal(err)
 	}
-	if kernelHasDynamicTrampImage() {
-		t.Skip("static-trampoline unpinned-anchor fexit refusal applies only to Linux 5.10.0..5.10.27 / 5.11")
-	}
 	var stfs unix.Statfs_t
 	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
 		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
 	}
 	resetStateForTest(t)
 
+	staticKernel := !kernelHasDynamicTrampImage()
 	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-staticunp-"+randomNonce())
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
@@ -2283,11 +2280,6 @@ func TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives(
 		_ = unix.Close(fds[1])
 	}()
 
-	// Step 1 & 2: Load fexit/unix_stream_recvmsg and call AttachTracing while
-	// onBeforeAnchorPin arms failslab right before ensureAnchor's l.Pin.
-	// ensureAnchor attaches the fentry-only anchor and retains it unpinned;
-	// pinProgram MUST then fail closed with ErrAnchorUnpinned (refusing to
-	// attach fexit onto an unpinned anchor and leaking 0 pins).
 	hitMap, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -2308,7 +2300,7 @@ func TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives(
 	_ = os.WriteFile(filepath.Join(failslabDir, "ignore-gfp-wait"), []byte("N"), 0o644)
 	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("100"), 0o644)
 	_ = os.WriteFile(filepath.Join(failslabDir, "interval"), []byte("1"), 0o644)
-	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("20"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("1"), 0o644)
 	_ = os.WriteFile(filepath.Join(failslabDir, "space"), []byte("0"), 0o644)
 	hookRan := false
 	owner.onBeforeAnchorPin = func() {
@@ -2327,18 +2319,8 @@ func TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives(
 	if !hookRan {
 		t.Fatal("onBeforeAnchorPin hook did not run during AttachTracing")
 	}
-	if rem, perr := strconv.Atoi(strings.TrimSpace(string(remRaw))); perr == nil && rem >= 20 {
+	if rem, perr := strconv.Atoi(strings.TrimSpace(string(remRaw))); perr == nil && rem >= 1 {
 		t.Fatalf("failslab did not inject -ENOMEM during anchor pin (times remained %d)", rem)
-	}
-	if fexitLink != nil {
-		_ = fexitLink.Close()
-		t.Fatalf("AttachTracing(fexit/%s) unexpectedly succeeded while anchor was unpinned on static-trampoline kernel", fn)
-	}
-	if !errors.Is(attachErr, ErrAnchorUnpinned) {
-		t.Fatalf("AttachTracing(fexit/%s) err = %v, want ErrAnchorUnpinned", fn, attachErr)
-	}
-	if got := countPinnedProgs(owner.dir); got != 0 {
-		t.Fatalf("expected 0 leaked pins after ErrAnchorUnpinned, got %d", got)
 	}
 	n, id := pendingAnchorState(owner)
 	if n != 1 || id == 0 || !linkIDAlive(id) {
@@ -2348,10 +2330,26 @@ func TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives(
 		t.Fatalf("expected isAnchorPinned(%s)=false while link is unpinned", fn)
 	}
 
-	// Step 3: Put a thread to sleep in unix_stream_recvmsg, cleanly close the
-	// unpinned fentry-only anchor (simulating process exit), then wake the
-	// sleeper. Because fexit was refused, the fentry-only anchor image has no
-	// return address on the sleeper's stack and closes with zero panic.
+	if staticKernel {
+		if fexitLink != nil {
+			_ = fexitLink.Close()
+			t.Fatalf("static-trampoline kernel: AttachTracing(fexit/%s) unexpectedly succeeded while anchor was unpinned", fn)
+		}
+		if !errors.Is(attachErr, ErrAnchorUnpinned) {
+			t.Fatalf("static-trampoline kernel: AttachTracing(fexit/%s) err = %v, want ErrAnchorUnpinned", fn, attachErr)
+		}
+		if got := countPinnedProgs(owner.dir); got != 0 {
+			t.Fatalf("static-trampoline kernel: expected 0 leaked pins after ErrAnchorUnpinned, got %d", got)
+		}
+	} else {
+		if attachErr != nil || fexitLink == nil {
+			t.Fatalf("dynamic-trampoline kernel: AttachTracing(fexit/%s) must proceed while anchor is unpinned, got link=%v err=%v", fn, fexitLink, attachErr)
+		}
+	}
+
+	// Put a thread to sleep in unix_stream_recvmsg, detach fexit (if dynamic),
+	// cleanly close the unpinned anchor (simulating process exit), then wake
+	// the sleeper and verify zero panic.
 	done := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread()
@@ -2361,6 +2359,11 @@ func TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives(
 		done <- rerr
 	}()
 	time.Sleep(500 * time.Millisecond)
+
+	if fexitLink != nil {
+		_ = fexitLink.Close()
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	owner.anchorMu.Lock()
 	var unpinnedLink link.Link
@@ -2384,40 +2387,327 @@ func TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives(
 			t.Fatalf("sleeper read err = %v", rerr)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("sleeper did not wake after clean unpinned fentry-anchor close")
+		t.Fatal("sleeper did not wake after clean unpinned anchor close")
 	}
 
-	// Step 4: Now that memory pressure cleared, AttachTracing pins the anchor
-	// cleanly and attaches fexit/unix_stream_recvmsg with zero panic.
-	l2, err := AttachTracing(p, "r7_static", fn, "p")
-	if err != nil {
-		t.Fatalf("AttachTracing(fexit/%s) after pressure cleared: %v", fn, err)
-	}
-	if !owner.isAnchorPinned(fn) || CountAnchorLinks(root) != 1 {
+	if staticKernel {
+		// Now that memory pressure cleared, AttachTracing pins the anchor
+		// cleanly and attaches fexit/unix_stream_recvmsg with zero panic.
+		l2, err := AttachTracing(p, "r7_static", fn, "p")
+		if err != nil {
+			t.Fatalf("AttachTracing(fexit/%s) after pressure cleared: %v", fn, err)
+		}
+		if !owner.isAnchorPinned(fn) || CountAnchorLinks(root) != 1 {
+			_ = l2.Close()
+			t.Fatalf("expected pinned anchor after recovery (pinned=%v anchorLinks=%d)", owner.isAnchorPinned(fn), CountAnchorLinks(root))
+		}
+		done2 := make(chan error, 1)
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			buf := make([]byte, 8)
+			_, rerr := unix.Read(fds[1], buf)
+			done2 <- rerr
+		}()
+		time.Sleep(500 * time.Millisecond)
 		_ = l2.Close()
-		t.Fatalf("expected pinned anchor after recovery (pinned=%v anchorLinks=%d)", owner.isAnchorPinned(fn), CountAnchorLinks(root))
+		time.Sleep(500 * time.Millisecond)
+		if _, err := unix.Write(fds[0], []byte("y")); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case rerr := <-done2:
+			if rerr != nil {
+				t.Fatalf("second sleeper read err = %v", rerr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("second sleeper did not wake after fexit detach with pinned anchor")
+		}
 	}
-	done2 := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		buf := make([]byte, 8)
-		_, rerr := unix.Read(fds[1], buf)
-		done2 <- rerr
-	}()
-	time.Sleep(500 * time.Millisecond)
-	_ = l2.Close()
-	time.Sleep(500 * time.Millisecond)
-	if _, err := unix.Write(fds[0], []byte("y")); err != nil {
+}
+
+func blockAnchorsDirForTest(t *testing.T, root string) (unblock func()) {
+	t.Helper()
+	ad := filepath.Join(root, AnchorsSubdir)
+	bak := ad + "-blockbak"
+	if err := os.Rename(ad, bak); err != nil {
+		t.Fatalf("move anchors dir aside: %v", err)
+	}
+	m, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 4, MaxEntries: 1})
+	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case rerr := <-done2:
-		if rerr != nil {
-			t.Fatalf("second sleeper read err = %v", rerr)
+	if err := m.Pin(ad); err != nil {
+		_ = m.Close()
+		t.Fatalf("pin blocker map at %s: %v", ad, err)
+	}
+	_ = m.Close()
+	return func() {
+		if err := os.Remove(ad); err != nil {
+			t.Fatalf("unpin blocker map: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("second sleeper did not wake after fexit detach with pinned anchor")
+		if err := os.Rename(bak, ad); err != nil {
+			t.Fatalf("restore anchors dir: %v", err)
+		}
+	}
+}
+
+func pinnedAnchorLinkID(root, fn string) (link.ID, error) {
+	l, err := link.LoadPinnedLink(filepath.Join(root, AnchorsSubdir, sanitizeToken(fn)+anchorLinkSuffix), nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = l.Close() }()
+	info, err := l.Info()
+	if err != nil {
+		return 0, err
+	}
+	return info.ID, nil
+}
+
+// TestOnKernelPersistentAnchorPinFailure proves across all 4 kernels (5.10,
+// 5.15, 5.19, 6.12) that when anchor pinning fails persistently across 6
+// reaper rounds and 6 AttachTracing retries (ENOTDIR via blocker map):
+//   - On static-trampoline kernels (5.10.0–5.10.27, 5.11.0–5.11.10): EVERY
+//     attempt returns ErrAnchorUnpinned with 0 leaked prog pins and keeps the
+//     single pending anchor FD (killing M42 and M42b).
+//   - On dynamic-trampoline kernels (5.10.28+, 5.11.11+, 5.12+): EVERY attempt
+//     attaches cleanly while the anchor is unpinned (killing M44).
+//   - Once unblocked, the next AttachTracing pins that exact SAME anchor link
+//     ID (no second anchor) and the attached fexit captures traffic cleanly.
+func TestOnKernelPersistentAnchorPinFailure(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	staticKernel := !kernelHasDynamicTrampImage()
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-persist-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(owner.lockFD) }()
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	// Fresh function unused by any other test in this boot.
+	const fn = "unix_dgram_recvmsg"
+	hitMap, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hitMap.Close() }()
+	p := makeCountingFexitProg(t, "persist_fexit", fn, hitMap)
+	defer func() { _ = p.Close() }()
+
+	var unblock func()
+	owner.onBeforeAnchorPin = func() { unblock = blockAnchorsDirForTest(t, root) }
+	l0, err0 := AttachTracing(p, "persist_test", fn, "p")
+	owner.onBeforeAnchorPin = nil
+	if unblock == nil {
+		t.Fatal("onBeforeAnchorPin seam did not run")
+	}
+	unblocked := false
+	defer func() {
+		if !unblocked {
+			unblock()
+		}
+	}()
+
+	n0, id0 := pendingAnchorState(owner)
+	if n0 != 1 || id0 == 0 || !linkIDAlive(id0) {
+		t.Fatalf("blocked pin did not leave 1 live pending anchor (pending=%d id=%d alive=%v)", n0, id0, linkIDAlive(id0))
+	}
+	attempts := []error{err0}
+	if l0 != nil {
+		_ = l0.Close()
+	}
+
+	for i := 1; i <= 6; i++ {
+		owner.reaper.round()
+		l, aerr := AttachTracing(p, "persist_test", fn, "p")
+		if l != nil {
+			_ = l.Close()
+		}
+		attempts = append(attempts, aerr)
+		n, id := pendingAnchorState(owner)
+		if n != 1 || id != id0 {
+			t.Fatalf("attempt %d: anchor state changed under persistent pin failure (pending=%d id=%d, want 1/%d)", i, n, id, id0)
+		}
+	}
+	for i, aerr := range attempts {
+		if staticKernel && !errors.Is(aerr, ErrAnchorUnpinned) {
+			t.Fatalf("static kernel: attempt %d attached or returned wrong err while anchor unpinned: %v", i, aerr)
+		}
+		if !staticKernel && aerr != nil {
+			t.Fatalf("dynamic kernel: attempt %d refused while anchor unpinned: %v", i, aerr)
+		}
+	}
+	if staticKernel && countPinnedProgs(owner.dir) != 0 {
+		t.Fatalf("static kernel: %d program pins leaked by refused attaches", countPinnedProgs(owner.dir))
+	}
+
+	unblock()
+	unblocked = true
+	l, err := AttachTracing(p, "persist_test", fn, "p")
+	if err != nil {
+		t.Fatalf("AttachTracing after unblocking anchor pin: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+	nAfter, _ := pendingAnchorState(owner)
+	pid, perr := pinnedAnchorLinkID(root, fn)
+	if perr != nil || nAfter != 0 || !owner.isAnchorPinned(fn) || CountAnchorLinks(root) != 1 || pid != id0 {
+		t.Fatalf("recovery did not pin the existing anchor FD (pending=%d pinned=%v anchorLinks=%d pinnedID=%d err=%v want %d)",
+			nAfter, owner.isAnchorPinned(fn), CountAnchorLinks(root), pid, perr, id0)
+	}
+
+	var before, after uint64
+	_ = hitMap.Lookup(uint32(0), &before)
+	sendUnixDgramsHelper(t, 5)
+	_ = hitMap.Lookup(uint32(0), &after)
+	if after <= before {
+		t.Fatalf("fexit/%s attached after recovery did not capture (hits %d -> %d)", fn, before, after)
+	}
+}
+
+// TestOnKernelRootStatfsFaultNeverFailsOpen proves across all 4 debug kernels
+// that:
+//  1. Injecting slab faults via /proc/self/task/<tid>/fail-nth across
+//     openGraceOwnerInRoot NEVER yields an owner with err==nil and
+//     rootIsBPFFS==false on a real bpffs root (openGraceOwnerInRoot fails
+//     closed and cleans up on unix.Statfs error).
+//  2. On static-trampoline kernels, even if rootIsBPFFS were false, the
+//     static-trampoline guard in pinProgram still refuses with
+//     ErrAnchorUnpinned and leaks 0 pins.
+func TestOnKernelRootStatfsFaultNeverFailsOpen(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	failslabDir := "/sys/kernel/debug/failslab"
+	if _, err := os.Stat(failslabDir); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y: %v", err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-statfs-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, kv := range [][2]string{{"task-filter", "N"}, {"ignore-gfp-wait", "N"}, {"probability", "0"}, {"times", "-1"}, {"verbose", "0"}} {
+		_ = os.WriteFile(filepath.Join(failslabDir, kv[0]), []byte(kv[1]), 0o644)
+	}
+	defer func() {
+		_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+		_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+	}()
+
+	type sweepRes struct {
+		failOpenNth int
+		errCount    int
+		skipReason  string
+	}
+	ch := make(chan sweepRes, 1)
+	go func() {
+		runtime.LockOSThread()
+		// Intentionally do not unlock so any residual fail-nth dies with this thread.
+		var r sweepRes
+		nfd, err := unix.Open(fmt.Sprintf("/proc/self/task/%d/fail-nth", unix.Gettid()), unix.O_RDWR, 0)
+		if err != nil {
+			r.skipReason = fmt.Sprintf("fail-nth unavailable: %v", err)
+			ch <- r
+			return
+		}
+		defer func() { _ = unix.Close(nfd) }()
+		arm := func(n int) { _, _ = unix.Pwrite(nfd, []byte(strconv.Itoa(n)), 0) }
+		left := func() string {
+			b := make([]byte, 16)
+			k, _ := unix.Pread(nfd, b, 0)
+			if k < 0 {
+				k = 0
+			}
+			return strings.TrimSpace(string(b[:k]))
+		}
+		for n := 1; n <= 250; n++ {
+			arm(n)
+			o, oerr := openGraceOwnerInRoot(root, zap.NewNop())
+			lf := left()
+			if lf != "0" {
+				arm(0)
+			}
+			if oerr != nil {
+				r.errCount++
+				continue
+			}
+			isBPF := o.rootIsBPFFS
+			_ = unix.Close(o.lockFD)
+			_ = os.RemoveAll(o.dir)
+			if !isBPF {
+				r.failOpenNth = n
+				break
+			}
+			if lf != "0" {
+				break
+			}
+		}
+		ch <- r
+	}()
+	res := <-ch
+	if res.skipReason != "" {
+		t.Skip(res.skipReason)
+	}
+	if res.failOpenNth != 0 {
+		t.Fatalf("openGraceOwnerInRoot with fail-nth=%d returned err=nil with rootIsBPFFS=false on a real bpffs root (silent fail-open!)", res.failOpenNth)
+	}
+	if res.errCount == 0 {
+		t.Fatal("fail-nth sweep injected 0 errors into openGraceOwnerInRoot")
+	}
+
+	// Belt-and-suspenders: on static-trampoline kernels, even if rootIsBPFFS
+	// were false, pinProgram MUST still refuse unanchored tracing attaches.
+	if !kernelHasDynamicTrampImage() {
+		owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = unix.Close(owner.lockFD) }()
+		owner.rootIsBPFFS = false
+		stateMu.Lock()
+		activeOwner = owner
+		stateMu.Unlock()
+
+		p := makeCountingFexitProg(t, "statfs_guard", "bpf_fentry_test5", nil)
+		defer func() { _ = p.Close() }()
+		l, aerr := AttachTracing(p, "statfs_guard", "bpf_fentry_test5", "p")
+		if l != nil {
+			_ = l.Close()
+			t.Fatal("static-trampoline kernel attached unanchored fexit when rootIsBPFFS=false")
+		}
+		if !errors.Is(aerr, ErrAnchorUnpinned) {
+			t.Fatalf("AttachTracing with rootIsBPFFS=false err = %v, want ErrAnchorUnpinned", aerr)
+		}
+		if got := countPinnedProgs(owner.dir); got != 0 {
+			t.Fatalf("expected 0 leaked pins after ErrAnchorUnpinned, got %d", got)
+		}
 	}
 }
 
