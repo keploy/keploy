@@ -266,9 +266,20 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 				ast.Inspect(fd.Body, func(n ast.Node) bool {
 					switch x := n.(type) {
 					case *ast.CallExpr:
-						if (isIdentOrSel(x.Fun, "Remove") || isIdentOrSel(x.Fun, "RemoveAll") || isIdentOrSel(x.Fun, "Unlink")) && len(x.Args) > 0 {
-							if id, ok := x.Args[0].(*ast.Ident); ok && id.Name == "linkPath" {
-								out = append(out, fmt.Sprintf("%s:%d (ensureAnchor): must never remove linkPath (could unlink live anchor on transient EMFILE/ENOMEM)", rel, fset.Position(x.Pos()).Line))
+						if isIdentOrSel(x.Fun, "Remove") || isIdentOrSel(x.Fun, "RemoveAll") || isIdentOrSel(x.Fun, "Unlink") {
+							// The only allowed removal in ensureAnchor is os.Remove(progPath)
+							// when attachPinnedAnchorNoop fails before any link exists. Any
+							// other Remove/RemoveAll/Unlink (whether linkPath, filepath.Join,
+							// or another path under anchorsDir) could unlink a live anchor on
+							// transient EMFILE/ENOMEM (kills M33 in all forms).
+							allowedProgCleanup := len(x.Args) == 1 && isIdentOrSel(x.Fun, "Remove")
+							if allowedProgCleanup {
+								if id, ok := x.Args[0].(*ast.Ident); !ok || id.Name != "progPath" {
+									allowedProgCleanup = false
+								}
+							}
+							if !allowedProgCleanup {
+								out = append(out, fmt.Sprintf("%s:%d (ensureAnchor): must never remove anchor paths other than progPath (could unlink live anchor on transient EMFILE/ENOMEM)", rel, fset.Position(x.Pos()).Line))
 							}
 						}
 					case *ast.DeferStmt:
@@ -485,6 +496,18 @@ func bad(bpfsafety any, name string) {
 			src: `package bpfsafety
 func (g *graceOwner) ensureAnchor(linkPath string) {
 	_ = os.Remove(linkPath)
+}`,
+		},
+		{
+			name: "M33_ensureAnchor_removes_joined_anchor_link",
+			rel:  "pkg/agent/bpfsafety/anchors_linux.go",
+			src: `package bpfsafety
+import (
+	"os"
+	"path/filepath"
+)
+func (g *graceOwner) ensureAnchor(anchorsDir, tok string) {
+	_ = os.Remove(filepath.Join(anchorsDir, tok+anchorLinkSuffix))
 }`,
 		},
 		{

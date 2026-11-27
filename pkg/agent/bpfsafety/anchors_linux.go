@@ -289,13 +289,20 @@ func CountAnchorLinks(root string) int {
 // Safety invariants (identical on every Linux kernel):
 //  1. Refuses to run if ANY live grace-* / grace2-* directory currently holds
 //     flock(LOCK_EX) (an active Keploy agent is running on the node).
-//  2. Safely reaps all dead grace directories using the zero-timer
-//     image-liveness / BPF_ENABLE_STATS reaper (leaving 0 leftover grace dirs,
-//     including on Linux 5.10–5.11 and hidden-kallsyms nodes).
+//  2. Safely reaps dead map-bearing grace directories using the zero-timer
+//     image-liveness / BPF_ENABLE_STATS reaper. On Linux 5.12+ with visible
+//     kallsyms, it also reaps its temporary rebuild no-op directory once
+//     /proc/kallsyms confirms the rebuild image is freed; on Linux 5.10–5.11,
+//     hidden kallsyms, or -ENOMEM during cleanup, it never reaps that
+//     temporary directory on BPF_ENABLE_STATS alone and leaves at most one
+//     tiny mapless 2-insn rebuild no-op directory pinned safely for the next
+//     agent's reaper or node reboot.
 //  3. NEVER removes or detaches an anchor's last link on ANY kernel. Anchors
-//     (~4 KiB total, idle no-op fentry) are released only by node reboot,
-//     preventing Linux 6.0+ last-link -ENOMEM ftrace_ops UAF and 5.10–5.11
-//     static-trampoline page free.
+//     (mapless idle no-op fentry; ~64–256 B bpf_prog_pack slot per anchored
+//     function on Linux 6.7+, or one 4 KiB page per anchored function on Linux
+//     5.10–6.6) are released only by node reboot, preventing Linux 6.0+
+//     last-link -ENOMEM ftrace_ops UAF and 5.10–5.11 static-trampoline page
+//     free.
 func CleanupAnchors(ctx context.Context, logger *zap.Logger, hostBPFFS string) error {
 	if logger == nil {
 		logger = zap.NewNop()

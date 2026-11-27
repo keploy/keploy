@@ -1894,6 +1894,348 @@ func TestOnKernelAnchorPinFailNeverClosesLastLink(t *testing.T) {
 	}
 }
 
+func pinFailAnchorForTest(t *testing.T, owner *graceOwner, fn string) {
+	t.Helper()
+	failslabDir := "/sys/kernel/debug/failslab"
+	if _, err := os.Stat(failslabDir); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y (%s missing: %v)", failslabDir, err)
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	tidFailPath := fmt.Sprintf("/proc/self/task/%d/make-it-fail", unix.Gettid())
+	failFD, err := unix.Open(tidFailPath, unix.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", tidFailPath, err)
+	}
+	_ = os.WriteFile(filepath.Join(failslabDir, "task-filter"), []byte("Y"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "ignore-gfp-wait"), []byte("N"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("100"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "interval"), []byte("1"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("20"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "space"), []byte("0"), 0o644)
+
+	hookRan := false
+	owner.onBeforeAnchorPin = func() {
+		hookRan = true
+		_, _ = unix.Pwrite(failFD, []byte("1\n"), 0)
+	}
+	owner.ensureAnchor(fn, zap.NewNop())
+	_, _ = unix.Pwrite(failFD, []byte("0\n"), 0)
+	remRaw, _ := os.ReadFile(filepath.Join(failslabDir, "times"))
+	_ = unix.Close(failFD)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+	owner.onBeforeAnchorPin = nil
+
+	if !hookRan {
+		t.Fatal("onBeforeAnchorPin hook did not run")
+	}
+	if rem, perr := strconv.Atoi(strings.TrimSpace(string(remRaw))); perr == nil && rem >= 20 {
+		t.Fatalf("failslab did not inject -ENOMEM during anchor link pin (times remained %d)", rem)
+	}
+}
+
+func pendingAnchorState(owner *graceOwner) (int, link.ID) {
+	owner.anchorMu.Lock()
+	defer owner.anchorMu.Unlock()
+	var id link.ID
+	for _, p := range owner.unpinnedAnchors {
+		if p.lnk == nil {
+			continue
+		}
+		if info, err := p.lnk.Info(); err == nil {
+			id = info.ID
+		}
+	}
+	return len(owner.unpinnedAnchors), id
+}
+
+func linkIDAlive(id link.ID) bool {
+	if id == 0 {
+		return false
+	}
+	l, err := link.NewFromID(id)
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+func sendUnixStreamHelper(t *testing.T, n int) {
+	t.Helper()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair stream: %v", err)
+	}
+	defer func() {
+		_ = unix.Close(fds[0])
+		_ = unix.Close(fds[1])
+	}()
+	buf := make([]byte, 8)
+	for i := 0; i < n; i++ {
+		if _, err := unix.Write(fds[0], []byte("x")); err != nil {
+			t.Fatalf("stream write: %v", err)
+		}
+		if _, err := unix.Read(fds[1], buf); err != nil {
+			t.Fatalf("stream read: %v", err)
+		}
+	}
+}
+
+func sendUnixSeqpacketHelper(t *testing.T, n int) {
+	t.Helper()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET, 0)
+	if err != nil {
+		t.Fatalf("socketpair seqpacket: %v", err)
+	}
+	defer func() {
+		_ = unix.Close(fds[0])
+		_ = unix.Close(fds[1])
+	}()
+	buf := make([]byte, 8)
+	for i := 0; i < n; i++ {
+		if err := unix.Send(fds[0], []byte("x"), 0); err != nil {
+			t.Fatalf("seqpacket send: %v", err)
+		}
+		if _, _, err := unix.Recvfrom(fds[1], buf, 0); err != nil {
+			t.Fatalf("seqpacket recv: %v", err)
+		}
+	}
+}
+
+// TestOnKernelAnchorPinRetryFailKeepsLink proves that when ensureAnchor's
+// initial l.Pin fails under memory pressure AND a subsequent reaper retry ALSO
+// fails under failslab, retryUnpinnedAnchors keeps the live link FD open
+// (never closing the function's only link under pressure, which would panic
+// 5.10 and KASAN 6.12), traffic survives cleanly, and a later clean retry pins
+// the anchor onto host bpffs.
+func TestOnKernelAnchorPinRetryFailKeepsLink(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if _, err := os.Stat("/sys/kernel/debug/failslab"); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y: %v", err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-apretry-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(owner.lockFD) }()
+
+	// Use unix_stream_sendmsg (distinct from every other test in this boot so
+	// this anchor is the function's true ONLY link).
+	const fn = "unix_stream_sendmsg"
+	sendUnixStreamHelper(t, 10)
+	pinFailAnchorForTest(t, owner, fn)
+
+	n, id := pendingAnchorState(owner)
+	if n != 1 || id == 0 || !linkIDAlive(id) {
+		t.Fatalf("initial pin failure did not retain live anchor link (pending=%d id=%d alive=%v)", n, id, linkIDAlive(id))
+	}
+	if got := CountAnchorLinks(root); got != 0 {
+		t.Fatalf("expected 0 pinned anchors after initial pin failure, got %d", got)
+	}
+
+	// Keep failslab armed across the retry: retryUnpinnedAnchors MUST retain
+	// the live link FD rather than closing the function's only link.
+	injectFailslabClose(t, func() { owner.retryUnpinnedAnchors() })
+
+	n2, _ := pendingAnchorState(owner)
+	alive := linkIDAlive(id)
+	time.Sleep(1500 * time.Millisecond)
+	for i := 0; i < 10; i++ {
+		sendUnixStreamHelper(t, 100)
+		time.Sleep(50 * time.Millisecond)
+	}
+	if n2 != 1 || !alive {
+		t.Fatalf("failed retry dropped the anchor link (pending=%d alive=%v)", n2, alive)
+	}
+
+	// Once memory pressure clears, the next retry MUST pin the retained link.
+	owner.retryUnpinnedAnchors()
+	n3, _ := pendingAnchorState(owner)
+	if n3 != 0 || CountAnchorLinks(root) != 1 || !linkIDAlive(id) {
+		t.Fatalf("clean retry did not pin anchor link (pending=%d anchorLinks=%d alive=%v)", n3, CountAnchorLinks(root), linkIDAlive(id))
+	}
+}
+
+// TestOnKernelAnchorEMFILEKeepsLink proves that when an anchor is already
+// pinned on host bpffs and a second owner's ensureAnchor hits EMFILE in
+// LoadPinnedLink, ensureAnchor leaves linkPath untouched and the pinned link
+// stays alive.
+func TestOnKernelAnchorEMFILEKeepsLink(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-aemfile-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const fn = "bpf_fentry_test4"
+	a.ensureAnchor(fn, zap.NewNop())
+	linkPath := filepath.Join(root, AnchorsSubdir, sanitizeToken(fn)+anchorLinkSuffix)
+	l0, err := link.LoadPinnedLink(linkPath, nil)
+	if err != nil {
+		_ = unix.Close(a.lockFD)
+		t.Fatalf("first anchor not pinned at %s: %v", linkPath, err)
+	}
+	info, err := l0.Info()
+	_ = l0.Close()
+	_ = unix.Close(a.lockFD)
+	if err != nil || info.ID == 0 {
+		t.Fatalf("read first anchor link info: id=%d err=%v", info.ID, err)
+	}
+	id := info.ID
+
+	b, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(b.lockFD) }()
+
+	var old unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &old); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unix.Close(probe)
+	// Leave room for unix.Open(anchorsDir) inside ensureAnchor so the very
+	// next FD allocation inside link.LoadPinnedLink fails with EMFILE.
+	lim := unix.Rlimit{Cur: uint64(probe + 1), Max: old.Max}
+	if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &lim); err != nil {
+		t.Fatal(err)
+	}
+	b.ensureAnchor(fn, zap.NewNop())
+	if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &old); err != nil {
+		t.Fatalf("restore RLIMIT_NOFILE: %v", err)
+	}
+
+	if _, serr := os.Stat(linkPath); serr != nil {
+		t.Fatalf("EMFILE on LoadPinnedLink removed live anchor pin %s: %v", linkPath, serr)
+	}
+	if !linkIDAlive(id) {
+		t.Fatalf("EMFILE on LoadPinnedLink caused live anchor link %d to vanish", id)
+	}
+
+	b.ensureAnchor(fn, zap.NewNop())
+	b.anchorMu.Lock()
+	marked := b.anchoredFuncs[fn]
+	b.anchorMu.Unlock()
+	if !marked || CountAnchorLinks(root) != 1 {
+		t.Fatalf("after restoring RLIMIT_NOFILE, expected anchored=true anchorLinks=1, got marked=%v anchorLinks=%d", marked, CountAnchorLinks(root))
+	}
+}
+
+// TestOnKernelShutdownRetainsUnpinnedAnchor proves that when ensureAnchor's
+// initial l.Pin fails AND GracefulShutdown's own retry also fails under
+// failslab, GracefulShutdown moves the unpinned anchor link into
+// retainedAnchorLinks so neither shutdown nor Go runtime GC closes the
+// function's only link before process exit.
+func TestOnKernelShutdownRetainsUnpinnedAnchor(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if _, err := os.Stat("/sys/kernel/debug/failslab"); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y: %v", err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-ashut-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	// Use unix_seqpacket_sendmsg (distinct from every other test in this boot
+	// so this anchor is the function's true ONLY link).
+	const fn = "unix_seqpacket_sendmsg"
+	sendUnixSeqpacketHelper(t, 10)
+	pinFailAnchorForTest(t, owner, fn)
+
+	n, id := pendingAnchorState(owner)
+	if n != 1 || id == 0 || !linkIDAlive(id) {
+		t.Fatalf("initial pin failure did not retain live anchor link (pending=%d id=%d alive=%v)", n, id, linkIDAlive(id))
+	}
+
+	// Keep failslab armed across GracefulShutdown so its retryUnpinnedAnchors
+	// also fails and the link must be retained in retainedAnchorLinks.
+	injectFailslabClose(t, func() { GracefulShutdown(context.Background(), zap.NewNop()) })
+
+	stateMu.Lock()
+	retained := len(retainedAnchorLinks)
+	var retainedLink link.Link
+	if retained > 0 {
+		retainedLink = retainedAnchorLinks[0]
+	}
+	stateMu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		runtime.GC()
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	alive := linkIDAlive(id)
+	time.Sleep(1000 * time.Millisecond)
+	for i := 0; i < 10; i++ {
+		sendUnixSeqpacketHelper(t, 100)
+		time.Sleep(50 * time.Millisecond)
+	}
+	if retained != 1 || !alive {
+		t.Fatalf("unpinned anchor link was not retained across shutdown + GC (retained=%d alive=%v)", retained, alive)
+	}
+
+	// Pin the retained link cleanly now that retention across shutdown + GC is
+	// verified, so resetStateForTest's cleanup does not let a later test's GC
+	// drop the function's only link in the same VM boot.
+	if retainedLink != nil {
+		_ = retainedLink.Pin(filepath.Join(root, AnchorsSubdir, sanitizeToken(fn)+anchorLinkSuffix))
+	}
+}
+
 // TestOnKernelLegacyMixedDirUnresolvedProgDead reproduces a dead grace dir left
 // by an older agent (64-byte un-keyed target_funcs holding only
 // ["unix_dgram_sendmsg"]) mixing resolved prog A and unresolved/legacy-named
