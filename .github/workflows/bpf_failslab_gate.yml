@@ -9,6 +9,9 @@ on:
       - '.github/workflows/bpf_failslab_gate.yml'
   workflow_dispatch:
 
+env:
+  KEPLOY_INTERNAL: "1"
+
 jobs:
   failslab-4kernel-vm:
     name: failslab-vm (5.10, 5.15, 5.19+tls.ko, 6.12)
