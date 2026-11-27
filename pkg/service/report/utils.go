@@ -3,6 +3,7 @@ package report
 import (
 	"bufio"
 	"fmt"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -192,6 +193,59 @@ func applyCliColorsToDiff(diff string) string {
 	return sb.String()
 }
 
+// grpcStatusNames are the gRPC status codes' canonical names (grpc/grpc
+// doc/statuscodes.md), as a gRPC user reads them.
+var grpcStatusNames = []string{
+	"OK", "CANCELLED", "UNKNOWN", "INVALID_ARGUMENT", "DEADLINE_EXCEEDED", "NOT_FOUND",
+	"ALREADY_EXISTS", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "FAILED_PRECONDITION",
+	"ABORTED", "OUT_OF_RANGE", "UNIMPLEMENTED", "INTERNAL", "UNAVAILABLE", "DATA_LOSS",
+	"UNAUTHENTICATED",
+}
+
+// GrpcStatusText is a grpc-status as a report shows it: the code with its
+// name ("13 (INTERNAL)"), the bare code for one outside the defined set, and
+// "none or not a number" for the gRPC matcher's -1: no grpc-status it could
+// read (absent, or not a number).
+func GrpcStatusText(code int) string {
+	if code == -1 {
+		return "none or not a number"
+	}
+	if code < 0 {
+		return fmt.Sprintf("%d", code)
+	}
+	if code < len(grpcStatusNames) {
+		return fmt.Sprintf("%d (%s)", code, grpcStatusNames[code])
+	}
+	return fmt.Sprintf("%d", code)
+}
+
+// statusChangeShown says whether a test's status is shown as changed: it is
+// a difference (a status assertion failed, or the recorded and replayed
+// statuses differ).
+func statusChangeShown(test models.TestResult) bool {
+	return !test.Result.StatusCode.Normal
+}
+
+// statusTexts are a test's expected and actual status as reports show them:
+// what a failed status assertion asked for when it named no single status
+// (IntResult.ExpectedText), a gRPC status by code and name.
+func statusTexts(test models.TestResult) (expected, actual string) {
+	sc := test.Result.StatusCode
+	if test.Kind == models.GRPC_EXPORT {
+		expected, actual = GrpcStatusText(sc.Expected), GrpcStatusText(sc.Actual)
+	} else {
+		expected, actual = fmt.Sprint(sc.Expected), fmt.Sprint(sc.Actual)
+	}
+	if sc.ExpectedText != "" {
+		expected = sc.ExpectedText
+		// A gRPC status asked for by code reads as one recorded does.
+		if code, err := strconv.Atoi(sc.ExpectedText); err == nil && test.Kind == models.GRPC_EXPORT {
+			expected = GrpcStatusText(code)
+		}
+	}
+	return expected, actual
+}
+
 // GenerateStatusAndHeadersTableDiff builds a table-style diff for status code, headers,
 // trailer headers, and synthetic content-length when body differs and header is absent.
 func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
@@ -200,12 +254,18 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 
 	hasDiff := false
 
-	// Status code (only for HTTP tests as grpc status is part of headers)
-	if !test.Result.StatusCode.Normal && test.Kind == models.HTTP {
+	// Status code: an HTTP status, or a gRPC test's grpc-status (the gRPC
+	// matcher keeps it here, not in TrailerResult).
+	if statusChangeShown(test) && (test.Kind == models.HTTP || test.Kind == models.GRPC_EXPORT) {
 		hasDiff = true
-		sb.WriteString("Path: status_code\n")
-		sb.WriteString(fmt.Sprintf("  Expected: %d\n", test.Result.StatusCode.Expected))
-		sb.WriteString(fmt.Sprintf("  Actual: %d\n\n", test.Result.StatusCode.Actual))
+		path := "status_code"
+		if test.Kind == models.GRPC_EXPORT {
+			path = "trailer.grpc-status"
+		}
+		expected, actual := statusTexts(test)
+		sb.WriteString("Path: " + path + "\n")
+		sb.WriteString(fmt.Sprintf("  Expected: %s\n", expected))
+		sb.WriteString(fmt.Sprintf("  Actual: %s\n\n", actual))
 	}
 
 	// Headers

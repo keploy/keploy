@@ -1578,6 +1578,11 @@ type IntResult struct {
 	Normal   bool `json:"normal" bson:"normal" yaml:"normal"`
 	Expected int  `json:"expected" bson:"expected" yaml:"expected"`
 	Actual   int  `json:"actual" bson:"actual" yaml:"actual"`
+	// ExpectedText is what the test's failed status assertions asked for
+	// ("201", "one of 200, 201", "4xx", an unreadable value; several joined by
+	// "; "): a report shows it as the expected status. Expected is always the
+	// recorded status, which readers take it for.
+	ExpectedText string `json:"expected_text,omitempty" bson:"expected_text,omitempty" yaml:"expected_text,omitempty"`
 }
 
 type HeaderResult struct {

@@ -1136,7 +1136,17 @@ func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, tes
 		utils.LogError(ts.logger, err, "failed to decode the testcase")
 		return err
 	}
-	tc.Assertions = assertions
+	// The assertions given replace the case's, its noise among them when
+	// they name it: tc.Noise is what the encoders write noise from, so it is
+	// set from them too, or a noise given here would be dropped (none before)
+	// or ignored (some before).
+	// Noise is replaced only when the assertions given name it: an edit of
+	// the others keeps the case's noise.
+	tc.Assertions = map[models.AssertionType]interface{}{}
+	if _, names := assertions[models.NoiseAssertion]; names {
+		tc.Noise = map[string][]string{}
+	}
+	expandAssertionsJSON(tc, assertions)
 
 	// Re-encode in the same format we read.
 	if detected == yaml.FormatJSON {

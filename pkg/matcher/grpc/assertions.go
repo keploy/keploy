@@ -8,6 +8,7 @@ import (
 	"math"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -62,7 +63,6 @@ func AssertionMatch(tc *models.TestCase, actualResp *models.GrpcResp, logger *za
 	}
 
 	pass := true
-	statusPassed := false
 	statusFailed := false
 
 	expectedStatus, _ := resolveGrpcAssertionStatus(&tc.GrpcResp)
@@ -93,6 +93,9 @@ func AssertionMatch(tc *models.TestCase, actualResp *models.GrpcResp, logger *za
 		}},
 	}
 
+	// asked is what each failed status assertion asked for (IntResult.
+	// ExpectedText).
+	var asked []string
 	for assertionName, value := range tc.Assertions {
 		switch assertionName {
 
@@ -101,19 +104,19 @@ func AssertionMatch(tc *models.TestCase, actualResp *models.GrpcResp, logger *za
 			if err != nil {
 				pass = false
 				statusFailed = true
+				asked = append(asked, "an unreadable status_code assertion")
 				logUnreadableAssertion(logger, assertionName, value, "an integer gRPC status code")
 				continue
 			}
 			if !actualStatusOK || expected != actualStatus {
 				pass = false
 				statusFailed = true
+				asked = append(asked, strconv.Itoa(expected))
 				logger.Error("status_code assertion failed",
 					zap.Int("expected", expected),
 					zap.Int("actual", actualStatus),
 					zap.Bool("actual_status_present", actualStatusOK),
 				)
-			} else {
-				statusPassed = true
 			}
 
 		case models.StatusCodeIn:
@@ -121,6 +124,7 @@ func AssertionMatch(tc *models.TestCase, actualResp *models.GrpcResp, logger *za
 			if !ok || len(ints) == 0 {
 				pass = false
 				statusFailed = true
+				asked = append(asked, "an unreadable status_code_in assertion")
 				logUnreadableAssertion(logger, assertionName, value, "a list of integer gRPC status codes")
 				continue
 			}
@@ -136,13 +140,12 @@ func AssertionMatch(tc *models.TestCase, actualResp *models.GrpcResp, logger *za
 			if !found {
 				pass = false
 				statusFailed = true
+				asked = append(asked, "one of "+joinInts(ints))
 				logger.Error("status_code_in assertion failed",
 					zap.Ints("expected_codes", ints),
 					zap.Int("actual", actualStatus),
 					zap.Bool("actual_status_present", actualStatusOK),
 				)
-			} else {
-				statusPassed = true
 			}
 
 		case models.StatusCodeClass:
@@ -150,6 +153,7 @@ func AssertionMatch(tc *models.TestCase, actualResp *models.GrpcResp, logger *za
 			// at Error level rather than silently passing an unsupported rule.
 			pass = false
 			statusFailed = true
+			asked = append(asked, "a status_code_class, which a gRPC status does not have")
 			logger.Error("status_code_class assertion is not supported for gRPC test cases; use status_code or status_code_in instead",
 				zap.String("value_type", fmt.Sprintf("%T", value)),
 			)
@@ -292,9 +296,15 @@ func AssertionMatch(tc *models.TestCase, actualResp *models.GrpcResp, logger *za
 	if pass {
 		res.StatusCode.Normal = true
 		res.BodyResult[0].Normal = true
-	} else if statusPassed && !statusFailed {
-		res.StatusCode.Normal = true
+	} else {
+		// The status is a difference exactly when a status assertion failed:
+		// one that failed on a header alone did not judge the status, and
+		// reading it as changed shows a status "change" from 0 to 0.
+		res.StatusCode.Normal = !statusFailed
 	}
+	// What the failed status assertions asked for, in a fixed order whatever
+	// order the map ran them in; Expected stays the recorded status.
+	res.StatusCode.ExpectedText = joinAsked(asked)
 
 	return pass, res
 }
@@ -583,4 +593,20 @@ func stringKeyed(val interface{}) interface{} {
 	default:
 		return val
 	}
+}
+
+// joinAsked is what failed status assertions asked for, sorted (map order is
+// random) and joined: "" when none failed.
+func joinAsked(asked []string) string {
+	sort.Strings(asked)
+	return strings.Join(asked, "; ")
+}
+
+// joinInts is the codes as a report lists them: "200, 201".
+func joinInts(codes []int) string {
+	parts := make([]string, len(codes))
+	for i, c := range codes {
+		parts[i] = strconv.Itoa(c)
+	}
+	return strings.Join(parts, ", ")
 }

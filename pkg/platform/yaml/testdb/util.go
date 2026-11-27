@@ -46,6 +46,10 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 			}
 			if len(noise) > 0 {
 				a[models.NoiseAssertion] = noise
+			} else {
+				// tc.Noise is the case's noise: one cleared there is not
+				// brought back from the assertion it was read with.
+				delete(a, models.NoiseAssertion)
 			}
 			return a
 		}(),
@@ -132,8 +136,7 @@ func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *z
 // specMetadata builds the spec-level Metadata map carrying the fields that
 // persist through the spec rather than the doc: the user-facing description.
 // Returns nil when there is nothing to carry, so specs without metadata keep
-// encoding byte-identically to before. The gRPC encoders pass description="" —
-// gRPC specs have never persisted a description and that stays unchanged.
+// encoding byte-identically to before. HTTP and gRPC specs carry it alike.
 func specMetadata(description string) map[string]string {
 	if description == "" {
 		return nil
@@ -141,19 +144,27 @@ func specMetadata(description string) map[string]string {
 	return map[string]string{"description": description}
 }
 
-// buildGrpcSpec is the JSON-path counterpart of the gRPC branch in EncodeTestcase.
+// buildGrpcSpec is the gRPC spec both encoders (YAML and JSON) write. A test
+// case written again (normalize, an edit, a re-record) keeps every assertion
+// it carries -- status_code, json_contains, header checks -- and its
+// description, as an HTTP one does: only noise is rebuilt from tc.Noise.
 func buildGrpcSpec(tc models.TestCase) models.GrpcSpec {
 	noise := tc.Noise
 	return models.GrpcSpec{
-		Metadata: specMetadata(""),
+		Metadata: specMetadata(tc.Description),
 		GrpcReq:  tc.GrpcReq,
 		GrpcResp: tc.GrpcResp,
 		Created:  tc.Created,
 		AppPort:  tc.AppPort,
 		Assertions: func() map[models.AssertionType]interface{} {
 			a := map[models.AssertionType]interface{}{}
+			for k, v := range tc.Assertions {
+				a[k] = v
+			}
 			if len(noise) > 0 {
 				a[models.NoiseAssertion] = noise
+			} else {
+				delete(a, models.NoiseAssertion)
 			}
 			return a
 		}(),
@@ -517,6 +528,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
 		tc.AppPort = grpcSpec.AppPort
+		tc.Description = grpcSpec.Metadata["description"]
 
 		for key, raw := range grpcSpec.Assertions {
 			tc.Assertions[key] = raw
@@ -595,6 +607,7 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
 		tc.AppPort = grpcSpec.AppPort
+		tc.Description = grpcSpec.Metadata["description"]
 		expandAssertionsJSON(tc, grpcSpec.Assertions)
 
 	default:
@@ -619,13 +632,19 @@ func expandAssertionsJSON(tc *models.TestCase, assertions map[models.AssertionTy
 		// Walk whichever map shape the unmarshaler produced.
 		walk := func(field string, inner interface{}) {
 			tc.Noise[field] = []string{}
-			arr, ok := inner.([]interface{})
-			if !ok {
-				return
-			}
-			for _, item := range arr {
-				if s, ok2 := item.(string); ok2 && s != "" {
-					tc.Noise[field] = append(tc.Noise[field], s)
+			switch arr := inner.(type) {
+			case []interface{}:
+				for _, item := range arr {
+					if s, ok2 := item.(string); ok2 && s != "" {
+						tc.Noise[field] = append(tc.Noise[field], s)
+					}
+				}
+			case []string:
+				// Given in Go, not read from a file.
+				for _, s := range arr {
+					if s != "" {
+						tc.Noise[field] = append(tc.Noise[field], s)
+					}
 				}
 			}
 		}
@@ -637,6 +656,16 @@ func expandAssertionsJSON(tc *models.TestCase, assertions map[models.AssertionTy
 		case map[string]interface{}:
 			for kt, inner := range noiseMap {
 				walk(kt, inner)
+			}
+		case map[string][]string:
+			// Given in Go (UpdateAssertions' caller), not read from a file.
+			for kt, inner := range noiseMap {
+				tc.Noise[kt] = []string{}
+				for _, v := range inner {
+					if v != "" {
+						tc.Noise[kt] = append(tc.Noise[kt], v)
+					}
+				}
 			}
 		}
 	}
