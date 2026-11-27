@@ -97,6 +97,10 @@ func parseJSONLoose(s string) (any, error) {
 func flattenToMap(v any, base string, out map[string]string) {
 	switch x := v.(type) {
 	case map[string]any:
+		if len(x) == 0 {
+			out[pathWithDollar(base)] = "{}"
+			return
+		}
 		keys := make([]string, 0, len(x))
 		for k := range x {
 			keys = append(keys, k)
@@ -110,6 +114,10 @@ func flattenToMap(v any, base string, out map[string]string) {
 			flattenToMap(x[k], next, out)
 		}
 	case []any:
+		if len(x) == 0 {
+			out[pathWithDollar(base)] = "[]"
+			return
+		}
 		for i, it := range x {
 			next := fmt.Sprintf("%s[%d]", base, i)
 			if base == "" {
