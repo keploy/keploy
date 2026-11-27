@@ -1078,6 +1078,12 @@ type Learned struct {
 	// field is checked by; and mock.times: strict keeps the refusal
 	// (OffsetReadUnder). nil for every other leaf.
 	offsetRefused *Learned
+	// clientAside and clientRule, where a declared clock rule in
+	// ClassifyArrivedSources set aside an incoming client test request place
+	// before classifying, carry that place and rule ID so the learned reason
+	// names both.
+	clientAside string
+	clientRule  string
 	// unreadWhy: the refusal of a changed instant its call's window shows
 	// no read of the clock in, nor of the clock plus an offset
 	// (clientTestUnread, textClockOffset; no cut keploy cannot tell), in
@@ -1197,7 +1203,7 @@ type GivenEarlier func() ([]GivenPlaces, error)
 // Its call's arrival is not told: no client test's request is a place of it
 // (arrivedBefore). ClassifyArrived reads them.
 func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
-	return classifyGiven(dc, drift, live, rec, at, time.Time{}, earlier, raw, resp, w, given, false)
+	return classifyGiven(dc, drift, live, rec, at, time.Time{}, earlier, raw, resp, w, given, false, nil, false)
 }
 
 // ClassifyArrived is ClassifyGiven of a call that reached keploy at the
@@ -1207,7 +1213,23 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 // (Input.Arrived), where the request's test case binds a value the call
 // carries whole (Place.Client). A zero arrived is ClassifyGiven.
 func ClassifyArrived(dc *DriftCache, drift []string, live, rec Shape, at, arrived time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
-	return classifyGiven(dc, drift, live, rec, at, arrived, earlier, raw, resp, w, given, false)
+	return classifyGiven(dc, drift, live, rec, at, arrived, earlier, raw, resp, w, given, false, nil, false)
+}
+
+// ClassifyArrivedSources is ClassifyArrived with sources, the per-field
+// declared rules of keploy.yml (DeclaredBodySources), and timeForm, whether
+// the time default is on. At any drifted leaf where a declared SourceClock
+// rule's range holds both runs in w and the replay compares that check (a
+// plain read or an offset-comparing window: declaredClockDropLeavesOK),
+// incoming client test requests are dropped from the source search before
+// classifying that leaf so in-scope DB and earlier answers stay eligible,
+// matching Decide's instantLearned precedence. Under strict times when the
+// call's recorded answer echoes the leaf, incoming client requests are also
+// excluded from offsetPlaces so an in-window echoed field stays KindEcho
+// (rewriting the answer with this run's value) rather than being refused as a
+// client offset or captured by the coincidental client request.
+func ClassifyArrivedSources(dc *DriftCache, drift []string, live, rec Shape, at, arrived time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, sources func(path string) (Source, bool), timeForm bool) []Learned {
+	return classifyGiven(dc, drift, live, rec, at, arrived, earlier, raw, resp, w, given, false, sources, timeForm)
 }
 
 // classifyGiven is ClassifyGiven, its word rule read under the rule a copy
@@ -1237,7 +1259,7 @@ func ClassifyArrived(dc *DriftCache, drift []string, live, rec Shape, at, arrive
 // both ways (leafedAtCall). Its leaves would otherwise read as an earlier
 // place both runs were given, where a minute F's run rounded from what F
 // served there names both moments and is learned as noise.
-func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at, arrived time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
+func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at, arrived time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool, sources func(path string) (Source, bool), timeForm bool) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
@@ -1251,7 +1273,7 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at, arrived 
 	earlier = timedEarlier(arrivedBefore(earlier, at, arrived), at)
 	raw = timedRaw(raw, at)
 	earlier, raw = leafedAfterCall(earlier, raw, at)
-	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, follow)
+	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, follow, sources, timeForm)
 	late, ok := givenAtCall(raw, at, given)
 	if !ok {
 		late = raw
@@ -1263,7 +1285,7 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at, arrived 
 	if len(leafedLate) > 0 {
 		late = append(append([]Raw(nil), late...), leafedLate...)
 	}
-	alone := classifyRead(dc, drift, live, rec, at, lateEarlier, late, resp, w, given, follow)
+	alone := classifyRead(dc, drift, live, rec, at, lateEarlier, late, resp, w, given, follow, sources, timeForm)
 	for i := range out {
 		out[i] = stricterOf(out[i], alone[i])
 	}
@@ -1698,7 +1720,7 @@ const (
 
 // classifyRead is classifyGiven of raw as handed: each Raw read as the one
 // place it is.
-func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
+func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool, sources func(path string) (Source, bool), timeForm bool) []Learned {
 	placed := append([]Earlier(nil), earlier...)
 	sort.SliceStable(placed, func(i, j int) bool { return placed[i].At.Before(placed[j].At) })
 	// A value the test gave keploy (Earlier.Gave) is read by the rule that
@@ -1747,17 +1769,20 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// instant or word reaches it: every leaf and window of every value read
 	// against it holds them against the same places.
 	type reading struct {
-		all, raw []Raw
-		eh       earlierHeld
-		places   func() *offsetPlaces
+		all, raw  []Raw
+		placed    []Earlier
+		served    []Earlier
+		offServed []Earlier
+		eh        earlierHeld
+		places    func() *offsetPlaces
 	}
-	readingOf := func(all []Raw) *reading {
-		rd := &reading{all: all, raw: ownPlaces(all)}
+	readingOf := func(all []Raw, rdPlaced, rdServed, offServed []Earlier) *reading {
+		rd := &reading{all: all, raw: ownPlaces(all), placed: rdPlaced, served: rdServed, offServed: offServed}
 		var op *offsetPlaces
 		rd.places = func() *offsetPlaces {
 			if op == nil {
 				unread, set := givenPlaces()
-				op = dc.offsetPlacesOf(at, served, all, set)
+				op = dc.offsetPlacesOf(at, offServed, all, set)
 				if unread != "" {
 					op.unread = unread
 				}
@@ -1767,7 +1792,37 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		return rd
 	}
 	// The call's reading: every recording before it.
-	callReading := readingOf(all)
+	callReading := readingOf(all, placed, served, served)
+	hasClients := slices.ContainsFunc(placed, func(e Earlier) bool { return e.incoming })
+	var noClientReading *reading
+	var noClientEchoReading *reading
+	var clientsOnly []Earlier
+	getClientsOnly := func() []Earlier {
+		if clientsOnly == nil {
+			for _, e := range placed {
+				if e.incoming {
+					clientsOnly = append(clientsOnly, e)
+				}
+			}
+		}
+		return clientsOnly
+	}
+	getNoClient := func(dropOffsetClients bool) (*reading, []Earlier) {
+		if dropOffsetClients {
+			if noClientEchoReading == nil {
+				ncServed := withoutClients(served)
+				noClientEchoReading = readingOf(all, withoutClients(placed), ncServed, ncServed)
+			}
+			return noClientEchoReading, getClientsOnly()
+		}
+		if noClientReading == nil {
+			// Keep full served in offsetPlaces so offsetOfValue still detects
+			// client-offset provenance and sets offsetRefused for
+			// DeclaredClockLearned (which preserves rule range + timeForm).
+			noClientReading = readingOf(all, withoutClients(placed), withoutClients(served), served)
+		}
+		return noClientReading, getClientsOnly()
+	}
 	out := make([]Learned, 0, len(drift))
 	// leafIn classifies one changed leaf, r as recorded and l as F saw it,
 	// as a value of the call whose window is w, against the recordings of
@@ -1775,20 +1830,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// stands.
 	leafIn := func(rd *reading, r, l Leaf, w *Window, skip skipRule) Learned {
 		raw, all, places, eh := rd.raw, rd.all, rd.places, &rd.eh
+		rdPlaced, rdServed := rd.placed, rd.served
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
 		unreadReq := unreadOf(r, l)
 		if r.Type == Instant || l.Type == Instant {
-			return dc.classifyInstant(r, l, at, placed, raw, resp, w, unreadReq, places, skip)
+			return dc.classifyInstant(r, l, at, rdPlaced, raw, resp, w, unreadReq, places, skip)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
 		if follow {
-			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
+			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: rdServed, raw: raw, places: places}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, eh); ok && skip&skipSource == 0 {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, rdPlaced, raw, fol, eh); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -1805,7 +1861,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					// variable of from, as the search found it (the rule a
 					// copy follows its source is ClassifyFollowing's), set
 					// aside (Place.SetAside), and only its reason changes.
-					switch why, late := dc.notFromWhy(dc.ofIn(r.Value, l.Value, w, at), from, at, placed, raw, places); {
+					switch why, late := dc.notFromWhy(dc.ofIn(r.Value, l.Value, w, at), from, at, rdPlaced, raw, places); {
 					case late:
 						ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, why
 						ln.sourceWhy = ln.Why
@@ -1830,11 +1886,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			// call's own window holds each changed instant as a read of the
 			// clock (readOverClients), and each moment the value lost is one
 			// of those instants: the read goes before it, as main reads it.
-			lost, inst := lostMoments(v), served
+			lost, inst := lostMoments(v), rdServed
 			if !slices.ContainsFunc(lost, func(m moment) bool {
 				return !slices.ContainsFunc(v.instants, func(p driftedInstant) bool { return p.rec.key == m.key })
 			}) {
-				inst = readOverClients(served, w, v.instants, dc.zone)
+				inst = readOverClients(rdServed, w, v.instants, dc.zone)
 			}
 			if unreadReq != "" {
 				why = unreadReq
@@ -1845,7 +1901,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 				offWhy = why
-			} else if why = unaccounted(dc, v, at, served, raw, fol, eh); why != "" {
+			} else if why = unaccounted(dc, v, at, rdServed, raw, fol, eh); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -1856,7 +1912,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// an instant of it copied from there, or picked from it,
 				// which the word rule leaves to the clock (the echo of
 				// those places).
-				if why = givenWhy(dc, v, at, served, raw, places, fol); why == "" {
+				if why = givenWhy(dc, v, at, rdServed, raw, places, fol); why == "" {
 					why = dc.echoedElsewhere(v.instants, at, inst, raw, places)
 				} else if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -1955,7 +2011,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if fol != nil && (fol.first != "" || fol.refuted != "") {
 			switch ln.Kind {
 			case KindNoise:
-				ln = fol.followed(ln, at, served, all)
+				ln = fol.followed(ln, at, rdServed, all)
 				switch {
 				case ln.Kind != KindNoise:
 				case fol.refuted != "":
@@ -1971,7 +2027,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				if fol.pastSiblingsOnly(all, r, KindEcho) {
 					break
 				}
-				ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, served, all)
+				ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, rdServed, all)
 			}
 		}
 		// A leaf set aside as no source (follows.refuteSeen), and nothing
@@ -1980,7 +2036,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// kind is final.
 		asideOnly := fol != nil && fol.first == "" && fol.refuted == "" && fol.aside != ""
 		if asideOnly && ln.Kind == KindEcho {
-			ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, served, all)
+			ln = fol.echoed(ln, dc.ofIn(r.Value, l.Value, w, at), at, rdServed, all)
 		}
 		// A time of day whole (textTimeOfDay), which names no day, is a
 		// read modulo a day (textTodRead), checked so at every replay.
@@ -2077,7 +2133,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// the clock (KindClockRead) is checked against its call's clock at
 		// every replay, which no order of its sources changes.
 		if asideOnly && ln.Kind == KindNoise {
-			if ln = fol.followed(ln, at, served, all); ln.Kind == KindNoise {
+			if ln = fol.followed(ln, at, rdServed, all); ln.Kind == KindNoise {
 				ln.Why = fol.aside + ", and keploy learns it as varying"
 			}
 		}
@@ -2091,14 +2147,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		return ln
 	}
-	// leaf is leafIn against the call's recordings, where a value found
+	// curReading is the reading for the drifted leaf currently classified:
+	// callReading normally, or noClientReading when a declared clock rule
+	// holds both runs in w and drops incoming client test requests first.
+	curReading := callReading
+	// leaf is leafIn against curReading, where a value found
 	// carried from a sibling's place learned in a role a sibling passes on
 	// is learned in that role (sibling.go): read again with those siblings
 	// set aside, and taken only where that reading learns their role. That
 	// reading is of the recordings left, its own (readingOf): no rule of it
 	// reads a sibling, nor the moments or moved places a sibling holds.
 	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
-		ln := leafIn(callReading, r, l, w, skip)
+		ln := leafIn(curReading, r, l, w, skip)
 		if ln.Kind != KindVariable {
 			return ln
 		}
@@ -2106,7 +2166,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if !ok {
 			return ln
 		}
-		if same := leafIn(readingOf(own), r, l, w, skip); same.Kind == role {
+		if same := leafIn(readingOf(own, curReading.placed, curReading.served, curReading.offServed), r, l, w, skip); same.Kind == role {
 			return same
 		}
 		return ln
@@ -2233,6 +2293,19 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	read := func(r, l Leaf, w *Window, skip skipRule) Learned { return ofRun(leaf(r, l, w, skip), r, l, w) }
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
+		curReading = callReading
+		asidePlace, asideRule := "", ""
+		if sources != nil && hasClients {
+			if src, ok := sources(p); ok && src.Kind == SourceClock && declaredClockDropLeavesOK(r, l, src, w) {
+				var clients []Earlier
+				dropOffsetClients := !timeForm && len(Echoes(dc, r, resp)) > 0
+				curReading, clients = getNoClient(dropOffsetClients)
+				asidePlace = dc.clientSetAside(r, l, at, clients, w)
+				if asidePlace != "" {
+					asideRule = src.Rule
+				}
+			}
+		}
 		ln := leaf(r, l, w, 0)
 		// A client test's own clock read made inside its call's window as
 		// one word of a longer text (keploy mock's harness naming an app
@@ -2438,9 +2511,110 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if dc.clientTests {
 			ln = withWallWord(ln)
 		}
+		if asidePlace != "" {
+			ln = withClientAside(ln, asidePlace, asideRule)
+		}
 		out = append(out, ln)
 	}
 	return out
+}
+
+// clientSetAside reports the incoming client test request place among clients
+// that held (r, l) and was set aside by a declared clock rule; "" where no
+// client place matched (or where the plain call window already excluded
+// clients from requestHolds).
+func (dc *DriftCache) clientSetAside(r, l Leaf, at time.Time, clients []Earlier, w *Window) string {
+	if len(clients) == 0 {
+		return ""
+	}
+	if r.Type == Instant || l.Type == Instant {
+		rt, okR := readTyped(r)
+		lt, okL := readTyped(l)
+		if !okR || !okL {
+			return ""
+		}
+		recM, liveM := rt.moment(rt.res), lt.moment(lt.res)
+		if from, ok := dc.instantServedFrom(r, recM, liveM, clients); ok {
+			return clientAsidePlace(from)
+		}
+		if from, ok := dc.instantLeafFrom(r, recM, clients); ok {
+			return clientAsidePlace(from)
+		}
+		if len(readOverClients(clients, w, []driftedInstant{{rec: recM, live: liveM}}, dc.zone)) > 0 {
+			if mock, path, _ := dc.requestHoldsPlace([]moment{recM}, []moment{liveM}, clients); mock != "" {
+				return mock + " " + path
+			}
+		}
+		return ""
+	}
+	if r.Value == "" {
+		return ""
+	}
+	v := dc.ofIn(r.Value, l.Value, w, at)
+	if from, ok := appearedIn(dc, v, at, clients, nil, nil, &earlierHeld{}); ok {
+		if from.Word == "" && !from.Whole && from.Claim == "" && from.Path != "" {
+			if idx := clientWordIndex(clients, from.Mock, from.Path, r.Value); idx >= 0 {
+				from.Word = from.Path + "#" + strconv.Itoa(idx)
+			}
+		}
+		return clientAsidePlace(from)
+	}
+	if len(readOverClients(clients, w, v.instants, dc.zone)) > 0 {
+		if mock, path, _ := dc.requestHoldsPlace(lostMoments(v), v.liveMoments, clients); mock != "" {
+			return mock + " " + path
+		}
+	}
+	return ""
+}
+
+// withClientAside annotates ln (and any stored offsetRefused / strictRefusal)
+// with the incoming client request place set aside under rule so every
+// outcome (clock read, offset, variable, echo, noise, or refusal) names both.
+func withClientAside(ln Learned, place, rule string) Learned {
+	ln.clientAside, ln.clientRule = place, rule
+	if ln.offsetRefused != nil {
+		cp := withClientAside(*ln.offsetRefused, place, rule)
+		ln.offsetRefused = &cp
+	}
+	if ln.strictRefusal != nil {
+		cp := withClientAside(*ln.strictRefusal, place, rule)
+		ln.strictRefusal = &cp
+	}
+	noteFor := func(s string) string {
+		note := "set aside " + place
+		if !strings.Contains(s, "keploy.yml's rule "+rule) {
+			note += " under keploy.yml's rule " + rule
+		}
+		if s == "" {
+			return note
+		}
+		return s + "; " + note
+	}
+	switch ln.Kind {
+	case KindClockRead:
+		if ln.Read != nil {
+			cp := *ln.Read
+			cp.Why = noteFor(cp.Why)
+			ln.Read = &cp
+		}
+		ln.Why = noteFor(ln.Why)
+	case KindClockOffset:
+		if ln.Offset != nil {
+			cp := *ln.Offset
+			cp.Why = noteFor(cp.Why)
+			ln.Offset = &cp
+		}
+		ln.Why = noteFor(ln.Why)
+	default:
+		if ln.sourceWhy != "" && ln.sourceWhy == ln.Why {
+			ln.sourceWhy = noteFor(ln.sourceWhy)
+		}
+		if ln.unreadWhy != "" && ln.unreadWhy == ln.Why {
+			ln.unreadWhy = noteFor(ln.unreadWhy)
+		}
+		ln.Why = noteFor(ln.Why)
+	}
+	return ln
 }
 
 // clockSourceWhy is why a value an earlier call of the run sent at from (the

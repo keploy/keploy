@@ -216,3 +216,102 @@ func TestDeclaredBodySourcesReadsABodyFieldAtItsLeafPath(t *testing.T) {
 		t.Fatal("no body rule: want nil")
 	}
 }
+
+// TestDeclaredClockLearnedOverridesClientRequestVariableOnlyWhenRangeHolds:
+// when a field declared kind: clock was bound to an incoming client test
+// request (From.Client == true) whose Unix-second word coincided with the
+// app's clock read, DeclaredClockLearned settles it as KindClockRead if and
+// only if the declared rule's range holds both runs in the call's span. A
+// client-provided timestamp outside that range stays bound to the client
+// request even under the time default (fail closed).
+func TestDeclaredClockLearnedOverridesClientRequestVariableOnlyWhenRangeHolds(t *testing.T) {
+	recAt := time.Date(2026, 11, 11, 16, 11, 22, 5_000_000, time.UTC)
+	fAt := time.Date(2026, 11, 11, 16, 13, 20, 5_000_000, time.UTC)
+	w := &Window{
+		Rec: Span{From: recAt.Add(-time.Millisecond), To: recAt},
+		F:   Span{From: fAt.Add(-time.Millisecond), To: fAt},
+	}
+	epoch := func(at time.Time) Leaf {
+		return Leaf{Path: "body.data.createdAt", Type: Number, Value: strconv.FormatInt(at.Unix(), 10)}
+	}
+	clock := Source{Kind: SourceClock, Rule: "pat-created-at", Clock: models.ClockOffset{Min: -time.Second, Max: 0, Res: time.Second}}
+	clientVar := func(rec, live Leaf) Learned {
+		return Learned{
+			Kind:     KindVariable,
+			Recorded: rec,
+			Live:     live,
+			From:     Place{Mock: "test case test-4", Path: "body.replayId", Client: true, Given: true},
+		}
+	}
+
+	// Read stamped 1s before call span (within min:-1s max:0s res:1s):
+	// settled as KindClockRead, naming both the rule and the set-aside client place.
+	for _, tc := range []struct {
+		name      string
+		path      string
+		word      string
+		claim     string
+		wantPlace string
+	}{
+		{"whole client leaf", "body.replayId", "", "", "test case test-4 body.replayId"},
+		{"word inside client leaf", "body.replayId", "body.replayId#7", "", "test case test-4 body.replayId#7"},
+		{"JWT claim inside client leaf", "header.Authorization", "", "header.Authorization|jwt.iat#0", "test case test-4 header.Authorization (its JWT's iat claim)"},
+	} {
+		inRange := clientVar(epoch(recAt.Add(-time.Second)), epoch(fAt.Add(-time.Second)))
+		inRange.From.Path = tc.path
+		inRange.From.Word = tc.word
+		inRange.From.Claim = tc.claim
+		for _, tf := range []bool{false, true} {
+			got := DeclaredClockLearned(inRange, clock, w, tf)
+			o, ok := got.Clock()
+			wantForm := ""
+			if tf {
+				wantForm = "number 9999999999"
+			}
+			if got.Kind != KindClockRead || !ok || o.Res != time.Second || o.Layout != "epoch-s" || o.Form != wantForm || o.FormF != "" {
+				t.Fatalf("%s (timeForm=%v): got %+v (clock %+v); want KindClockRead res=1s layout=epoch-s form=%q", tc.name, tf, got, o, wantForm)
+			}
+			for _, want := range []string{"pat-created-at", tc.wantPlace} {
+				if !strings.Contains(o.Why, want) || !strings.Contains(got.Why, want) {
+					t.Fatalf("%s (timeForm=%v): Why %q / Clock.Why %q must name %q", tc.name, tf, got.Why, o.Why, want)
+				}
+			}
+		}
+	}
+
+	// Timestamps outside the declared range in either or both runs must stay
+	// bound to the client request even with timeForm=true.
+	for _, tc := range []struct {
+		name      string
+		rec, live Leaf
+	}{
+		{"both runs 2m outside range", epoch(recAt.Add(-2 * time.Minute)), epoch(fAt.Add(-2 * time.Minute))},
+		{"only recorded run in range, round F 2m outside", epoch(recAt.Add(-time.Second)), epoch(fAt.Add(-2 * time.Minute))},
+		{"recorded run 2m outside, only round F in range", epoch(recAt.Add(-2 * time.Minute)), epoch(fAt.Add(-time.Second))},
+	} {
+		outOfRange := clientVar(tc.rec, tc.live)
+		for _, tf := range []bool{false, true} {
+			got := DeclaredClockLearned(outOfRange, clock, w, tf)
+			if !reflect.DeepEqual(got, outOfRange) {
+				t.Fatalf("FALSE GREEN? %s (timeForm=%v): got %+v; want original client variable kept", tc.name, tf, got)
+			}
+		}
+	}
+
+	// Guardrail: a KindClockRead learning already found (even when the declared
+	// range holds both runs) stands untouched under both strict and default
+	// times — never loosened to Form-only.
+	inRangeRead := Learned{
+		Kind:     KindClockRead,
+		Recorded: epoch(recAt),
+		Live:     epoch(fAt),
+		Read:     &models.ClockOffset{Res: time.Second, Layout: "epoch-s", Why: "read in the call's span"},
+		Why:      "read in the call's span",
+	}
+	for _, tf := range []bool{false, true} {
+		got := DeclaredClockLearned(inRangeRead, clock, w, tf)
+		if !reflect.DeepEqual(got, inRangeRead) {
+			t.Fatalf("FALSE GREEN? in-range KindClockRead (timeForm=%v): got %+v; must stay window-checked with empty Form", tf, got)
+		}
+	}
+}

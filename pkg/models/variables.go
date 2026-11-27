@@ -111,8 +111,10 @@ type MockVariable struct {
 	ByForm map[string]ClockOffset `json:"by_form,omitempty" yaml:"by_form,omitempty" bson:"by_form,omitempty"`
 	// Why is, for a variable the learn step wrote, why it is one and how to
 	// undo it, for a person or a tool reading the mock (the legibility
-	// rule). Only given variables (GivenPrefix) carry one for now
-	// (learn.GivenWhy). Nothing replays it.
+	// rule). Given variables (GivenPrefix, learn.GivenWhy) and echoed
+	// variables whose learning carries a reason (a place set aside by the
+	// follows rule, or a client request set aside under a declared clock
+	// rule) carry one. Nothing replays it.
 	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
 }
 

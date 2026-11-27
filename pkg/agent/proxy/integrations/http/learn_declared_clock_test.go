@@ -54,9 +54,12 @@ func TestLearnMatchHoldsADeclaredClockAnEarlierNameEchoes(t *testing.T) {
 		return learnRecorded("mock-1", 1500*time.Millisecond, "PUT", path, body(recBegin.Add(400*time.Millisecond)), nil, answer)
 	}
 	const version = `{"data":{"version":2}}`
-	// echoed is an answer that holds the recorded lastUsedAt: a replay would
-	// serve that recorded moment.
+	// echoed is an answer that holds the recorded lastUsedAt whole at its JSON
+	// field (rewritable by KindEcho); echoedEmbedded holds it inside a longer
+	// string where HTTP cannot rewrite the answer, so a replay would serve that
+	// recorded moment.
 	echoed := `{"data":{"version":2,"lastUsedAt":` + strconv.FormatInt(recBegin.Unix(), 10) + `}}`
+	echoedEmbedded := `{"data":{"version":2,"note":"touched ` + strconv.FormatInt(recBegin.Unix(), 10) + `"}}`
 	// Round F: the same steps, ten minutes on.
 	began := learnAt.Add(10 * time.Minute)
 	plain := &models.ClockOffset{Min: -time.Second, Res: time.Second}
@@ -122,15 +125,42 @@ func TestLearnMatchHoldsADeclaredClockAnEarlierNameEchoes(t *testing.T) {
 			t.Errorf("time default %v: noise %v; want none: a declared clock stays compared", timeForm, db.consumed[0].Spec.ReqBodyNoise)
 		}
 	}
-	// An answer that holds the recorded lastUsedAt: with keploy.yml's times
-	// strict the rule leaves the field to learning, which refuses the PUT, as
-	// Mongo's learning refuses a clock read its call's answer holds; under
-	// the time default it is checked by its form.
-	if served, miss, _ := run(rules, false, echoed); served != nil || miss == nil {
-		t.Fatalf("times strict, the answer holds lastUsedAt: served %v, miss %+v; want the PUT refused", served != nil, miss)
+	// An answer that holds the recorded lastUsedAt whole at a JSON field: with
+	// keploy.yml's times strict the declared clock sets the coincidental client
+	// name aside and keeps KindEcho (rewriting the echoed answer with this run's
+	// value, never serving the recorded moment as a ClockRead); when the answer
+	// embeds lastUsedAt where HTTP cannot rewrite it (echoedEmbedded), strict
+	// times still refuses the PUT; under the time default both are checked by
+	// their form.
+	servedEcho, missEcho, dbEcho := run(rules, false, echoed)
+	if servedEcho == nil || missEcho != nil || len(dbEcho.consumed) != 1 {
+		t.Fatalf("times strict, answer echoes rewritable lastUsedAt: served %v, miss %+v; want PUT answered via KindEcho", servedEcho != nil, missEcho)
+	}
+	if _, isClock := dbEcho.consumed[0].Spec.Clocks["body.data.lastUsedAt"]; isClock {
+		t.Fatalf("times strict, answer echoes rewritable lastUsedAt: Clocks %+v; want KindEcho (not ClockRead)", dbEcho.consumed[0].Spec.Clocks)
+	}
+	var gotEcho bool
+	for _, v := range dbEcho.consumed[0].Spec.Learned() {
+		if v.Bind == "body.data.lastUsedAt" && v.Echo && len(v.Answer) > 0 {
+			gotEcho = true
+			for _, want := range []string{"pat-last-used-at", "post-client-v1-apps-1"} {
+				if !strings.Contains(v.Why, want) {
+					t.Errorf("times strict, answer echoes rewritable lastUsedAt: Learned.Why = %q; want %q", v.Why, want)
+				}
+			}
+		}
+	}
+	if !gotEcho {
+		t.Fatalf("times strict, answer echoes rewritable lastUsedAt: Learned %+v; want answered echo on body.data.lastUsedAt", dbEcho.consumed[0].Spec.Learned())
+	}
+	if served, miss, _ := run(rules, false, echoedEmbedded); served != nil || miss == nil {
+		t.Fatalf("times strict, answer embeds unrewritable lastUsedAt: served %v, miss %+v; want the PUT refused", served != nil, miss)
 	}
 	if served, miss, _ := run(rules, true, echoed); served == nil || miss != nil {
 		t.Fatalf("time default, the answer holds lastUsedAt: served %v, miss %+v; want the PUT answered", served != nil, miss)
+	}
+	if served, miss, _ := run(rules, true, echoedEmbedded); served == nil || miss != nil {
+		t.Fatalf("time default, the answer embeds lastUsedAt: served %v, miss %+v; want the PUT answered", served != nil, miss)
 	}
 }
 
