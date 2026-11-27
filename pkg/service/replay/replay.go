@@ -2910,7 +2910,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// mocks are loaded (loadTestSetMocks), or below, before the tests run,
 	// when they are not loaded here.
 	var mockLookup map[string]mockDisplayInfo
+	// Observe outside-window startup/worker candidates during RunTestSet's
+	// already-existing single mock pass so creating a new mappings.yaml causes
+	// zero extra decodes of mocks.yaml.
+	var windowBg *windowBgTracker
+	if !provenswitch.On() && r.mappingDB != nil {
+		windowBg = newWindowBgTracker(testCases)
+	}
 	addKinds := func(mocks []*models.Mock) {
+		windowBg.observeSlice(mocks)
 		for _, m := range mocks {
 			mockKindByName[m.Name] = m.Kind
 			if m.AnsweredByPassThrough(r.config.Record.PassThroughPorts, r.config.Record.PassThroughHosts) {
@@ -4059,7 +4067,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Not built with the mocks above: they were not loaded here. A base
 		// path leaves it unread: with nothing mocked, the report has no mock
 		// to describe.
-		mockLookup = r.readMockLookup(runTestSetCtx, testSetID)
+		windowBg.markPass()
+		mockLookup = r.readMockLookupWith(runTestSetCtx, testSetID, windowBg.observe)
 	}
 	r.wholeSetIdx = newWholeSetMockIndex(mockLookup, expectedTestMockMappings, r.exact.ownersOf(), testCases)
 	r.unexercisedMocksByTest = map[string][]string{}
@@ -8161,7 +8170,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// outside-window background recordings Pass 1 derived in RAM.
 		if !provenswitch.On() {
 			if exists, existsErr := mappingExists(); existsErr == nil && !exists {
-				r.populateWindowDerivedBackground(runTestSetCtx, testSetID, testCases, mappingDoc, actualTestMockMappings)
+				if windowBg != nil && windowBg.sawPass {
+					windowBg.apply(mappingDoc, actualTestMockMappings)
+				} else {
+					r.populateWindowDerivedBackground(runTestSetCtx, testSetID, testCases, mappingDoc, actualTestMockMappings)
+				}
 			}
 		}
 		// Only a set that holds connection failures can have mapping entries
@@ -8538,12 +8551,19 @@ type skippedDocs struct {
 // leaves its pool out of the lookup. A name in both pools keeps the session
 // mock's entry, as newMockLookup does.
 func (r *Replayer) readMockLookup(ctx context.Context, testSetID string) map[string]mockDisplayInfo {
+	return r.readMockLookupWith(ctx, testSetID, nil)
+}
+
+func (r *Replayer) readMockLookupWith(ctx context.Context, testSetID string, observe func(*models.Mock)) map[string]mockDisplayInfo {
 	lookup := map[string]mockDisplayInfo{}
 	if r.mockDB == nil {
 		return lookup
 	}
 	err := r.eachSetMock(ctx, testSetID, false, func(m *models.Mock, _ bool) {
 		addMockDisplayInfo(lookup, []*models.Mock{m})
+		if observe != nil {
+			observe(m)
+		}
 	})
 	if err != nil {
 		r.logger.Debug("failed to read mocks for the report's mock lookup; the report will not describe them",

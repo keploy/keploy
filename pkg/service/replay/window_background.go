@@ -24,6 +24,122 @@ const (
 	windowDerivedMaxPerTier  = 256
 )
 
+// windowBgTracker observes mocks during RunTestSet's already-existing single
+// pass over mocks.yaml (loadMocksForAgent or readMockLookup), keeping a tiny
+// bounded set of outside-window startup/worker candidates in O(1) memory so
+// persisting them on a newly created mappings.yaml causes ZERO extra decodes
+// of the mock file.
+type windowBgTracker struct {
+	classifier *models.WindowClassifier
+	firstStart time.Time
+	seen       map[string]struct{}
+	startupCol *windowBgCollector
+	workerCol  *windowBgCollector
+	sawPass    bool
+}
+
+func newWindowBgTracker(testCases []*models.TestCase) *windowBgTracker {
+	windows := recordedTestWindows(testCases)
+	if len(windows) == 0 {
+		return nil
+	}
+	return &windowBgTracker{
+		classifier: models.NewWindowClassifier(windows),
+		firstStart: firstRecordedTestStart(testCases),
+		seen:       make(map[string]struct{}),
+		startupCol: newWindowBgCollector(windowDerivedMaxPerTier, windowDerivedMaxPerShape, WindowDerivedStartupReason),
+		workerCol:  newWindowBgCollector(windowDerivedMaxPerTier, windowDerivedMaxPerShape, WindowDerivedWorkerReason),
+	}
+}
+
+func (t *windowBgTracker) markPass() {
+	if t != nil {
+		t.sawPass = true
+	}
+}
+
+func (t *windowBgTracker) observe(m *models.Mock) {
+	if t == nil || m == nil || m.Name == "" {
+		return
+	}
+	if _, dup := t.seen[m.Name]; dup {
+		return
+	}
+	t.seen[m.Name] = struct{}{}
+	if !t.classifier.IsWorker(m) {
+		return
+	}
+	if !t.firstStart.IsZero() && m.Spec.ReqTimestampMock.Before(t.firstStart) {
+		t.startupCol.add(m)
+	} else {
+		t.workerCol.add(m)
+	}
+}
+
+func (t *windowBgTracker) observeSlice(mocks []*models.Mock) {
+	if t == nil {
+		return
+	}
+	t.sawPass = true
+	for _, m := range mocks {
+		t.observe(m)
+	}
+}
+
+// apply merges the observed outside-window startup/worker entries into
+// mappingDoc, excluding any mock owned by a test case in mappingDoc or actual
+// and any mock already listed in mappingDoc.Startup or mappingDoc.Worker.
+func (t *windowBgTracker) apply(mappingDoc, actual *models.Mapping) {
+	if t == nil || mappingDoc == nil {
+		return
+	}
+	exclude := make(map[string]bool)
+	for _, doc := range []*models.Mapping{mappingDoc, actual} {
+		if doc == nil {
+			continue
+		}
+		for _, tc := range doc.TestCases {
+			for _, m := range tc.Mocks {
+				if m.Name != "" {
+					exclude[m.Name] = true
+				}
+			}
+		}
+	}
+	for _, m := range mappingDoc.Startup {
+		if m.Name != "" {
+			exclude[m.Name] = true
+		}
+	}
+	for _, m := range mappingDoc.Worker {
+		if m.Name != "" {
+			exclude[m.Name] = true
+		}
+	}
+
+	if added := filterExcludedEntries(t.startupCol.entries(), exclude); len(added) > 0 {
+		mappingDoc.Startup = append(mappingDoc.Startup, added...)
+		sortByRecordedTime(mappingDoc.Startup)
+	}
+	if added := filterExcludedEntries(t.workerCol.entries(), exclude); len(added) > 0 {
+		mappingDoc.Worker = append(mappingDoc.Worker, added...)
+		sortByRecordedTime(mappingDoc.Worker)
+	}
+}
+
+func filterExcludedEntries(entries []models.MockEntry, exclude map[string]bool) []models.MockEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]models.MockEntry, 0, len(entries))
+	for _, e := range entries {
+		if !exclude[e.Name] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // populateWindowDerivedBackground populates mappingDoc.Startup and
 // mappingDoc.Worker with bounded, legible window-derived background entries
 // when creating a NEW mappings.yaml (never overwriting or re-adding entries on
@@ -44,77 +160,19 @@ func (r *Replayer) populateWindowDerivedBackground(ctx context.Context, testSetI
 	if r.mockDB == nil || mappingDoc == nil || len(testCases) == 0 {
 		return
 	}
-	windows := recordedTestWindows(testCases)
-	if len(windows) == 0 {
+	tracker := newWindowBgTracker(testCases)
+	if tracker == nil {
 		return
 	}
-	firstStart := firstRecordedTestStart(testCases)
-	classifier := models.NewWindowClassifier(windows)
-
-	owned := make(map[string]bool)
-	for _, doc := range []*models.Mapping{mappingDoc, actual} {
-		if doc == nil {
-			continue
-		}
-		for _, tc := range doc.TestCases {
-			for _, m := range tc.Mocks {
-				if m.Name != "" {
-					owned[m.Name] = true
-				}
-			}
-		}
-	}
-	alreadyStartup := make(map[string]bool, len(mappingDoc.Startup))
-	for _, m := range mappingDoc.Startup {
-		if m.Name != "" {
-			alreadyStartup[m.Name] = true
-		}
-	}
-	alreadyWorker := make(map[string]bool, len(mappingDoc.Worker))
-	for _, m := range mappingDoc.Worker {
-		if m.Name != "" {
-			alreadyWorker[m.Name] = true
-		}
-	}
-
-	seen := make(map[string]struct{})
-	startupCol := newWindowBgCollector(windowDerivedMaxPerTier, windowDerivedMaxPerShape, WindowDerivedStartupReason)
-	workerCol := newWindowBgCollector(windowDerivedMaxPerTier, windowDerivedMaxPerShape, WindowDerivedWorkerReason)
-
 	err := r.eachSetMock(ctx, testSetID, true, func(m *models.Mock, _ bool) {
-		if m == nil || m.Name == "" {
-			return
-		}
-		if _, dup := seen[m.Name]; dup {
-			return
-		}
-		seen[m.Name] = struct{}{}
-		if owned[m.Name] || alreadyStartup[m.Name] || alreadyWorker[m.Name] {
-			return
-		}
-		if !classifier.IsWorker(m) {
-			return
-		}
-		if !firstStart.IsZero() && m.Spec.ReqTimestampMock.Before(firstStart) {
-			startupCol.add(m)
-		} else {
-			workerCol.add(m)
-		}
+		tracker.observe(m)
 	})
 	if err != nil {
 		r.logger.Debug("failed to stream mocks while deriving window background entries for new mappings.yaml",
 			zap.String("testSetID", testSetID), zap.Error(err))
 		return
 	}
-
-	if added := startupCol.entries(); len(added) > 0 {
-		mappingDoc.Startup = append(mappingDoc.Startup, added...)
-		sortByRecordedTime(mappingDoc.Startup)
-	}
-	if added := workerCol.entries(); len(added) > 0 {
-		mappingDoc.Worker = append(mappingDoc.Worker, added...)
-		sortByRecordedTime(mappingDoc.Worker)
-	}
+	tracker.apply(mappingDoc, actual)
 }
 
 type windowBgItem struct {
