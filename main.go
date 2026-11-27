@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v3/cli"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/bpfsafety"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
@@ -115,6 +116,20 @@ func start(ctx context.Context) {
 			}
 			utils.LogFile = nil
 		}
+	}()
+
+	// Run bpfsafety.GracefulShutdown before utils.MarkDetachDone (and before the
+	// log file closes above) whenever this process armed host-bpffs grace pins,
+	// registered tracing detach hooks, or held BPF program FDs (OSS unixconn
+	// under KEPLOY_PROVEN without host bpffs). GracefulShutdown NEVER blocks
+	// exit: with host bpffs it leaves the grace dir for the >= 15m reaper;
+	// without host bpffs it hands prog FDs to a detached >= 60s holder process
+	// and returns immediately.
+	defer func() {
+		if !bpfsafety.HasActiveWork() {
+			return
+		}
+		bpfsafety.GracefulShutdown(context.Background(), logger, bpfsafety.DefaultInProcessHoldWait)
 	}()
 
 	// If KEPLOY_DEBUG_FILE is set and this run asked for its debug log

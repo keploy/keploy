@@ -10,6 +10,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"go.keploy.io/server/v3/pkg/agent/bpfsafety"
 	"go.uber.org/zap"
 )
 
@@ -415,15 +416,24 @@ func HasOtherKeployProcesses(selfPID int) bool {
 		if pid <= 1 || pid == selfPID {
 			continue
 		}
-		exePath, err := os.Readlink(filepath.Join("/proc", e.Name(), "exe"))
-		if err != nil {
-			continue
-		}
-		exePath = strings.TrimSuffix(exePath, " (deleted)")
-		exeBase := strings.ToLower(filepath.Base(exePath))
-		if strings.Contains(exeBase, "keploy") {
+		if isKeployProcess(e.Name()) {
 			return true
 		}
 	}
 	return false
+}
+
+func isKeployProcess(pidStr string) bool {
+	if commBytes, cerr := os.ReadFile(filepath.Join("/proc", pidStr, "comm")); cerr == nil {
+		if strings.TrimSpace(string(commBytes)) == bpfsafety.DetachedHolderComm {
+			return false
+		}
+	}
+	exePath, err := os.Readlink(filepath.Join("/proc", pidStr, "exe"))
+	if err != nil {
+		return false
+	}
+	exePath = strings.TrimSuffix(exePath, " (deleted)")
+	exeBase := strings.ToLower(filepath.Base(exePath))
+	return strings.Contains(exeBase, "keploy")
 }

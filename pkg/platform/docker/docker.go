@@ -894,11 +894,13 @@ func (idc *Impl) generateKeployVolumes() []string {
 
 	switch osName {
 	case "linux":
-		// Standard Linux volumes
+		// Standard Linux volumes (second bpffs mount outside /sys preserves
+		// trampoline grace pins across EnsureBPFFS overlays and AppArmor rules).
 		volumes = append(volumes,
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
+			"/sys/fs/bpf:/run/keploy/host-bpffs",
 		)
 	case "darwin":
 		// macOS volumes
@@ -906,6 +908,7 @@ func (idc *Impl) generateKeployVolumes() []string {
 			"/sys/fs/cgroup:/sys/fs/cgroup",
 			"/sys/kernel/debug:/sys/kernel/debug",
 			"/sys/fs/bpf:/sys/fs/bpf",
+			"/sys/fs/bpf:/run/keploy/host-bpffs",
 		)
 	case "windows":
 		// Windows volumes - check if using default context or colima
@@ -919,6 +922,7 @@ func (idc *Impl) generateKeployVolumes() []string {
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug:rw",
 					"/sys/fs/bpf:/sys/fs/bpf",
+					"/sys/fs/bpf:/run/keploy/host-bpffs",
 				)
 			} else {
 				// Colima context
@@ -926,6 +930,7 @@ func (idc *Impl) generateKeployVolumes() []string {
 					"/sys/fs/cgroup:/sys/fs/cgroup",
 					"/sys/kernel/debug:/sys/kernel/debug",
 					"/sys/fs/bpf:/sys/fs/bpf",
+					"/sys/fs/bpf:/run/keploy/host-bpffs",
 				)
 			}
 		}
@@ -1063,6 +1068,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Generate volumes using the extracted function
 	volumes := idc.generateKeployVolumes()
 	volumes = append(volumes, fmt.Sprintf("%s:%s", KeployTLSVolumeName, KeployTLSMountPath))
+	envVars = append(envVars, "KEPLOY_LAUNCH_MODE=compose")
 
 	// Bind-mount the host keploy folder + wire KEPLOY_DEBUG_FILE only when
 	// this run asked for the agent's debug log (--debug, or --debug-file
