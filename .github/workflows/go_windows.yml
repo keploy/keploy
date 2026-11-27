@@ -169,10 +169,14 @@ jobs:
       # none (started detached or as a service), two sends at once included.
       # And the check every command makes that its working directory is
       # still there (GetLastDirectory), which must answer the directory a
-      # Windows run is in. Only these tests of ./utils/ run here: the package
-      # as a whole has not been shown to pass on Windows.
-      - name: Test the Windows stop, working directory, and child console pipe (amd64)
-        run: go test -count=1 -v -run "TestTheWindowsStopSaysItKilled|TestOnWindowsKeploysStopReaches|TestGetLastDirectory|TestChildConsoleWindowsDrainsWithoutWaitingForAGrandchildHoldingThePipe|TestChildConsoleWindowsPipeHasOwnerOnlyDACLAndReadAttributes" ./utils/
+      # Windows run is in, plus the DNS port allocator's real-socket tests
+      # (Windows assigns TCP and UDP :0 sequentially from separate cursors,
+      # so TestGetAvailableDNSPortSkipsContiguousUDPBlock only proves the
+      # sequential-cursor regression when it runs on Windows). Only these
+      # tests of ./utils/ run here: the package as a whole has not been shown
+      # to pass on Windows.
+      - name: Test the Windows stop, working directory, child console pipe, and DNS port allocation (amd64)
+        run: go test -count=1 -v -run "TestTheWindowsStopSaysItKilled|TestOnWindowsKeploysStopReaches|TestGetLastDirectory|TestChildConsoleWindowsDrainsWithoutWaitingForAGrandchildHoldingThePipe|TestChildConsoleWindowsPipeHasOwnerOnlyDACLAndReadAttributes|TestGetAvailableDNSPortSkipsContiguousUDPBlock|TestTheOSsPickForADNSPortIsFreeOverUDP|TestADNSPortHeldOverUDPAloneIsMovedOff|TestADNSPortsProbeBindsUDPBesideTCP|TestTheDNSPickersProbeOverUDPToo" ./utils/
         shell: cmd
 
       # The agent's start on Windows, which has no PTY: what the command
