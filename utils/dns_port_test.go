@@ -36,10 +36,12 @@ func udpPicks(t *testing.T, closeFails bool, taken ...uint32) *[]uint32 {
 type udpStandIn struct {
 	net.PacketConn
 	port       int
+	closed     bool
 	closeFails bool
 }
 
 func (c *udpStandIn) Close() error {
+	c.closed = true
 	if c.closeFails {
 		return errors.New("close failed")
 	}
@@ -100,45 +102,246 @@ func TestADNSPortsProbeBindsUDPBesideTCP(t *testing.T) {
 	}
 }
 
-// Where the OS picks a DNS server's port, as off Linux, a pick a UDP socket
-// holds is passed over, held while the OS is asked again so that it cannot
-// hand it back; a pick for TCP alone binds no UDP socket. Where every pick is
-// held over UDP it is an error after udpHeldPicks of them, not a hang.
+// Where the OS picks a DNS server's port, as on Windows and macOS, it binds
+// UDP ":0" first and checks TCP on that exact port while holding the UDP
+// socket (so Windows UDP excluded port ranges at the TCP cursor are bypassed
+// natively). If the UDP cursor is stuck in a TCP-blocked run, it falls back
+// to TCP ":0" + UDP check; if both sequential cursors sit inside blocked runs,
+// it jumps out via random probes over 49152-65535 and 16384-49151. Every held
+// socket is closed before returning, Close errors surface immediately, and
+// total exhaustion returns a clear error rather than hanging.
 func TestTheOSsPickForADNSPortIsFreeOverUDP(t *testing.T) {
 	unknown := func() (uint32, uint32, bool) { return 0, 0, false }
-	picks := osPicks(t, 40001, 40002, 40003)
-	asked := udpPicks(t, false, 40002)
-	if got, err := availablePortAbove(unknown, 0, true, 40001); err != nil || got != 40003 || len(*picks) != 3 || !slices.Equal(*asked, []uint32{40002, 40003}) {
-		t.Fatalf("got port %d, err %v, after %d picks and UDP binds on %v; want 40003, the excluded 40001 and the UDP-held 40002 passed over", got, err, len(*picks), *asked)
+
+	t.Run("stage1_udp_first_skips_excluded_and_tcp_held", func(t *testing.T) {
+		wasUDP, wasTCP := udpListen, portListen
+		t.Cleanup(func() { udpListen, portListen = wasUDP, wasTCP })
+
+		udpSeq := []int{59001, 59002, 59003}
+		var openedUDP []*udpStandIn
+		udpListen = func(network, address string) (net.PacketConn, error) {
+			if network != "udp" || address != ":0" {
+				return nil, fmt.Errorf("unexpected UDP bind on %s %s", network, address)
+			}
+			if n := len(openedUDP); n > 0 && openedUDP[n-1].closed {
+				t.Errorf("previous rejected UDP pick %d was closed before next :0 ask", openedUDP[n-1].port)
+			}
+			if len(udpSeq) == 0 {
+				return nil, errors.New("exhausted")
+			}
+			c := &udpStandIn{port: udpSeq[0]}
+			udpSeq = udpSeq[1:]
+			openedUDP = append(openedUDP, c)
+			return c, nil
+		}
+		var checkedTCP []uint32
+		portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+			var p uint32
+			if _, err := fmt.Sscanf(address, ":%d", &p); err != nil || network != "tcp" {
+				return nil, fmt.Errorf("unexpected TCP listen on %s %s", network, address)
+			}
+			// Verify the matching UDP socket is STILL open while TCP is bound.
+			foundOpen := false
+			for _, u := range openedUDP {
+				if uint32(u.port) == p && !u.closed {
+					foundOpen = true
+				}
+			}
+			if !foundOpen {
+				t.Errorf("TCP probe on %d ran without UDP socket held open", p)
+			}
+			checkedTCP = append(checkedTCP, p)
+			if p == 59002 {
+				return nil, errors.New("address already in use")
+			}
+			return &pickListener{port: int(p)}, nil
+		}
+
+		got, err := availablePortAbove(unknown, 0, true, 59001)
+		if err != nil || got != 59003 || len(openedUDP) != 3 || !slices.Equal(checkedTCP, []uint32{59002, 59003}) {
+			t.Fatalf("got port %d, err %v, udpPicks=%d tcpChecked=%v; want 59003", got, err, len(openedUDP), checkedTCP)
+		}
+		for _, u := range openedUDP {
+			if !u.closed {
+				t.Fatalf("UDP socket on %d was not closed", u.port)
+			}
+		}
+	})
+
+	t.Run("tcp_only_binds_no_udp_socket", func(t *testing.T) {
+		picks := osPicks(t, 40002)
+		asked := udpPicks(t, false, 40002)
+		if got, err := availablePortAbove(unknown, 0, false); err != nil || got != 40002 || len(*picks) != 1 || len(*asked) != 0 {
+			t.Fatalf("got port %d, err %v, after %d picks and UDP binds on %v; want 40002 with no UDP bind", got, err, len(*picks), *asked)
+		}
+	})
+
+	t.Run("stage2_falls_back_to_tcp_first_when_udp_cursor_is_tcp_blocked", func(t *testing.T) {
+		wasUDP, wasTCP := udpListen, portListen
+		t.Cleanup(func() { udpListen, portListen = wasUDP, wasTCP })
+
+		nextUDP := 55000
+		nextTCP := 61000
+		udpListen = func(network, address string) (net.PacketConn, error) {
+			if address == ":0" {
+				p := nextUDP
+				nextUDP++
+				return &udpStandIn{port: p}, nil
+			}
+			var p uint32
+			if _, err := fmt.Sscanf(address, ":%d", &p); err != nil {
+				return nil, err
+			}
+			if p == 61000 {
+				return nil, errors.New("udp held")
+			}
+			return &udpStandIn{port: int(p)}, nil
+		}
+		portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+			if address == ":0" {
+				p := nextTCP
+				nextTCP++
+				return &pickListener{port: p}, nil
+			}
+			// Every port in the 55000..55099 UDP cursor block is excluded on TCP!
+			var p uint32
+			if _, err := fmt.Sscanf(address, ":%d", &p); err != nil {
+				return nil, err
+			}
+			if p >= 55000 && p < 55100 {
+				return nil, errors.New("tcp excluded")
+			}
+			return &pickListener{port: int(p)}, nil
+		}
+
+		got, err := availablePortAbove(unknown, 0, true)
+		if err != nil || got != 61001 {
+			t.Fatalf("stage2 fallback = %d, %v; want 61001", got, err)
+		}
+	})
+
+	t.Run("stage3_random_probes_jump_out_of_double_excluded_blocks", func(t *testing.T) {
+		wasUDP, wasTCP, wasOff, wasProbe := udpListen, portListen, portOffset, portProbe
+		t.Cleanup(func() { udpListen, portListen, portOffset, portProbe = wasUDP, wasTCP, wasOff, wasProbe })
+
+		nextUDP := 55000
+		nextTCP := 63300
+		udpListen = func(network, address string) (net.PacketConn, error) {
+			if address == ":0" {
+				p := nextUDP
+				nextUDP++
+				return &udpStandIn{port: p}, nil
+			}
+			// Every TCP cursor pick in 63300..63399 is excluded on UDP!
+			return nil, errors.New("WSAEACCES udp excluded")
+		}
+		portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+			if address == ":0" {
+				p := nextTCP
+				nextTCP++
+				return &pickListener{port: p}, nil
+			}
+			// Every UDP cursor pick in 55000..55099 is excluded on TCP!
+			return nil, errors.New("WSAEACCES tcp excluded")
+		}
+		portOffset = func(span uint32) (uint32, bool) { return 1000, true }
+		portProbe = func(port uint32, udp bool) (bool, error) {
+			if !udp {
+				t.Errorf("stage3 probe called with udp=false")
+			}
+			return port == dynamicPortLo+1000, nil
+		}
+
+		got, err := availablePortAbove(unknown, 0, true, 63313, 63307)
+		if err != nil || got != dynamicPortLo+1000 {
+			t.Fatalf("stage3 fallback = %d, %v; want %d", got, err, dynamicPortLo+1000)
+		}
+	})
+
+	t.Run("all_stages_exhausted_returns_error_without_hanging", func(t *testing.T) {
+		wasUDP, wasTCP, wasOff, wasProbe := udpListen, portListen, portOffset, portProbe
+		t.Cleanup(func() { udpListen, portListen, portOffset, portProbe = wasUDP, wasTCP, wasOff, wasProbe })
+
+		nextUDP := 55000
+		nextTCP := 63300
+		udpListen = func(network, address string) (net.PacketConn, error) {
+			if address == ":0" {
+				p := nextUDP
+				nextUDP++
+				return &udpStandIn{port: p}, nil
+			}
+			return nil, errors.New("udp blocked")
+		}
+		portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+			if address == ":0" {
+				p := nextTCP
+				nextTCP++
+				return &pickListener{port: p}, nil
+			}
+			return nil, errors.New("tcp blocked")
+		}
+		portOffset = func(uint32) (uint32, bool) { return 0, false }
+		portProbe = func(uint32, bool) (bool, error) { return false, nil }
+
+		got, err := availablePortAbove(unknown, 0, true)
+		if err == nil || !strings.Contains(err.Error(), "free over UDP and TCP") {
+			t.Fatalf("exhausted = %d, %v; want error naming UDP and TCP", got, err)
+		}
+	})
+
+	t.Run("close_error_surfaces_immediately", func(t *testing.T) {
+		wasUDP, wasTCP := udpListen, portListen
+		t.Cleanup(func() { udpListen, portListen = wasUDP, wasTCP })
+
+		udpListen = func(network, address string) (net.PacketConn, error) {
+			if address == ":0" {
+				return &udpStandIn{port: 40001, closeFails: true}, nil
+			}
+			return nil, errors.New("unexpected")
+		}
+		portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+			return &pickListener{port: 40001}, nil
+		}
+
+		if got, err := availablePortAbove(unknown, 0, true); err == nil || !strings.Contains(err.Error(), "UDP port 40001") {
+			t.Fatalf("got port %d, err %v; want UDP port 40001 close error", got, err)
+		}
+	})
+}
+
+// TestGetAvailableDNSPortSkipsContiguousUDPBlock holds a contiguous block of
+// UDP ports right ahead of the OS's next TCP :0 pick (reproducing Windows's
+// sequential TCP cursor entering a 100-port Hyper-V/WinNAT UDP excluded range)
+// and proves availablePortAbove(unknown, 0, true, ...) succeeds every time.
+func TestGetAvailableDNSPortSkipsContiguousUDPBlock(t *testing.T) {
+	unknown := func() (uint32, uint32, bool) { return 0, 0, false }
+
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, l := range *picks {
-		if !l.closed {
-			t.Fatalf("the pick on %d was not let go", l.port)
+	cursor := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	var held []net.PacketConn
+	t.Cleanup(func() {
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
+	for p := cursor + 1; p <= cursor+24 && p <= 65535; p++ {
+		if c, berr := net.ListenPacket("udp", fmt.Sprintf(":%d", p)); berr == nil {
+			held = append(held, c)
 		}
 	}
-
-	picks = osPicks(t, 40002)
-	asked = udpPicks(t, false, 40002)
-	if got, err := availablePortAbove(unknown, 0, false); err != nil || got != 40002 || len(*picks) != 1 || len(*asked) != 0 {
-		t.Fatalf("got port %d, err %v, after %d picks and UDP binds on %v; want 40002, the OS's one pick, with no UDP bind", got, err, len(*picks), *asked)
-	}
-
-	all := []int{}
-	allHeld := []uint32{}
-	for p := 40001; p <= 40001+udpHeldPicks+1; p++ {
-		all, allHeld = append(all, p), append(allHeld, uint32(p))
-	}
-	picks = osPicks(t, all...)
-	udpPicks(t, false, allHeld...)
-	got, err := availablePortAbove(unknown, 0, true)
-	if err == nil || !strings.Contains(err.Error(), "free over UDP and TCP") || len(*picks) != 1+udpHeldPicks || udpHeldPicks < 1 {
-		t.Fatalf("got port %d, err %v, after %d picks, each held over UDP; want an error after %d", got, err, len(*picks), 1+udpHeldPicks)
-	}
-
-	picks = osPicks(t, 40001)
-	udpPicks(t, true)
-	if got, err := availablePortAbove(unknown, 0, true); err == nil || !strings.Contains(err.Error(), "UDP port 40001") || len(*picks) != 1 {
-		t.Fatalf("got port %d, err %v, after %d picks, the UDP socket not let go; want its error", got, err, len(*picks))
+	for i := 0; i < 20; i++ {
+		got, err := availablePortAbove(unknown, 0, true, 16789, 26789)
+		if err != nil {
+			t.Fatalf("iter %d: availablePortAbove failed with contiguous UDP block held: %v", i, err)
+		}
+		if got == 0 || got == 16789 || got == 26789 {
+			t.Fatalf("iter %d: got invalid/excluded port %d", i, got)
+		}
 	}
 }
 

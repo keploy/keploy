@@ -2227,49 +2227,10 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 		top = ephemeralHi
 	}
 	if top > 0 {
-		lo := top + 1
-		span := 65536 - lo // inclusive of 65535
-		// Candidates drawn at random, each on its own (randomProbes of them),
-		// then every port from a random start. Not a scan from the bottom:
-		// it returns the LOWEST free port every time, so two keploy processes
-		// started moments apart — the ordinary CI pattern — are handed an
-		// identical number, each having verified it free; whichever binds
-		// second loses. Nor a scan from a random start alone: every start
-		// inside a run of held ports leads it to the first free port after
-		// the run, so beside such a run (a process holding a block of ports
-		// above the range) the draws of processes started together met there.
-		for i := 0; i < randomProbes; i++ {
-			off, ok := portOffset(span)
-			if !ok {
-				break
-			}
-			if slices.Contains(exclude, lo+off) {
-				continue
-			}
-			free, err := portProbe(lo+off, udp)
-			if err != nil {
-				return 0, err
-			}
-			if free {
-				return lo + off, nil
-			}
-		}
-		start := lo
-		if off, ok := portOffset(span); ok {
-			start = lo + off
-		}
-		for i := uint32(0); i < span; i++ {
-			port := lo + ((start - lo + i) % span)
-			if slices.Contains(exclude, port) {
-				continue
-			}
-			free, err := portProbe(port, udp)
-			if err != nil {
-				return 0, err
-			}
-			if free {
-				return port, nil
-			}
+		if port, found, err := probeRange(top+1, 65535, udp, exclude); err != nil {
+			return 0, err
+		} else if found {
+			return port, nil
 		}
 	}
 
@@ -2282,14 +2243,65 @@ func availablePortAbove(ephemeral func() (lo, hi uint32, known bool), floor uint
 	return osAssignedPort(exclude, udp)
 }
 
+// probeRange searches [lo, hi] for a port outside exclude that portProbe
+// reports free (over TCP, and with udp, over UDP too).
+//
+// Candidates are drawn at random first (randomProbes of them), then every port
+// in [lo, hi] is scanned from a random start. Not a scan from the bottom:
+// that returns the LOWEST free port every time, so two keploy processes
+// started moments apart — the ordinary CI pattern — are handed an identical
+// number, each having verified it free; whichever binds second loses. Nor a
+// scan from a random start alone: every start inside a run of held ports leads
+// it to the first free port after the run, so beside such a run (a process
+// holding a block of ports) the draws of processes started together met there.
+func probeRange(lo, hi uint32, udp bool, exclude []uint32) (uint32, bool, error) {
+	if lo == 0 || hi < lo {
+		return 0, false, nil
+	}
+	span := hi - lo + 1
+	for i := 0; i < randomProbes; i++ {
+		off, ok := portOffset(span)
+		if !ok {
+			break
+		}
+		if slices.Contains(exclude, lo+off) {
+			continue
+		}
+		free, err := portProbe(lo+off, udp)
+		if err != nil {
+			return 0, false, err
+		}
+		if free {
+			return lo + off, true, nil
+		}
+	}
+	start := lo
+	if off, ok := portOffset(span); ok {
+		start = lo + off
+	}
+	for i := uint32(0); i < span; i++ {
+		port := lo + ((start - lo + i) % span)
+		if slices.Contains(exclude, port) {
+			continue
+		}
+		free, err := portProbe(port, udp)
+		if err != nil {
+			return 0, false, err
+		}
+		if free {
+			return port, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
 // osAssignedPort is a port the OS assigns (a listener on ":0", let go before
-// it returns) other than exclude, and, with udp, one a UDP socket binds too.
-// A pick in exclude, or one a UDP socket holds, stays held while the OS is
-// asked again, so the OS cannot hand it back: len(exclude)+1 asks always reach
-// a port outside exclude, and udpHeldPicks more pass over as many picks held
-// over UDP, the OS's picks being its own ephemeral ports, which a UDP socket
-// seldom holds.
+// it returns) other than exclude, and, with udp, one free over both UDP and
+// TCP (osAssignedDNSPort).
 func osAssignedPort(exclude []uint32, udp bool) (uint32, error) {
+	if udp {
+		return osAssignedDNSPort(exclude)
+	}
 	var held []net.Listener
 	defer func() {
 		for _, ln := range held {
@@ -2297,9 +2309,6 @@ func osAssignedPort(exclude []uint32, udp bool) (uint32, error) {
 		}
 	}()
 	asks := len(exclude) + 1
-	if udp {
-		asks += udpHeldPicks
-	}
 	for i := 0; i < asks; i++ {
 		ln, err := portListen(context.Background(), "tcp", ":0")
 		if err != nil {
@@ -2310,26 +2319,130 @@ func osAssignedPort(exclude []uint32, udp bool) (uint32, error) {
 		if slices.Contains(exclude, port) {
 			continue
 		}
-		if !udp {
-			return port, nil
-		}
-		free, err := udpFree(port)
-		if err != nil {
-			return 0, err
-		}
-		if free {
-			return port, nil
-		}
-	}
-	if udp {
-		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, in %d of the OS's picks", exclude, asks)
+		return port, nil
 	}
 	return 0, fmt.Errorf("failed to find a port other than %v", exclude)
 }
 
-// udpHeldPicks is how many of the OS's picks held over UDP osAssignedPort
-// passes over for a DNS server's port before it fails.
+// osAssignedDNSPort finds a port outside exclude that is free over both UDP
+// and TCP on platforms where the ephemeral range is unknown (Windows, macOS)
+// or exhausted above its ceiling.
+//
+// Windows allocates TCP ":0" and UDP ":0" strictly sequentially from separate
+// cursors inside 49152-65535, and Hyper-V / WinNAT / WSL dynamically reserve
+// 100-port contiguous excluded blocks independently per protocol. Asking only
+// TCP ":0" a handful of times fails whenever the sequential TCP cursor enters
+// a 100-port UDP-excluded or UDP-held run — even with thousands of free ports
+// elsewhere.
+//
+// Strategy:
+//  1. Ask the OS for UDP ":0" first (skipping UDP excluded ranges and busy UDP
+//     sockets natively) and verify TCP on that exact port while holding the
+//     UDP socket.
+//  2. If the UDP cursor is stuck in a TCP-excluded/TCP-held block, try the
+//     independent TCP ":0" cursor and verify UDP while holding the TCP socket.
+//  3. If both sequential cursors sit inside excluded/held runs simultaneously,
+//     jump out via random probes (and random-start scan) across the dynamic
+//     range 49152-65535, then unprivileged ports 16384-49151.
+func osAssignedDNSPort(exclude []uint32) (uint32, error) {
+	asks := len(exclude) + 1 + udpHeldPicks
+	if port, found, err := osAssignedUDPFirst(exclude, asks); err != nil {
+		return 0, err
+	} else if found {
+		return port, nil
+	}
+	if port, found, err := osAssignedTCPFirst(exclude, asks); err != nil {
+		return 0, err
+	} else if found {
+		return port, nil
+	}
+	if port, found, err := probeRange(dynamicPortLo, 65535, true, exclude); err != nil {
+		return 0, err
+	} else if found {
+		return port, nil
+	}
+	if port, found, err := probeRange(unprivilegedPortLo, dynamicPortLo-1, true, exclude); err != nil {
+		return 0, err
+	} else if found {
+		return port, nil
+	}
+	return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after trying %d UDP and %d TCP OS picks and scanning unprivileged ports", exclude, asks, asks)
+}
+
+func osAssignedUDPFirst(exclude []uint32, asks int) (uint32, bool, error) {
+	var held []net.PacketConn
+	defer func() {
+		for _, pc := range held {
+			_ = pc.Close()
+		}
+	}()
+	for i := 0; i < asks; i++ {
+		pc, err := udpListen("udp", ":0")
+		if err != nil {
+			return 0, false, nil
+		}
+		held = append(held, pc)
+		port := uint32(pc.LocalAddr().(*net.UDPAddr).Port)
+		if slices.Contains(exclude, port) {
+			continue
+		}
+		free, err := tcpFree(port)
+		if err != nil {
+			return 0, false, err
+		}
+		if free {
+			held = held[:len(held)-1]
+			if err := pc.Close(); err != nil {
+				return 0, false, fmt.Errorf("failed to release probe socket on UDP port %d: %w", port, err)
+			}
+			return port, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+func osAssignedTCPFirst(exclude []uint32, asks int) (uint32, bool, error) {
+	var held []net.Listener
+	defer func() {
+		for _, ln := range held {
+			_ = ln.Close()
+		}
+	}()
+	for i := 0; i < asks; i++ {
+		ln, err := portListen(context.Background(), "tcp", ":0")
+		if err != nil {
+			return 0, false, nil
+		}
+		held = append(held, ln)
+		port := uint32(ln.Addr().(*net.TCPAddr).Port)
+		if slices.Contains(exclude, port) {
+			continue
+		}
+		free, err := udpFree(port)
+		if err != nil {
+			return 0, false, err
+		}
+		if free {
+			held = held[:len(held)-1]
+			if err := ln.Close(); err != nil {
+				return 0, false, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+			}
+			return port, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+// udpHeldPicks is how many OS ":0" picks blocked on the opposite protocol each
+// sequential pass in osAssignedDNSPort passes over before switching strategy.
 const udpHeldPicks = 8
+
+// dynamicPortLo and unprivilegedPortLo bound the fallback probe ranges used
+// when both sequential OS ":0" cursors sit inside excluded or held runs.
+const (
+	dynamicPortLo      uint32 = 49152
+	unprivilegedPortLo uint32 = 16384
+)
 
 // randomProbes is how many candidates availablePortAbove draws at random
 // before it scans: with half the ports held, all 32 miss about once in four
@@ -2390,6 +2503,19 @@ func udpFree(port uint32) (bool, error) {
 	}
 	if err := pc.Close(); err != nil {
 		return false, fmt.Errorf("failed to release probe socket on UDP port %d: %w", port, err)
+	}
+	return true, nil
+}
+
+// tcpFree says whether a plain TCP listener binds port, which it then lets go;
+// a failed Close is an error, as probePort's.
+func tcpFree(port uint32) (bool, error) {
+	ln, err := portListen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false, nil
+	}
+	if err := ln.Close(); err != nil {
+		return false, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
 	}
 	return true, nil
 }
