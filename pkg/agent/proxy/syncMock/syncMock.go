@@ -3,6 +3,7 @@ package manager
 import (
 	"container/heap"
 	"context"
+	"maps"
 	"math/rand"
 	"slices"
 	"sort"
@@ -1614,7 +1615,10 @@ type rereadLoss struct {
 }
 
 // processOutQueued is what every manager of the process holds queued
-// (outQueueBytes, summed): moved under each manager's outQueueMu with its own.
+// (outQueueBytes plus spilled-item metadata bytes, summed). RAM queue and
+// tail bytes move under each manager's outQueueMu; spilled-item per-item
+// reservations move under outQueueMu and their refunds / interned-map
+// adjustments run atomically under lane.spillMu.
 var processOutQueued atomic.Int64
 
 // outChanStall is how long the queue's drainer waits for outChan's consumer
@@ -1675,13 +1679,14 @@ type outLane struct {
 	// RAM queueBound in strict FIFO order (queue -> spill -> tail).
 	tail      []queuedMock
 	tailBytes int64
-	// spillMu serializes lane.spill, lane.spillMeta, and lane.spillMetaBytes
-	// outside outQueueMu so spill Put/Peek I/O never blocks RAM operations or
-	// OutQueued. Never nested with outQueueMu.
+	// spillMu serializes lane.spill, lane.spillMeta, lane.spillMetaBytes, and
+	// lane.metaPool outside outQueueMu so spill Put/Peek I/O never blocks RAM
+	// operations or OutQueued. Never nested with outQueueMu.
 	spillMu        sync.Mutex
 	spill          OutQueueSpillLane
 	spillMeta      []spillItemMeta
 	spillMetaBytes int64
+	metaPool       map[string]*spillInternedMap
 	// spillCount mirrors len(spillMeta) (updated under spillMu); spillInFlight
 	// and spillWait are guarded by outQueueMu so drainOutQueue never exits
 	// while a Put is in progress outside outQueueMu.
@@ -1709,6 +1714,58 @@ func (l *outLane) spillWaitChLocked() <-chan struct{} {
 		l.spillWait = make(chan struct{})
 	}
 	return l.spillWait
+}
+
+// acquireSpillMapLocked returns an interned (or unpooled) copy of md under
+// lane.spillMu, charging its bytes to processOutQueued and lane.spillMetaBytes
+// on a pool miss only if they fit within bound. Returns (nil, true) for empty
+// metadata, and (nil, false) if a new map would exceed bound.
+func (l *outLane) acquireSpillMapLocked(md map[string]string, bound int64) (*spillInternedMap, bool) {
+	if len(md) == 0 {
+		return nil, true
+	}
+	key := spillMetadataKey(md)
+	if existing, ok := l.metaPool[key]; ok {
+		existing.refs++
+		return existing, true
+	}
+	mapBytes := spillMetadataMapBytes(md)
+	if processOutQueued.Load()+mapBytes > bound {
+		return nil, false
+	}
+	processOutQueued.Add(mapBytes)
+	l.spillMetaBytes += mapBytes
+	entry := &spillInternedMap{
+		m:     maps.Clone(md),
+		bytes: mapBytes,
+		refs:  1,
+	}
+	if len(l.metaPool) < maxSpillInternedMaps {
+		if l.metaPool == nil {
+			l.metaPool = make(map[string]*spillInternedMap)
+		}
+		entry.key = key
+		entry.pooled = true
+		l.metaPool[key] = entry
+	}
+	return entry, true
+}
+
+// releaseSpillMapLocked decrements the refcount of im under lane.spillMu and
+// refunds its bytes once no spilled item references it.
+func (l *outLane) releaseSpillMapLocked(im *spillInternedMap) {
+	if im == nil {
+		return
+	}
+	im.refs--
+	if im.refs > 0 {
+		return
+	}
+	if im.pooled && l.metaPool != nil {
+		delete(l.metaPool, im.key)
+	}
+	l.spillMetaBytes -= im.bytes
+	processOutQueued.Add(-im.bytes)
 }
 
 // HandOnProgress is a count that moves whenever the manager hands a mock on
@@ -1845,9 +1902,7 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 	spillFactory := m.activeOutSpill()
 	ramCap := bound
 	if spillFactory != nil {
-		if rl := spillFactory.RAMLimit(); rl > 0 && rl < ramCap {
-			ramCap = rl
-		}
+		ramCap = spillRAMCap(bound, spillFactory.RAMLimit())
 	}
 	dropFullLocked := func() MockDrop {
 		epoch := lane.epoch
@@ -1886,29 +1941,32 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 	overRAM := (len(lane.queue) > 0 || lane.inHand) && processOutQueued.Load()+size > ramCap
 	if alreadySpilled || overRAM {
 		if spillFactory != nil {
-			meta := newSpillItemMeta(mock, owner, done)
-			if processOutQueued.Load()+meta.metaBytes <= bound {
-				// Reserve each spilled item's in-RAM metadata bytes against
-				// processOutQueued under outQueueMu before releasing it so a
-				// burst of many small mocks cannot outgrow the process RAM
-				// bound; once metadata reaches bound, spilling stops and the
-				// bounded RAM tail / fail-closed drop path takes over.
-				processOutQueued.Add(meta.metaBytes)
-				// Run Put outside outQueueMu (serialized by lane.spillMu) so disk
-				// I/O and encryption never hold outQueueMu.
+			itemBytes := spillItemBaseRamBytes(mock, owner, done)
+			if processOutQueued.Load()+itemBytes <= bound {
+				// Reserve this spilled item's compact per-item RAM bytes under
+				// outQueueMu before releasing it (without cloning metadata maps
+				// under the hot lock); map interning/cloning and Put run under
+				// lane.spillMu outside outQueueMu.
+				processOutQueued.Add(itemBytes)
 				lane.spillInFlight++
 				startDrainerLocked()
 				m.outQueueMu.Unlock()
 
 				lane.spillMu.Lock()
-				if lane.spill == nil {
-					lane.spill = spillFactory.NewLane()
-				}
-				spilled := lane.spill != nil && lane.spill.Put(mock, owner, size)
-				if spilled {
-					lane.spillMeta = append(lane.spillMeta, meta)
-					lane.spillMetaBytes += meta.metaBytes
-					lane.spillCount.Add(1)
+				spilled := false
+				if im, ok := lane.acquireSpillMapLocked(mock.Spec.Metadata, bound); ok {
+					meta := buildSpillItemMeta(mock, owner, done, im, itemBytes)
+					if lane.spill == nil {
+						lane.spill = spillFactory.NewLane()
+					}
+					spilled = lane.spill != nil && lane.spill.Put(mock, owner, size)
+					if spilled {
+						lane.spillMeta = append(lane.spillMeta, meta)
+						lane.spillMetaBytes += itemBytes
+						lane.spillCount.Add(1)
+					} else {
+						lane.releaseSpillMapLocked(im)
+					}
 				}
 				lane.spillMu.Unlock()
 
@@ -1920,10 +1978,10 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 					m.outChanMu.RUnlock()
 					return MockTaken
 				}
-				processOutQueued.Add(-meta.metaBytes)
-				// Spill declined (e.g. shared disk budget exhausted): keep using
-				// RAM up to bound so spilling never drops worse than no spill.
-				// Place behind any active spill in lane.tail to preserve strict FIFO.
+				processOutQueued.Add(-itemBytes)
+				// Spill declined (e.g. disk budget or metadata bound exhausted):
+				// keep using RAM up to bound so spilling never drops worse than
+				// no spill, placing behind any active spill in lane.tail for FIFO.
 				if processOutQueued.Load()+size > bound {
 					return dropFullLocked()
 				}
@@ -2014,6 +2072,7 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 				lane.spill = nil
 				lostMeta := lane.spillMeta
 				lane.spillMeta = nil
+				lane.metaPool = nil
 				if lane.spillMetaBytes > 0 {
 					processOutQueued.Add(-lane.spillMetaBytes)
 					lane.spillMetaBytes = 0
@@ -2031,8 +2090,10 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 				lane.spillMeta = lane.spillMeta[1:]
 				lane.spillMetaBytes -= meta.metaBytes
 				processOutQueued.Add(-meta.metaBytes)
+				lane.releaseSpillMapLocked(meta.md)
 				if len(lane.spillMeta) == 0 {
 					lane.spillMeta = nil
+					lane.metaPool = nil
 				}
 			}
 			lane.spillCount.Add(-1)
@@ -2068,10 +2129,7 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 				lane.spill.Discard()
 				lane.spill = nil
 				lane.spillMeta = nil
-				if lane.spillMetaBytes > 0 {
-					processOutQueued.Add(-lane.spillMetaBytes)
-					lane.spillMetaBytes = 0
-				}
+				lane.metaPool = nil
 			}
 			lane.spillMu.Unlock()
 
@@ -2113,7 +2171,7 @@ func (m *SyncMockManager) dropCorruptSpill(lostMeta []spillItemMeta, lostCount i
 		// session-reusable command whose protocol payload was not retained in
 		// meta) and stubMock() could not reconstruct that predicate, still
 		// open the shared leave-out span fail-closed from its request time.
-		if meta.owner == "" && !meta.undeliv && meta.reusable && !attributedReusable(stub) {
+		if meta.owner == "" && !meta.undeliv() && meta.reusable() && !attributedReusable(stub) {
 			from := meta.reqTime
 			if from.IsZero() {
 				from = beforeAnyRequest
@@ -2192,6 +2250,7 @@ func (m *SyncMockManager) giveUpOutQueue(lane *outLane, hand queuedMock, why str
 			lane.spill.Discard()
 			lane.spillMeta = nil
 		}
+		lane.metaPool = nil
 		if lane.spillMetaBytes > 0 {
 			processOutQueued.Add(-lane.spillMetaBytes)
 			lane.spillMetaBytes = 0

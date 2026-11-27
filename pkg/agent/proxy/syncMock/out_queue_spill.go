@@ -2,6 +2,9 @@ package manager
 
 import (
 	"maps"
+	"slices"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -25,8 +28,10 @@ type OutQueueSpill interface {
 	NewLane() OutQueueSpillLane
 
 	// RAMLimit returns the process-wide queued byte threshold at which the
-	// output queue begins spilling instead of growing in RAM. A value <= 0
-	// uses the standard queueBound; values above queueBound are clamped to it.
+	// output queue begins spilling instead of growing in RAM. A quarter of
+	// queueBound is always reserved for spilled-item bookkeeping, so values
+	// <= 0 or above queueBound - queueBound/4 are clamped to
+	// queueBound - queueBound/4.
 	RAMLimit() int64
 }
 
@@ -64,10 +69,55 @@ type OutQueueSpillLane interface {
 	Discard() int
 }
 
-// spillItemMetaBaseBytes conservatively covers the spillItemMeta struct,
-// slice growth slack, done closure, and Go allocator/GC overhead per spilled
-// mock (measured ~603-681 B/mock live heap for 1 KiB mocks with metadata).
-const spillItemMetaBaseBytes int64 = 512
+// spillMetaReserveDivisor reserves 1/4 of queueBound for spilled-item
+// bookkeeping so RAM head entries never starve spill metadata when
+// RAMLimit <= 0 or RAMLimit >= queueBound.
+const spillMetaReserveDivisor int64 = 4
+
+// spillRAMCap clamps ramLimit so spilled-item bookkeeping always retains
+// bound/spillMetaReserveDivisor headroom inside bound.
+func spillRAMCap(bound, ramLimit int64) int64 {
+	maxHead := bound - bound/spillMetaReserveDivisor
+	if maxHead < 0 {
+		maxHead = 0
+	}
+	if ramLimit <= 0 || ramLimit > maxHead {
+		return maxHead
+	}
+	return ramLimit
+}
+
+// spillItemMetaBaseBytes covers the compact spillItemMeta struct (~136 B) plus
+// slice growth slack per spilled mock. Metadata maps are interned per lane
+// (spillInternedMap) so repeating pod metadata costs ~0 B per additional mock.
+const (
+	spillItemMetaBaseBytes int64 = 160
+	spillItemDoneBytes     int64 = 32
+	spillItemAsyncBase     int64 = 64
+	spillMapHeaderBytes    int64 = 256
+	// spillMapEntryBytes uses mockSize's 2*16+mapEntryOverhead (48 B) plus
+	// 16 B bucket-load-factor slack (Go maps keep <=6.5/8 occupancy) so even
+	// unique 50+ key maps are bounded conservatively.
+	spillMapEntryBytes   int64 = 2*16 + mapEntryOverhead + 16
+	maxSpillInternedMaps       = 256
+)
+
+const (
+	spillFlagStartup  uint8 = 1 << 0
+	spillFlagUndeliv  uint8 = 1 << 1
+	spillFlagReusable uint8 = 1 << 2
+)
+
+// spillInternedMap holds one immutable cloned metadata map shared by all
+// spilled items on a lane that carry identical key/value pairs. Guarded by
+// lane.spillMu.
+type spillInternedMap struct {
+	m      map[string]string
+	bytes  int64
+	refs   int64
+	key    string
+	pooled bool
+}
 
 // spillItemMeta retains only lightweight attribution and fail-closed metadata
 // for each spilled mock (never payload bytes) so a corrupt spill read can
@@ -79,57 +129,104 @@ type spillItemMeta struct {
 	kind      models.Kind
 	name      string
 	connID    string
-	metadata  map[string]string
+	md        *spillInternedMap
 	reqTime   time.Time
-	lifetime  models.Lifetime
-	isStartup bool
-	undeliv   bool
 	async     *models.AsyncMeta
-	reusable  bool
-	metaBytes int64
+	lifetime  models.Lifetime
+	flags     uint8
+	metaBytes int64 // per-item bytes charged (excludes shared md.bytes)
 }
 
-func (im spillItemMeta) ramBytes() int64 {
-	n := spillItemMetaBaseBytes + int64(len(im.owner)+len(im.name)+len(im.connID)+len(im.kind))
-	if len(im.metadata) > 0 {
-		n += 256
-		for k, v := range im.metadata {
-			n += int64(len(k)+len(v)) + 32
-		}
+func spillMetadataMapBytes(md map[string]string) int64 {
+	if len(md) == 0 {
+		return 0
 	}
-	if im.async != nil {
-		n += 128 + int64(len(im.async.Lane)+len(im.async.AnchorAfter))
+	n := spillMapHeaderBytes
+	for k, v := range md {
+		n += int64(len(k)+len(v)) + spillMapEntryBytes
 	}
 	return n
 }
 
-func newSpillItemMeta(mock *models.Mock, owner string, done func(delivered bool, epoch uint64)) spillItemMeta {
-	meta := spillItemMeta{owner: owner, done: done}
+func spillMetadataKey(md map[string]string) string {
+	keys := make([]string, 0, len(md))
+	total := 0
+	for k, v := range md {
+		keys = append(keys, k)
+		total += len(k) + len(v) + 16
+	}
+	slices.Sort(keys)
+	var sb strings.Builder
+	sb.Grow(total)
+	var numBuf [20]byte
+	for _, k := range keys {
+		v := md[k]
+		sb.Write(strconv.AppendInt(numBuf[:0], int64(len(k)), 10))
+		sb.WriteByte(':')
+		sb.WriteString(k)
+		sb.WriteByte('=')
+		sb.Write(strconv.AppendInt(numBuf[:0], int64(len(v)), 10))
+		sb.WriteByte(':')
+		sb.WriteString(v)
+		sb.WriteByte(';')
+	}
+	return sb.String()
+}
+
+// spillItemBaseRamBytes computes the per-item RAM charge for a spilled mock
+// without cloning metadata maps (safe to call under outQueueMu).
+func spillItemBaseRamBytes(mock *models.Mock, owner string, done func(delivered bool, epoch uint64)) int64 {
+	n := spillItemMetaBaseBytes + int64(len(owner))
+	if done != nil {
+		n += spillItemDoneBytes
+	}
+	if mock != nil {
+		n += int64(len(mock.Name) + len(mock.ConnectionID) + len(mock.Kind))
+		if mock.Spec.Async != nil {
+			n += spillItemAsyncBase + int64(len(mock.Spec.Async.Lane)+len(mock.Spec.Async.AnchorAfter))
+		}
+	}
+	return n
+}
+
+func (im spillItemMeta) isStartup() bool { return im.flags&spillFlagStartup != 0 }
+func (im spillItemMeta) undeliv() bool   { return im.flags&spillFlagUndeliv != 0 }
+func (im spillItemMeta) reusable() bool  { return im.flags&spillFlagReusable != 0 }
+
+func buildSpillItemMeta(mock *models.Mock, owner string, done func(delivered bool, epoch uint64), md *spillInternedMap, itemBytes int64) spillItemMeta {
+	meta := spillItemMeta{
+		owner:     owner,
+		done:      done,
+		md:        md,
+		metaBytes: itemBytes,
+	}
 	if mock != nil {
 		meta.kind = mock.Kind
 		meta.name = mock.Name
 		meta.connID = mock.ConnectionID
-		if len(mock.Spec.Metadata) > 0 {
-			meta.metadata = maps.Clone(mock.Spec.Metadata)
-		}
 		meta.reqTime = mock.Spec.ReqTimestampMock
 		meta.lifetime = mock.TestModeInfo.Lifetime
-		meta.isStartup = mock.TestModeInfo.IsStartup
-		meta.undeliv = mock.IsUndelivered()
+		if mock.TestModeInfo.IsStartup {
+			meta.flags |= spillFlagStartup
+		}
+		if mock.IsUndelivered() {
+			meta.flags |= spillFlagUndeliv
+		}
+		if attributedReusable(mock) {
+			meta.flags |= spillFlagReusable
+		}
 		if mock.Spec.Async != nil {
 			a := *mock.Spec.Async
 			meta.async = &a
 		}
-		meta.reusable = attributedReusable(mock)
 	}
-	meta.metaBytes = meta.ramBytes()
 	return meta
 }
 
 func (im spillItemMeta) stubMock() *models.Mock {
 	var md map[string]string
-	if len(im.metadata) > 0 {
-		md = maps.Clone(im.metadata)
+	if im.md != nil && len(im.md.m) > 0 {
+		md = maps.Clone(im.md.m)
 	}
 	var async *models.AsyncMeta
 	if im.async != nil {
@@ -147,10 +244,10 @@ func (im spillItemMeta) stubMock() *models.Mock {
 		},
 		TestModeInfo: models.TestModeInfo{
 			Lifetime:  im.lifetime,
-			IsStartup: im.isStartup,
+			IsStartup: im.isStartup(),
 		},
 	}
-	if im.undeliv {
+	if im.undeliv() {
 		m.MarkUndelivered()
 	}
 	return m
