@@ -99,9 +99,9 @@ type bgCollectorShapeBucket struct {
 	tailCount int
 
 	// Intrusive LRU pointers inside DerivedBgCollector.tailShapes.
-	inTailLRU   bool
-	lruPrev     *bgCollectorShapeBucket
-	lruNext     *bgCollectorShapeBucket
+	inTailLRU bool
+	lruPrev   *bgCollectorShapeBucket
+	lruNext   *bgCollectorShapeBucket
 }
 
 func (b *bgCollectorShapeBucket) pushBack(n *bgCollectorNode) {

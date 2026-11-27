@@ -707,7 +707,7 @@ func TestRunTestSet_Pass1PersistsWindowBackgroundForPass2AndRespectsExistingMapp
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			defer serverConn.Close()
+			defer func() { _ = serverConn.Close() }()
 			if err := httppkg.New(zap.NewNop()).MockOutgoing(
 				ctx,
 				serverConn,
