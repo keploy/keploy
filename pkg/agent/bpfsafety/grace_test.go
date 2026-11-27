@@ -60,6 +60,11 @@ func resetStateForTest(t *testing.T) {
 	prevDynFn := dynamicTrampImageCheckFn
 	prevValFn := validateHostBPFFSPathFn
 	prevOpenFn := openGraceOwnerInRootFn
+	prevInContainerFn := runningInContainerFn
+	prevSharedFn := hasHostSharedBPFFSFn
+	prevStatfsFn := nativeBPFFSStatfsFn
+	prevMkdirFn := nativeBPFFSMkdirAllFn
+	prevMountFn := nativeBPFFSMountFn
 	t.Cleanup(func() {
 		stateMu.Lock()
 		for _, fd := range unpinnedLockFDs {
@@ -84,6 +89,11 @@ func resetStateForTest(t *testing.T) {
 		dynamicTrampImageCheckFn = prevDynFn
 		validateHostBPFFSPathFn = prevValFn
 		openGraceOwnerInRootFn = prevOpenFn
+		runningInContainerFn = prevInContainerFn
+		hasHostSharedBPFFSFn = prevSharedFn
+		nativeBPFFSStatfsFn = prevStatfsFn
+		nativeBPFFSMkdirAllFn = prevMkdirFn
+		nativeBPFFSMountFn = prevMountFn
 	})
 }
 
@@ -467,6 +477,328 @@ func TestInitRetriesTransientMountCheckAndGraceSetupErrors(t *testing.T) {
 			t.Fatalf("expected 0 WARNs after grace-dir retry recovery, got %+v", logs.All())
 		}
 	})
+
+	t.Run("persistent_grace_dir_init_error_logs_init_err_warn", func(t *testing.T) {
+		resetStateForTest(t)
+		fakeMount := t.TempDir()
+		t.Setenv(EnvHostBPFFS, fakeMount)
+		t.Setenv(EnvAllowUnprotectedTrampolines, "")
+
+		validateHostBPFFSPathFn = func(string, bool) error { return nil }
+		var openCalls int
+		openGraceOwnerInRootFn = func(root string, _ *zap.Logger) (*graceOwner, error) {
+			openCalls++
+			return nil, fmt.Errorf("statfs grace root %s: %w", root, unix.ENOMEM)
+		}
+
+		core, logs := observer.New(zapcore.WarnLevel)
+		if err := Init(context.Background(), zap.New(core), ModeDaemonSet); err != nil {
+			t.Fatalf("Init = %v, want nil", err)
+		}
+		if openCalls != 2 {
+			t.Fatalf("openGraceOwnerInRootFn calls = %d, want 2", openCalls)
+		}
+		if Armed() || !UnprotectedTrampolinesActive() {
+			t.Fatalf("expected unprotected mode, got armed=%v unprot=%v", Armed(), UnprotectedTrampolinesActive())
+		}
+		if logs.Len() != 1 || logs.All()[0].Message != UnprotectedInitErrWarnMessage {
+			t.Fatalf("WARN = %+v, want %q", logs.All(), UnprotectedInitErrWarnMessage)
+		}
+	})
+}
+
+func TestMountCheckErrorClassificationAndOpenGraceOwner(t *testing.T) {
+	t.Run("errno_classification_and_openGraceOwner_table", func(t *testing.T) {
+		cases := []struct {
+			name      string
+			err       error
+			wantSys   bool
+			wantPerm  bool
+			wantCalls int
+			wantWarn  string
+		}{
+			{"ENOMEM", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ENOMEM), true, false, 2, UnprotectedMountCheckErrWarnMessage},
+			{"EINTR", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EINTR), true, false, 2, UnprotectedMountCheckErrWarnMessage},
+			{"EIO", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EIO), true, false, 2, UnprotectedMountCheckErrWarnMessage},
+			{"EAGAIN", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EAGAIN), true, false, 2, UnprotectedMountCheckErrWarnMessage},
+			{"ENOSYS", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ENOSYS), true, false, 2, UnprotectedMountCheckErrWarnMessage},
+			{"EOVERFLOW", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EOVERFLOW), true, false, 2, UnprotectedMountCheckErrWarnMessage},
+			{"ESTALE", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ESTALE), true, false, 2, UnprotectedMountCheckErrWarnMessage},
+			{"ENODEV", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ENODEV), true, false, 2, UnprotectedMountCheckErrWarnMessage},
+			{"EINVAL", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EINVAL), true, false, 2, UnprotectedMountCheckErrWarnMessage},
+			{"ENOENT", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ENOENT), false, false, 1, UnprotectedWarnMessage},
+			{"ENOTDIR", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ENOTDIR), false, false, 1, UnprotectedWarnMessage},
+			{"EACCES", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EACCES), false, true, 1, UnprotectedPermWarnMessage},
+			{"EPERM", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EPERM), false, true, 1, UnprotectedPermWarnMessage},
+			{"ELOOP", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ELOOP), false, false, 1, UnprotectedWarnMessage},
+			{"ENAMETOOLONG", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ENAMETOOLONG), false, false, 1, UnprotectedWarnMessage},
+			{"non_bpffs", errors.New("/run/keploy/host-bpffs is not a bpffs filesystem"), false, false, 1, UnprotectedWarnMessage},
+			{"read_only", errors.New("/run/keploy/host-bpffs is mounted read-only"), false, false, 1, UnprotectedWarnMessage},
+			{"not_host_shared", errors.New("/sys/fs/bpf inside container is not a host-shared bpffs mount"), false, false, 1, UnprotectedWarnMessage},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				resetStateForTest(t)
+				t.Setenv(EnvHostBPFFS, "")
+				t.Setenv(EnvAllowUnprotectedTrampolines, "")
+
+				if got := isMountCheckSysErr(tc.err); got != tc.wantSys {
+					t.Fatalf("isMountCheckSysErr(%v) = %v, want %v", tc.err, got, tc.wantSys)
+				}
+				if got := isMountCheckPermErr(tc.err); got != tc.wantPerm {
+					t.Fatalf("isMountCheckPermErr(%v) = %v, want %v", tc.err, got, tc.wantPerm)
+				}
+
+				var calls int
+				validateHostBPFFSPathFn = func(string, bool) error {
+					calls++
+					return tc.err
+				}
+				owner, warnMsg, err := openGraceOwner(zap.NewNop(), ModeDaemonSet)
+				if owner != nil || err == nil {
+					t.Fatalf("openGraceOwner = (%v, %q, %v), want nil owner + error", owner, warnMsg, err)
+				}
+				if calls != tc.wantCalls {
+					t.Fatalf("validate calls = %d, want %d", calls, tc.wantCalls)
+				}
+				if warnMsg != tc.wantWarn {
+					t.Fatalf("warnMsg = %q, want %q", warnMsg, tc.wantWarn)
+				}
+			})
+		}
+	})
+
+	t.Run("container_native_branches", func(t *testing.T) {
+		enomem := func(p string) error { return fmt.Errorf("statfs %s: %w", p, unix.ENOMEM) }
+		enoent := func(p string) error { return fmt.Errorf("statfs %s: %w", p, unix.ENOENT) }
+		eacces := func(p string) error { return fmt.Errorf("statfs %s: %w", p, unix.EACCES) }
+		notBPF := func(p string) error {
+			return fmt.Errorf("%s is not a bpffs filesystem (type=0x62656572, want BPF_FS_MAGIC=0xcafe4a11)", p)
+		}
+		h, n := DefaultHostBPFFSPath, DefaultNativeBPFFSPath
+
+		type sharedRes struct {
+			ok  bool
+			err error
+		}
+		cases := []struct {
+			name        string
+			hostErrs    []error
+			nativeErrs  []error
+			sharedSeq   []sharedRes
+			wantArmed   bool
+			wantRootSub string
+			wantWarn    string
+			wantHostN   int
+		}{
+			{
+				name:        "transient_enomem_on_host_bpffs_detached_sysbpf",
+				hostErrs:    []error{enomem(h), nil},
+				nativeErrs:  []error{notBPF(n)},
+				wantArmed:   true,
+				wantRootSub: h,
+				wantHostN:   2,
+			},
+			{
+				name:        "transient_enomem_on_host_bpffs_private_sysbpf",
+				hostErrs:    []error{enomem(h), nil},
+				nativeErrs:  []error{nil},
+				sharedSeq:   []sharedRes{{false, nil}},
+				wantArmed:   true,
+				wantRootSub: h,
+				wantHostN:   2,
+			},
+			{
+				name:       "persistent_enomem_on_host_bpffs_detached_sysbpf",
+				hostErrs:   []error{enomem(h)},
+				nativeErrs: []error{notBPF(n)},
+				wantArmed:  false,
+				wantWarn:   UnprotectedMountCheckErrWarnMessage,
+				wantHostN:  2,
+			},
+			{
+				name:       "persistent_enomem_on_host_bpffs_private_sysbpf",
+				hostErrs:   []error{enomem(h)},
+				nativeErrs: []error{nil},
+				sharedSeq:  []sharedRes{{false, nil}},
+				wantArmed:  false,
+				wantWarn:   UnprotectedMountCheckErrWarnMessage,
+				wantHostN:  2,
+			},
+			{
+				name:       "eacces_on_host_bpffs_detached_sysbpf_no_retry",
+				hostErrs:   []error{eacces(h)},
+				nativeErrs: []error{notBPF(n)},
+				wantArmed:  false,
+				wantWarn:   UnprotectedPermWarnMessage,
+				wantHostN:  1,
+			},
+			{
+				name:        "transient_mountinfo_enomem_recovers_on_retry",
+				hostErrs:    []error{enoent(h)},
+				nativeErrs:  []error{nil},
+				sharedSeq:   []sharedRes{{false, unix.ENOMEM}, {true, nil}},
+				wantArmed:   true,
+				wantRootSub: n,
+				wantHostN:   2,
+			},
+			{
+				name:       "persistent_mountinfo_eio_logs_syserr_not_mount_hint",
+				hostErrs:   []error{enoent(h)},
+				nativeErrs: []error{nil},
+				sharedSeq:  []sharedRes{{false, unix.EIO}},
+				wantArmed:  false,
+				wantWarn:   UnprotectedMountCheckErrWarnMessage,
+				wantHostN:  2,
+			},
+			{
+				name:       "absent_everywhere_no_retry_mount_hint",
+				hostErrs:   []error{enoent(h)},
+				nativeErrs: []error{notBPF(n)},
+				wantArmed:  false,
+				wantWarn:   UnprotectedWarnMessage,
+				wantHostN:  1,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				resetStateForTest(t)
+				t.Setenv(EnvHostBPFFS, "")
+				t.Setenv(EnvAllowUnprotectedTrampolines, "")
+				runningInContainerFn = func() bool { return true }
+
+				pickErr := func(errs []error, idx int) error {
+					if len(errs) == 0 {
+						return nil
+					}
+					if idx >= len(errs) {
+						idx = len(errs) - 1
+					}
+					return errs[idx]
+				}
+				var hostN, nativeN, sharedN int
+				validateHostBPFFSPathFn = func(path string, _ bool) error {
+					switch path {
+					case DefaultHostBPFFSPath:
+						e := pickErr(tc.hostErrs, hostN)
+						hostN++
+						return e
+					case DefaultNativeBPFFSPath:
+						e := pickErr(tc.nativeErrs, nativeN)
+						nativeN++
+						return e
+					default:
+						return fmt.Errorf("unexpected validate path %s", path)
+					}
+				}
+				hasHostSharedBPFFSFn = func(string, string) (bool, error) {
+					if len(tc.sharedSeq) == 0 {
+						return false, nil
+					}
+					idx := sharedN
+					if idx >= len(tc.sharedSeq) {
+						idx = len(tc.sharedSeq) - 1
+					}
+					sharedN++
+					return tc.sharedSeq[idx].ok, tc.sharedSeq[idx].err
+				}
+
+				tmp := t.TempDir()
+				var gotRoot string
+				openGraceOwnerInRootFn = func(root string, lg *zap.Logger) (*graceOwner, error) {
+					gotRoot = root
+					return openGraceOwnerInRoot(filepath.Join(tmp, GraceRootSubdir), lg)
+				}
+
+				core, logs := observer.New(zapcore.WarnLevel)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if err := Init(ctx, zap.New(core), ModeNative); err != nil {
+					t.Fatalf("Init = %v, want nil", err)
+				}
+				defer func() {
+					stateMu.Lock()
+					o := activeOwner
+					activeOwner = nil
+					stateMu.Unlock()
+					if o != nil {
+						if o.reaper != nil {
+							o.reaper.stopAndWait(o.reaperCancel)
+						}
+						_ = unix.Close(o.lockFD)
+					}
+				}()
+
+				if Armed() != tc.wantArmed {
+					t.Fatalf("Armed = %v, want %v (logs=%+v)", Armed(), tc.wantArmed, logs.All())
+				}
+				if hostN != tc.wantHostN {
+					t.Fatalf("DefaultHostBPFFSPath validate calls = %d, want %d", hostN, tc.wantHostN)
+				}
+				if tc.wantArmed {
+					if wantRoot := filepath.Join(tc.wantRootSub, GraceRootSubdir); gotRoot != wantRoot {
+						t.Fatalf("openGraceOwnerInRoot root = %q, want %q", gotRoot, wantRoot)
+					}
+					if logs.Len() != 0 {
+						t.Fatalf("expected 0 WARNs when armed, got %+v", logs.All())
+					}
+				} else {
+					if logs.Len() != 1 || logs.All()[0].Message != tc.wantWarn {
+						t.Fatalf("WARN = %+v, want %q", logs.All(), tc.wantWarn)
+					}
+				}
+			})
+		}
+	})
+}
+
+func TestEnsureNativeBPFFSNeverStacksOnStatfsError(t *testing.T) {
+	cases := []struct {
+		name        string
+		inContainer bool
+		statfsMagic int64
+		statfsErr   error
+		wantMount   int
+	}{
+		{"already_bpffs", false, unix.BPF_FS_MAGIC, nil, 0},
+		{"statfs_enomem_no_stack", false, 0, unix.ENOMEM, 0},
+		{"statfs_eintr_no_stack", false, 0, unix.EINTR, 0},
+		{"statfs_eio_no_stack", false, 0, unix.EIO, 0},
+		{"statfs_eagain_no_stack", false, 0, unix.EAGAIN, 0},
+		{"statfs_eacces_no_stack", false, 0, unix.EACCES, 0},
+		{"statfs_eperm_no_stack", false, 0, unix.EPERM, 0},
+		{"statfs_enotdir_no_stack", false, 0, unix.ENOTDIR, 0},
+		{"non_bpffs_mounts", false, 0x62656572, nil, 1},
+		{"enoent_mounts", false, 0, unix.ENOENT, 1},
+		{"in_container_never_mounts_non_bpffs", true, 0x62656572, nil, 0},
+		{"in_container_never_mounts_enoent", true, 0, unix.ENOENT, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetStateForTest(t)
+			runningInContainerFn = func() bool { return tc.inContainer }
+			nativeBPFFSStatfsFn = func(_ string, buf *unix.Statfs_t) error {
+				if tc.statfsErr != nil {
+					return tc.statfsErr
+				}
+				buf.Type = tc.statfsMagic
+				return nil
+			}
+			nativeBPFFSMkdirAllFn = func(string, os.FileMode) error { return nil }
+			var mountCalls int
+			nativeBPFFSMountFn = func(_, _, _ string, _ uintptr, _ string) error {
+				mountCalls++
+				return nil
+			}
+			ensureNativeBPFFS()
+			if mountCalls != tc.wantMount {
+				t.Fatalf("mount calls = %d, want %d", mountCalls, tc.wantMount)
+			}
+		})
+	}
 }
 
 func TestTestTagBuildReapsOnlyOwnTestPrefix(t *testing.T) {

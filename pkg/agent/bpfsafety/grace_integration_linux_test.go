@@ -2869,12 +2869,37 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 	})
 
 	// 3. Real failslab single-fault sweep over Init(ModeNative) on /sys/fs/bpf:
-	//    every single transient fault (including mount-check statfs/stat and
-	//    grace-dir statfs) recovers via openGraceOwner's retry and ends Armed,
-	//    never falling into unprotected mode with a misleading mount WARN.
+	//    every single transient fault (including ensureNativeBPFFS statfs,
+	//    mount-check statfs/stat, and grace-dir statfs) recovers via
+	//    openGraceOwner's retry and ends Armed, never falling into unprotected
+	//    mode with a misleading mount WARN and NEVER stacking a second bpffs
+	//    mount over /sys/fs/bpf.
+	countBPFFSMounts := func(target string) int {
+		b, err := os.ReadFile("/proc/self/mountinfo")
+		if err != nil {
+			return -1
+		}
+		n := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			sep := strings.Index(line, " - ")
+			if sep < 0 {
+				continue
+			}
+			left := strings.Fields(line[:sep])
+			right := strings.Fields(line[sep+3:])
+			if len(left) >= 5 && len(right) >= 1 && left[4] == target && right[0] == "bpf" {
+				n++
+			}
+		}
+		return n
+	}
 	t.Run("real_failslab_init_sweep", func(t *testing.T) {
 		resetStateForTest(t)
 		t.Setenv(EnvHostBPFFS, "")
+		baseMounts := countBPFFSMounts(DefaultNativeBPFFSPath)
+		if baseMounts < 1 {
+			t.Fatalf("expected >=1 bpffs mount at %s before sweep, got %d", DefaultNativeBPFFSPath, baseMounts)
+		}
 		for _, kv := range [][2]string{{"task-filter", "N"}, {"ignore-gfp-wait", "N"}, {"probability", "0"}, {"times", "-1"}, {"verbose", "0"}} {
 			_ = os.WriteFile(filepath.Join(failslabDir, kv[0]), []byte(kv[1]), 0o644)
 		}
@@ -2917,6 +2942,25 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 				o := activeOwner
 				stateMu.Unlock()
 				unprot := UnprotectedTrampolinesActive()
+				gotMounts := countBPFFSMounts(DefaultNativeBPFFSPath)
+				if gotMounts > baseMounts {
+					cancel()
+					if o != nil {
+						if o.reaper != nil {
+							o.reaper.stopAndWait(o.reaperCancel)
+						}
+						stateMu.Lock()
+						activeOwner = nil
+						stateMu.Unlock()
+						_ = unix.Close(o.lockFD)
+						_ = os.RemoveAll(o.dir)
+					}
+					for k := 0; k < 8 && countBPFFSMounts(DefaultNativeBPFFSPath) > baseMounts; k++ {
+						_ = unix.Unmount(DefaultNativeBPFFSPath, 0)
+					}
+					ch <- res{errMsg: fmt.Sprintf("single failslab fault fail-nth=%d stacked a new bpffs mount over %s (%d -> %d)", n, DefaultNativeBPFFSPath, baseMounts, gotMounts)}
+					return
+				}
 				if unprot || o == nil {
 					cancel()
 					ch <- res{errMsg: fmt.Sprintf("single failslab fault fail-nth=%d left Init unprotected (armed=%v unprot=%v logs=%+v)", n, o != nil, unprot, logs.All())}
@@ -2993,10 +3037,15 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 			var r res
 			for n := 1; n <= 80; n++ {
 				targetN := n
+				fired := false
 				openGraceOwnerInRootFn = func(root string, logger *zap.Logger) (*graceOwner, error) {
 					arm(targetN)
 					owner, oerr := openGraceOwnerInRoot(root, logger)
-					arm(0)
+					if left() == "0" {
+						fired = true
+					} else {
+						arm(0)
+					}
 					return owner, oerr
 				}
 				core, logs := observer.New(zap.WarnLevel)
@@ -3049,7 +3098,7 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 				unprotectedLogger = nil
 				unprotectedWarnedFuncs = map[string]bool{}
 				stateMu.Unlock()
-				if o != nil && left() != "0" && n > 35 {
+				if o != nil && !fired {
 					break
 				}
 			}
@@ -3061,6 +3110,245 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 		}
 		if r.hitUnprot == 0 {
 			t.Fatal("held failslab sweep never triggered unprotected mode across openGraceOwnerInRoot")
+		}
+	})
+
+	// 5. Held failslab fault across validateHostBPFFSPathFn retry: re-arm fail-nth
+	//    before every mount-check validation so a real kernel fault holds across
+	//    both attempts, putting Init into unprotected mode with
+	//    UnprotectedMountCheckErrWarnMessage (never the mount hint, killing M63
+	//    and M65 on the kernel gate), never stacking mounts, and keeping static
+	//    kernels fail-closed.
+	t.Run("held_failslab_mount_check", func(t *testing.T) {
+		resetStateForTest(t)
+		t.Setenv(EnvHostBPFFS, "")
+		baseMounts := countBPFFSMounts(DefaultNativeBPFFSPath)
+		for _, kv := range [][2]string{{"task-filter", "N"}, {"ignore-gfp-wait", "N"}, {"probability", "0"}, {"times", "-1"}, {"verbose", "0"}} {
+			_ = os.WriteFile(filepath.Join(failslabDir, kv[0]), []byte(kv[1]), 0o644)
+		}
+		defer func() {
+			_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+			_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+		}()
+
+		sweepProg := makeCountingFexitProg(t, "held_mnt", fn, nil)
+		defer func() { _ = sweepProg.Close() }()
+
+		type res struct {
+			hitUnprot int
+			errMsg    string
+		}
+		ch := make(chan res, 1)
+		go func() {
+			runtime.LockOSThread()
+			nfd, oerr := unix.Open(fmt.Sprintf("/proc/self/task/%d/fail-nth", unix.Gettid()), unix.O_RDWR, 0)
+			if oerr != nil {
+				ch <- res{errMsg: "open fail-nth: " + oerr.Error()}
+				return
+			}
+			defer func() { _ = unix.Close(nfd) }()
+			arm := func(n int) { _, _ = unix.Pwrite(nfd, []byte(strconv.Itoa(n)), 0) }
+			left := func() string {
+				b := make([]byte, 16)
+				k, _ := unix.Pread(nfd, b, 0)
+				if k < 0 {
+					k = 0
+				}
+				return strings.TrimSpace(string(b[:k]))
+			}
+			var r res
+			for n := 1; n <= 40; n++ {
+				targetN := n
+				fired := false
+				validateHostBPFFSPathFn = func(path string, chk bool) error {
+					arm(targetN)
+					verr := ValidateHostBPFFSPath(path, chk)
+					if left() == "0" {
+						fired = true
+					} else {
+						arm(0)
+					}
+					return verr
+				}
+				core, logs := observer.New(zap.WarnLevel)
+				ctx, cancel := context.WithCancel(context.Background())
+				_ = Init(ctx, zap.New(core), ModeNative)
+				arm(0)
+				validateHostBPFFSPathFn = ValidateHostBPFFSPath
+				stateMu.Lock()
+				o := activeOwner
+				stateMu.Unlock()
+				if gotMounts := countBPFFSMounts(DefaultNativeBPFFSPath); gotMounts > baseMounts {
+					cancel()
+					for k := 0; k < 8 && countBPFFSMounts(DefaultNativeBPFFSPath) > baseMounts; k++ {
+						_ = unix.Unmount(DefaultNativeBPFFSPath, 0)
+					}
+					r.errMsg = fmt.Sprintf("held mount-check fail-nth=%d stacked bpffs mount (%d -> %d)", n, baseMounts, gotMounts)
+					ch <- r
+					return
+				}
+				if UnprotectedTrampolinesActive() {
+					r.hitUnprot++
+					if logs.Len() < 1 || logs.All()[0].Message != UnprotectedMountCheckErrWarnMessage {
+						cancel()
+						r.errMsg = fmt.Sprintf("held mount-check fail-nth=%d WARN = %+v, want %q", n, logs.All(), UnprotectedMountCheckErrWarnMessage)
+						ch <- r
+						return
+					}
+					if staticKernel {
+						l, aerr := AttachTracing(sweepProg, "held_mnt", fn, "p")
+						if l != nil {
+							_ = l.Close()
+							cancel()
+							r.errMsg = fmt.Sprintf("held mount-check fail-nth=%d: static kernel attached unanchored fexit in unprotected mode", n)
+							ch <- r
+							return
+						}
+						if !errors.Is(aerr, ErrAnchorUnpinned) {
+							cancel()
+							r.errMsg = fmt.Sprintf("held mount-check fail-nth=%d: static kernel err=%v, want ErrAnchorUnpinned", n, aerr)
+							ch <- r
+							return
+						}
+					}
+				}
+				cancel()
+				if o != nil {
+					if o.reaper != nil {
+						o.reaper.stopAndWait(o.reaperCancel)
+					}
+					stateMu.Lock()
+					activeOwner = nil
+					stateMu.Unlock()
+					_ = unix.Close(o.lockFD)
+					_ = os.RemoveAll(o.dir)
+				}
+				unprotectedTrampolines.Store(false)
+				explicitUnprotectedOptOut.Store(false)
+				unprotectedWarned.Store(false)
+				stateMu.Lock()
+				unprotectedLogger = nil
+				unprotectedWarnedFuncs = map[string]bool{}
+				stateMu.Unlock()
+				if o != nil && !fired {
+					break
+				}
+			}
+			ch <- r
+		}()
+		r := <-ch
+		if r.errMsg != "" {
+			t.Fatal(r.errMsg)
+		}
+		if r.hitUnprot == 0 {
+			t.Fatal("held mount-check failslab sweep never triggered unprotected mode")
+		}
+	})
+
+	// 6. Container-native single-fault failslab sweep with bpffs mounted at
+	//    /run/keploy/host-bpffs and runningInContainerFn=true: proves a transient
+	//    statfs/stat ENOMEM on /run/keploy/host-bpffs is NOT swallowed by the
+	//    /sys/fs/bpf fallback's config error — every single fault recovers to
+	//    Armed with 0 misleading mount hints and 0 stacked mounts.
+	t.Run("container_native_failslab_sweep", func(t *testing.T) {
+		resetStateForTest(t)
+		t.Setenv(EnvHostBPFFS, "")
+		runningInContainerFn = func() bool { return true }
+		if err := os.MkdirAll(DefaultHostBPFFSPath, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", DefaultHostBPFFSPath, err)
+		}
+		mountedHere := false
+		if countBPFFSMounts(DefaultHostBPFFSPath) == 0 {
+			if err := unix.Mount("bpf", DefaultHostBPFFSPath, "bpf", 0, ""); err != nil {
+				t.Fatalf("mount bpf at %s: %v", DefaultHostBPFFSPath, err)
+			}
+			mountedHere = true
+		}
+		defer func() {
+			if mountedHere {
+				_ = unix.Unmount(DefaultHostBPFFSPath, unix.MNT_DETACH)
+			}
+		}()
+		baseHostMounts := countBPFFSMounts(DefaultHostBPFFSPath)
+		baseSysMounts := countBPFFSMounts(DefaultNativeBPFFSPath)
+
+		for _, kv := range [][2]string{{"task-filter", "N"}, {"ignore-gfp-wait", "N"}, {"probability", "0"}, {"times", "-1"}, {"verbose", "0"}} {
+			_ = os.WriteFile(filepath.Join(failslabDir, kv[0]), []byte(kv[1]), 0o644)
+		}
+		defer func() {
+			_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+			_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+		}()
+
+		type res struct {
+			errMsg string
+		}
+		ch := make(chan res, 1)
+		go func() {
+			runtime.LockOSThread()
+			nfd, oerr := unix.Open(fmt.Sprintf("/proc/self/task/%d/fail-nth", unix.Gettid()), unix.O_RDWR, 0)
+			if oerr != nil {
+				ch <- res{errMsg: "open fail-nth: " + oerr.Error()}
+				return
+			}
+			defer func() { _ = unix.Close(nfd) }()
+			arm := func(n int) { _, _ = unix.Pwrite(nfd, []byte(strconv.Itoa(n)), 0) }
+			left := func() string {
+				b := make([]byte, 16)
+				k, _ := unix.Pread(nfd, b, 0)
+				if k < 0 {
+					k = 0
+				}
+				return strings.TrimSpace(string(b[:k]))
+			}
+			for n := 1; n <= 300; n++ {
+				core, logs := observer.New(zap.WarnLevel)
+				ctx, cancel := context.WithCancel(context.Background())
+				arm(n)
+				_ = Init(ctx, zap.New(core), ModeNative)
+				lf := left()
+				if lf != "0" {
+					arm(0)
+				}
+				stateMu.Lock()
+				o := activeOwner
+				stateMu.Unlock()
+				unprot := UnprotectedTrampolinesActive()
+				if countBPFFSMounts(DefaultHostBPFFSPath) > baseHostMounts || countBPFFSMounts(DefaultNativeBPFFSPath) > baseSysMounts {
+					cancel()
+					ch <- res{errMsg: fmt.Sprintf("container-native fail-nth=%d stacked a bpffs mount", n)}
+					return
+				}
+				if unprot || o == nil {
+					cancel()
+					ch <- res{errMsg: fmt.Sprintf("container-native single failslab fault fail-nth=%d left Init unprotected (armed=%v unprot=%v logs=%+v)", n, o != nil, unprot, logs.All())}
+					return
+				}
+				cancel()
+				if o.reaper != nil {
+					o.reaper.stopAndWait(o.reaperCancel)
+				}
+				stateMu.Lock()
+				activeOwner = nil
+				stateMu.Unlock()
+				_ = unix.Close(o.lockFD)
+				_ = os.RemoveAll(o.dir)
+				unprotectedTrampolines.Store(false)
+				explicitUnprotectedOptOut.Store(false)
+				unprotectedWarned.Store(false)
+				stateMu.Lock()
+				unprotectedLogger = nil
+				unprotectedWarnedFuncs = map[string]bool{}
+				stateMu.Unlock()
+				if lf != "0" {
+					break
+				}
+			}
+			ch <- res{}
+		}()
+		r := <-ch
+		if r.errMsg != "" {
+			t.Fatal(r.errMsg)
 		}
 	})
 }
