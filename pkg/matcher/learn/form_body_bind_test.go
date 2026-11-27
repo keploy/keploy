@@ -309,3 +309,202 @@ func TestFormURLEncodedClientRequestBindsInDecideAndClassify(t *testing.T) {
 		})
 	}
 }
+
+func TestPairCaseLegacyDecodedFormMatchesRawLiveOutOfOrder(t *testing.T) {
+	for _, ct := range []string{
+		"application/x-www-form-urlencoded",
+		"application/x-www-form-urlencoded; charset=utf-8",
+	} {
+		t.Run(ct, func(t *testing.T) {
+			req := func(body string) *models.HTTPReq {
+				return &models.HTTPReq{
+					Method: "POST",
+					URL:    "http://api/signup",
+					Header: map[string]string{"Content-Type": ct},
+					Body:   body,
+				}
+			}
+			cases := []ClientCase{
+				{Name: "post-signup-1", Req: req("email=ann@example.com&plan=pro")},
+				{Name: "post-signup-2", Req: req("email=bob@example.com&plan=pro")},
+			}
+			// Live requests arrive raw (percent-encoded); test both targets
+			// against a full two-candidate list so PairCase cannot win by
+			// elimination.
+			i, ok := PairCase(cases, make([]bool, len(cases)), req("email=bob%40example.com&plan=pro"), true)
+			if !ok || cases[i].Name != "post-signup-2" {
+				t.Fatalf("bob paired with (%d, %v); want post-signup-2", i, ok)
+			}
+			j, ok := PairCase(cases, make([]bool, len(cases)), req("email=ann%40example.com&plan=pro"), true)
+			if !ok || cases[j].Name != "post-signup-1" {
+				t.Fatalf("ann paired with (%d, %v); want post-signup-1", j, ok)
+			}
+
+			// Legacy pre-decoded recordings with literal '+' (originally %2B)
+			// must beat a space-bearing candidate listed first when paired
+			// against a raw live request carrying %2B.
+			plusCases := []ClientCase{
+				{Name: "post-space", Req: req("email=ann x@example.com&plan=pro")},
+				{Name: "post-plus", Req: req("email=ann+x@example.com&plan=pro")},
+			}
+			k, ok := PairCase(plusCases, make([]bool, len(plusCases)), req("email=ann%2Bx%40example.com&plan=pro"), true)
+			if !ok || plusCases[k].Name != "post-plus" {
+				t.Fatalf("ann+x paired with (%d, %v); want post-plus", k, ok)
+			}
+		})
+	}
+}
+
+func TestFormSeenMarksMissingEqAndInvalidUTF8UnnamedAndBindsHashKey(t *testing.T) {
+	mk := func(recBody, liveBody string) *models.TestRequest {
+		return &models.TestRequest{
+			Test: "post-edge-1",
+			Parts: []models.TestRequestPart{
+				{Name: "header.Content-Type", Recorded: "application/x-www-form-urlencoded", Sent: "application/x-www-form-urlencoded"},
+				{Name: "body", Recorded: recBody, Sent: liveBody},
+			},
+		}
+	}
+
+	t.Run("empty key is Unnamed with reason", func(t *testing.T) {
+		e := GivenRequest(mk("=val1&ok=1", "=val2&ok=1"))
+		found := false
+		for _, s := range e.Seen {
+			if s.Leaf.Path == "body." {
+				found = true
+				if !s.Leaf.Unnamed || s.Leaf.UnnamedWhy != "form key is empty" {
+					t.Errorf("empty-key leaf = (%v, %q); want (true, \"form key is empty\")", s.Leaf.Unnamed, s.Leaf.UnnamedWhy)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected Unnamed body. leaf in %+v", e.Seen)
+		}
+	})
+
+	t.Run("no equals sign (e.g. BOM-prefixed JSON) is Unnamed", func(t *testing.T) {
+		e := GivenRequest(mk("\xef\xbb\xbf{\"a\":1}", "\xef\xbb\xbf{\"a\":2}"))
+		found := false
+		for _, s := range e.Seen {
+			if strings.HasPrefix(s.Leaf.Path, "body.") {
+				found = true
+				if !s.Leaf.Unnamed || s.Leaf.UnnamedWhy != "form pair has no '='" {
+					t.Errorf("leaf %q = (%v, %q); want (true, \"form pair has no '='\")", s.Leaf.Path, s.Leaf.Unnamed, s.Leaf.UnnamedWhy)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected Unnamed body.* leaf for missing '=' in %+v", e.Seen)
+		}
+	})
+
+	t.Run("percent-decoded invalid UTF-8 value is Unnamed", func(t *testing.T) {
+		e := GivenRequest(mk("n=%FF%FE1", "n=%FF%FE2"))
+		found := false
+		for _, s := range e.Seen {
+			if s.Leaf.Path == "body.n" {
+				found = true
+				if !s.Leaf.Unnamed || s.Leaf.UnnamedWhy != "form field decodes to invalid UTF-8" {
+					t.Errorf("leaf %q = (%v, %q); want (true, \"form field decodes to invalid UTF-8\")", s.Leaf.Path, s.Leaf.Unnamed, s.Leaf.UnnamedWhy)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected Unnamed body.n leaf in %+v", e.Seen)
+		}
+	})
+
+	t.Run("key containing '#' binds via quoted VarPlace", func(t *testing.T) {
+		rNanos := int64(1764192000123456789)
+		gap := 69*time.Second + 3*time.Millisecond
+		fNanos := rNanos + gap.Nanoseconds()
+		ns := func(v int64) string { return strconv.FormatInt(v, 10) }
+		rReq := time.Unix(0, rNanos).Add(131 * time.Microsecond)
+		fReq := rReq.Add(gap)
+		rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+		rInst, fInst := "cli-inst-"+ns(rNanos), "cli-inst-"+ns(fNanos)
+		mkReq := func(body string, at time.Time) *models.HTTPReq {
+			return &models.HTTPReq{
+				Method:    "POST",
+				URL:       "http://localhost:8083/oauth/par",
+				Timestamp: at,
+				Header:    map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Host": "localhost:8083"},
+				Body:      body,
+			}
+		}
+		earlier := clientPlaced(t, "post-hash-1", mkReq("inst%231="+rInst, rReq), mkReq("inst%231="+fInst, fReq), fReq)
+		in := iCall("body.docs.msgs.0.installation_id", String, rInst, fInst, rCall, fCall, nil, earlier, nil)
+		in.Drifts = oClientDrifts()
+		in.PlaceOf = func(l Leaf, _ bool) (string, bool) { return VarPlace(l, true) }
+		d := oWord(t, Decide(in), ns(rNanos), ns(fNanos))
+		if d.Outcome != OutcomeValue {
+			t.Fatalf("Outcome = %v; want OutcomeValue; line=%q", d.Outcome, d.Line)
+		}
+		if got := d.FromAt.Place.String(); got != `body["inst#1"]` {
+			t.Fatalf("FromAt.Place = %q; want body[\"inst#1\"]", got)
+		}
+	})
+}
+
+func TestDecideNamesUnbindableFormKeyAndParseReasons(t *testing.T) {
+	rNanos := int64(1764192000123456789)
+	gap := 69*time.Second + 3*time.Millisecond
+	fNanos := rNanos + gap.Nanoseconds()
+	ns := func(v int64) string { return strconv.FormatInt(v, 10) }
+	rReq := time.Unix(0, rNanos).Add(131 * time.Microsecond)
+	fReq := rReq.Add(gap)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	rInst, fInst := "cli-inst-"+ns(rNanos), "cli-inst-"+ns(fNanos)
+	mkReq := func(body string, at time.Time) *models.HTTPReq {
+		return &models.HTTPReq{
+			Method:    "POST",
+			URL:       "http://localhost:8083/oauth/par",
+			Timestamp: at,
+			Header:    map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Host": "localhost:8083"},
+			Body:      body,
+		}
+	}
+	placeAll := func(l Leaf, _ bool) (string, bool) { return VarPlace(l, true) }
+
+	tooManyParams := func(inst string) string {
+		var b strings.Builder
+		b.WriteString("installation_id=")
+		b.WriteString(inst)
+		for i := 0; i < 10001; i++ {
+			b.WriteString("&p")
+			b.WriteString(strconv.Itoa(i))
+			b.WriteString("=1")
+		}
+		return b.String()
+	}
+
+	for _, tc := range []struct {
+		name     string
+		recBody  string
+		liveBody string
+		wantWhy  string
+	}{
+		{"repeated key", "installation_id=" + rInst + "&installation_id=" + rInst, "installation_id=" + fInst, "form key repeats"},
+		{"dotted key", "user.installation_id=" + rInst, "user.installation_id=" + fInst, "form key holds '.', '[' or ']'"},
+		{"bracketed key", "user[0]=" + rInst, "user[0]=" + fInst, "form key holds '.', '[' or ']'"},
+		{"invalid percent-escape", "discount=50%&installation_id=" + rInst, "discount=50%&installation_id=" + fInst, "invalid percent-escape"},
+		{"legacy pre-decoded percent-escape", "discount=50%&installation_id=" + rInst, "discount=50%25&installation_id=" + fInst, "re-record"},
+		{"live sent invalid percent-escape", "discount=50%25&installation_id=" + rInst, "discount=50%&installation_id=" + fInst, "live form body could not be parsed: invalid percent-escape"},
+		{"semicolon separator", "a=1;b=2&installation_id=" + rInst, "a=1;b=2&installation_id=" + fInst, "invalid semicolon separator"},
+		{"parameter limit", tooManyParams(rInst), tooManyParams(fInst), "exceeds Go URL query parameter limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			earlier := clientPlaced(t, "post-oauth-par-2", mkReq(tc.recBody, rReq), mkReq(tc.liveBody, fReq), fReq)
+			in := iCall("body.docs.msgs.0.installation_id", String, rInst, fInst, rCall, fCall, nil, earlier, nil)
+			in.Drifts = oClientDrifts()
+			in.PlaceOf = placeAll
+			d := oWord(t, Decide(in), ns(rNanos), ns(fNanos))
+			if d.FromAt.Place.Part != 0 {
+				t.Fatalf("FromAt = %q; want empty (unbindable)", d.FromAt.String())
+			}
+			if !strings.Contains(d.Line, tc.wantWhy) || !strings.Contains(d.From.UnbindableWhy, tc.wantWhy) {
+				t.Fatalf("line=%q unbindableWhy=%q; want substring %q", d.Line, d.From.UnbindableWhy, tc.wantWhy)
+			}
+		})
+	}
+}

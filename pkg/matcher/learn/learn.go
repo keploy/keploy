@@ -79,8 +79,11 @@ type Leaf struct {
 	Value string
 	// Unnamed: no path names the leaf alone (a JSON key holding '.', '[' or
 	// ']'), so nothing can be learned about it, and a drift there is a change
-	// L refuses.
-	Unnamed bool
+	// L refuses. UnnamedWhy, when non-empty, says why this leaf cannot name a
+	// single bindable variable place (for example, a repeated form key, a key
+	// holding '.', '[' or ']', or a form body that could not be parsed).
+	Unnamed    bool
+	UnnamedWhy string
 }
 
 // Shape is one request as L compares it.

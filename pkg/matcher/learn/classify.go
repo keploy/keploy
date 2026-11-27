@@ -902,6 +902,10 @@ type Place struct {
 	// such word is, or the place is a call's, whose request a replay reads
 	// only to put its recorded values back (wordBindAt).
 	Word string
+	// UnbindableWhy, when non-empty, says why this place cannot bind a
+	// variable (for example, a repeated or dotted/bracketed form key, or a
+	// form body that could not be parsed).
+	UnbindableWhy string
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
 	// Clock: the learn step learned the leaf as a plain read of the
@@ -4821,7 +4825,7 @@ func withoutGave(earlier []Earlier) []Earlier {
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
 		Var: seenVar(e, s), Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Client: e.incoming, Name: s.Name, Clock: s.Clock,
-		Offset: s.Offset, InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
+		Offset: s.Offset, InStartUp: e.StartUp, UnbindableWhy: s.Leaf.UnnamedWhy, givenWhole: s.Side == Response && whole}
 }
 
 // seenVar is the variable place of s, a leaf of e (Seen.Place). A client

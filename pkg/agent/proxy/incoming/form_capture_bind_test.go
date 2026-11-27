@@ -149,6 +149,23 @@ func TestWireFormURLEncodedRoundTripThroughCaptureLearnAndReplay(t *testing.T) {
 			if val, why := httpint.RequestPlace(legacyDecodedRec, liveReq, "body.redirect_uri", rRedirect); why == "" {
 				t.Fatalf("RequestPlace on legacy decoded recording = (%q, \"\"); want fail-closed mismatch", val)
 			}
+
+			// 5. Legacy decoded recordings still pair cleanly with out-of-order
+			// raw live requests captured through takeRequest (both CT spellings).
+			legacyCases := []learn.ClientCase{
+				{Name: "post-signup-1", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "email=ann@example.com&plan=pro"}},
+				{Name: "post-signup-2", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "email=bob@example.com&plan=pro"}},
+			}
+			liveBob := capture(ct, "email=bob%40example.com&plan=pro", fReqAt)
+			liveAnn := capture(ct, "email=ann%40example.com&plan=pro", fReqAt.Add(time.Millisecond))
+			idxBob, okBob := learn.PairCase(legacyCases, make([]bool, len(legacyCases)), liveBob, true)
+			if !okBob || legacyCases[idxBob].Name != "post-signup-2" {
+				t.Fatalf("legacy pair bob = (%d,%v); want post-signup-2", idxBob, okBob)
+			}
+			idxAnn, okAnn := learn.PairCase(legacyCases, make([]bool, len(legacyCases)), liveAnn, true)
+			if !okAnn || legacyCases[idxAnn].Name != "post-signup-1" {
+				t.Fatalf("legacy pair ann = (%d,%v); want post-signup-1", idxAnn, okAnn)
+			}
 		})
 	}
 }

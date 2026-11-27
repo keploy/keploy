@@ -2659,41 +2659,58 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 	// excuseLate validates that every reordered late answer in lates (recorded
 	// after the call in R, served before it in F) may be set aside because the
 	// ACTUAL bind target chosen by step 2, 3, or 4 is a causally-prior in-scope
-	// fine-cut source distinct from every late mock. Checking the exact chosen
-	// target at each bind site prevents one earlier place from excusing a late
-	// answer while replay binds to a different (or self-same) place.
-	excuseLate := func(lates []instantHold, target evPlace, branch string, requireLateFine bool) (string, bool) {
+	// fine-cut source distinct from every late mock. A late answer served only
+	// outside the test (before the test began or in an older test) is never
+	// excused so cross-test state stays refused as a pick.
+	excuseLate := func(lates []instantHold, target evPlace, requireLateFine bool) (string, []Place, bool) {
 		if len(lates) == 0 {
-			return "", true
+			return "", nil, true
 		}
 		if c.rm == nil || c.lm == nil || !fineCut(c.rm.res) || !fineCut(c.lm.res) {
-			return "", false
+			return "", nil, false
 		}
 		var seen []string
+		var aside []Place
+		type asideKey struct {
+			mock, path string
+		}
+		seenPlaces := map[asideKey]bool{}
 		for _, late := range lates {
-			if target.mock == late.p.mock {
-				return "", false
+			if target.mock == late.p.mock || late.p.outsideTest != "" {
+				return "", nil, false
 			}
 			if requireLateFine && (!late.hr || !late.fr || !late.fl || late.p.same()) {
-				return "", false
+				return "", nil, false
 			}
 			if !slices.Contains(seen, late.p.name) {
 				seen = append(seen, late.p.name)
+			}
+			ak := asideKey{mock: late.p.mock, path: late.p.path}
+			if !seenPlaces[ak] {
+				seenPlaces[ak] = true
+				aside = append(aside, Place{Mock: late.p.mock, Side: Response, Path: late.p.path})
 			}
 		}
 		truncated := len(seen) > maxLinePlaces
 		if truncated {
 			seen = seen[:maxLinePlaces]
 		}
-		parts := make([]string, 0, len(seen))
-		for _, name := range seen {
-			parts = append(parts, name+" (excused by "+branch+")")
-		}
-		joined := strings.Join(parts, ", ")
+		joined := strings.Join(seen, ", ")
 		if truncated {
 			joined += ", …"
 		}
-		return "; set aside reordered late answer " + joined, true
+		return "; set aside " + joined + ", which round F gave before the call but which was recorded after it; " + target.name + " held the value before the call in both runs", aside, true
+	}
+	withAside := func(d Decision, aside []Place) Decision {
+		if d.Outcome == OutcomeRefused {
+			return d
+		}
+		for _, p := range aside {
+			if !slices.Contains(d.AnsweredAfter, p) {
+				d.AnsweredAfter = append(d.AnsweredAfter, p)
+			}
+		}
+		return d
 	}
 
 	var latePicks []instantHold
@@ -2796,6 +2813,7 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 	})), *c)
 	if len(gave) > 0 {
 		note := ""
+		var aside []Place
 		if len(latePicks) > 0 {
 			target, _ := dc.chosenTarget(gave, *c)
 			validGiven := slices.ContainsFunc(hs, func(h instantHold) bool {
@@ -2815,18 +2833,19 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 			})
 			var ok bool
 			if validGiven {
-				note, ok = excuseLate(latePicks, target, "a given value", false)
+				note, aside, ok = excuseLate(latePicks, target, false)
 			}
 			if !ok {
 				return refuseLatePick()
 			}
 		}
-		return dc.bound(path, at, n, *c, gave, ": a value the test gave keploy, which the call sends as given in both runs"+note)
+		return withAside(dc.bound(path, at, n, *c, gave, ": a value the test gave keploy, which the call sends as given in both runs"+note), aside)
 	}
 	switch len(slots) {
 	case 0:
 	case 1:
 		note := ""
+		var aside []Place
 		if len(latePicks) > 0 {
 			target, _ := dc.chosenTarget(slots, *c)
 			rf, _, _ := dc.holds(target, target.t.live, r, c.rm, c.byText)
@@ -2834,17 +2853,13 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 			if target.same() || cutSlot(target) || !asText(target.t.rec, r) || !asText(target.t.live, l) || rf || fr {
 				return refuseLatePick()
 			}
-			branch := "the test case's request"
-			if dc.isClient(target.mock) {
-				branch = "the client request slot"
-			}
 			var ok bool
-			note, ok = excuseLate(latePicks, target, branch, false)
+			note, aside, ok = excuseLate(latePicks, target, false)
 			if !ok {
 				return refuseLatePick()
 			}
 		}
-		return dc.bound(path, at, n, *c, slots, ": the test case's request holds it, templated, in both runs"+again+note)
+		return withAside(dc.bound(path, at, n, *c, slots, ": the test case's request holds it, templated, in both runs"+again+note), aside)
 	default:
 		if len(latePicks) > 0 {
 			return refuseLatePick()
@@ -2932,13 +2947,14 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 		// the value is bound where a word's is, at its earliest place.
 		if len(fineCopies) > 0 && earliest(fineCopies).at.Before(earliest(answers).at) {
 			target, _ := dc.chosenTarget(fineCopies, *c)
-			note, ok := excuseLate(allLates, target, "an earlier send", false)
+			note, aside, ok := excuseLate(allLates, target, false)
 			if !ok {
 				return refuseStep3Late()
 			}
-			return dc.copied(path, at, n, *c, fineCopies, fineCopy+note)
+			return withAside(dc.copied(path, at, n, *c, fineCopies, fineCopy+note), aside)
 		}
 		note := ""
+		var aside []Place
 		if len(allLates) > 0 {
 			target, _ := dc.chosenTarget(answers, *c)
 			validAns := slices.ContainsFunc(hs, func(h instantHold) bool {
@@ -2955,22 +2971,22 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 			})
 			var ok bool
 			if validAns {
-				note, ok = excuseLate(allLates, target, "an earlier answer", true)
+				note, aside, ok = excuseLate(allLates, target, true)
 			}
 			if !ok {
 				return refuseStep3Late()
 			}
 		}
-		return dc.bound(path, at, n, *c, answers, ": an answer given before the call holds it: the dependency's value"+note)
+		return withAside(dc.bound(path, at, n, *c, answers, ": an answer given before the call holds it: the dependency's value"+note), aside)
 	}
 
 	if len(fineCopies) > 0 {
 		target, _ := dc.chosenTarget(fineCopies, *c)
-		note, ok := excuseLate(latePicks, target, "an earlier send", false)
+		note, aside, ok := excuseLate(latePicks, target, false)
 		if !ok {
 			return refuseLatePick()
 		}
-		return dc.copied(path, at, n, *c, fineCopies, fineCopy+note)
+		return withAside(dc.copied(path, at, n, *c, fineCopies, fineCopy+note), aside)
 	}
 
 	if len(latePicks) > 0 {
@@ -3486,9 +3502,12 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 			}
 		}
 	}
+	if fromAt.Place.Part == 0 && first.leaf.UnnamedWhy != "" {
+		rule += "; cannot bind here (" + first.leaf.UnnamedWhy + ")"
+	}
 	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
-		Given: first.given, Client: dc.isClient(first.mock), Clock: first.clock, Offset: first.offset}
+		Given: first.given, Client: dc.isClient(first.mock), Clock: first.clock, Offset: first.offset, UnbindableWhy: first.leaf.UnnamedWhy}
 	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d

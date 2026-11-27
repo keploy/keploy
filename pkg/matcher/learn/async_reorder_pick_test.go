@@ -3,6 +3,7 @@ package learn
 import (
 	"encoding/base64"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -89,12 +90,17 @@ func TestAsyncReorderOfUnixNanoEmailBindsInsteadOfPick(t *testing.T) {
 		}
 	}
 
-	checkExcusedLine := func(t *testing.T, what string, d Decision, wantMock, wantBranch string) {
+	checkExcusedLine := func(t *testing.T, what string, d Decision, wantMock, wantTarget string) {
 		t.Helper()
-		if !strings.Contains(d.Line, "set aside reordered late answer") ||
+		if !strings.Contains(d.Line, "; set aside ") ||
 			!strings.Contains(d.Line, wantMock) ||
-			!strings.Contains(d.Line, "excused by "+wantBranch) {
-			t.Errorf("%s: Line %q must name excused late answer %q and branch %q", what, d.Line, wantMock, wantBranch)
+			!strings.Contains(d.Line, "which round F gave before the call but which was recorded after it") ||
+			!strings.Contains(d.Line, wantTarget+" held the value before the call in both runs") {
+			t.Errorf("%s: Line %q must name excused late answer %q and target %q", what, d.Line, wantMock, wantTarget)
+		}
+		wantPlace := Place{Mock: wantMock, Side: Response}
+		if !slices.Contains(d.AnsweredAfter, wantPlace) {
+			t.Errorf("%s: AnsweredAfter = %+v; want %+v", what, d.AnsweredAfter, wantPlace)
 		}
 	}
 
@@ -104,19 +110,19 @@ func TestAsyncReorderOfUnixNanoEmailBindsInsteadOfPick(t *testing.T) {
 		if d.Outcome != OutcomeValue || !d.From.Client || d.From.Mock != "test case post-decision-4" {
 			t.Fatalf("Raw late mock-323: %s; want OutcomeValue bound at client request", oDescribe([]Decision{d}))
 		}
-		checkExcusedLine(t, "Raw late mock-323", d, "mock-323", "the client request slot")
+		checkExcusedLine(t, "Raw late mock-323", d, "mock-323", "test case post-decision-4 header.Cookie")
 		d = oWord(t, Decide(callWith(append(client, lateEarlier(rEmail, fEmail)), nil)), rWord, fWord)
 		if d.Outcome != OutcomeValue || !d.From.Client || d.From.Mock != "test case post-decision-4" {
 			t.Fatalf("Earlier late mock-323: %s; want OutcomeValue bound at client request", oDescribe([]Decision{d}))
 		}
-		checkExcusedLine(t, "Earlier late mock-323", d, "mock-323", "the client request slot")
+		checkExcusedLine(t, "Earlier late mock-323", d, "mock-323", "test case post-decision-4 header.Cookie")
 	})
 
 	t.Run("distinct earlier in-scope send beats async reordered mock-323", func(t *testing.T) {
 		earlierSend := iSent("mock-260", rBase.Add(10*time.Millisecond), "body.email", String, rEmail, fEmail)
 		d := oWord(t, Decide(callWith([]Earlier{earlierSend}, []Raw{lateRaw(rEmail, fEmail)})), rWord, fWord)
 		iValue(t, "distinct earlier send beside late mock-323", d, "mock-260")
-		checkExcusedLine(t, "distinct earlier send", d, "mock-323", "an earlier send")
+		checkExcusedLine(t, "distinct earlier send", d, "mock-323", "mock-260 body.email")
 	})
 
 	t.Run("earlier in-scope answer plus distinct earlier send beats async reordered mock-323", func(t *testing.T) {
@@ -127,12 +133,12 @@ func TestAsyncReorderOfUnixNanoEmailBindsInsteadOfPick(t *testing.T) {
 		laterSend := iSent("mock-260", rBase.Add(10*time.Millisecond), "body.email", String, rEmail, fEmail)
 		d := oWord(t, Decide(callWith([]Earlier{earlierAns, laterSend}, []Raw{lateRaw(rEmail, fEmail)})), rWord, fWord)
 		iValue(t, "earlier answer (5ms) + later send (10ms) beside late mock-323", d, "mock-250")
-		checkExcusedLine(t, "earlier answer + later send", d, "mock-323", "an earlier answer")
+		checkExcusedLine(t, "earlier answer + later send", d, "mock-323", "mock-250 body.email")
 
 		firstSend := iSent("mock-240", rBase.Add(2*time.Millisecond), "body.email", String, rEmail, fEmail)
 		d = oWord(t, Decide(callWith([]Earlier{earlierAns, firstSend}, []Raw{lateRaw(rEmail, fEmail)})), rWord, fWord)
 		iValue(t, "earlier send (2ms) + later answer (5ms) beside late mock-323", d, "mock-240")
-		checkExcusedLine(t, "earlier send + later answer", d, "mock-323", "an earlier send")
+		checkExcusedLine(t, "earlier send + later answer", d, "mock-323", "mock-240 body.email")
 	})
 
 	t.Run("earlier in-scope stated fine-cut answer beats async reordered duplicate mock-323", func(t *testing.T) {
@@ -142,7 +148,7 @@ func TestAsyncReorderOfUnixNanoEmailBindsInsteadOfPick(t *testing.T) {
 		}
 		d := oWord(t, Decide(callWith([]Earlier{earlierAns}, []Raw{lateRaw(rEmail, fEmail)})), rWord, fWord)
 		iValue(t, "stated fine-cut answer beside async duplicate mock-323", d, "mock-250")
-		checkExcusedLine(t, "stated fine-cut answer", d, "mock-323", "an earlier answer")
+		checkExcusedLine(t, "stated fine-cut answer", d, "mock-323", "mock-250 body.email")
 	})
 
 	t.Run("test-given fine-cut value beats async reordered mock-323", func(t *testing.T) {
@@ -152,7 +158,7 @@ func TestAsyncReorderOfUnixNanoEmailBindsInsteadOfPick(t *testing.T) {
 		}
 		d := oWord(t, Decide(callWith([]Earlier{given}, []Raw{lateRaw(rEmail, fEmail)})), rWord, fWord)
 		iValue(t, "given beside late mock-323", d, "given:email")
-		checkExcusedLine(t, "given beside late mock-323", d, "mock-323", "a given value")
+		checkExcusedLine(t, "given beside late mock-323", d, "mock-323", "given:email email")
 	})
 
 	// === NEGATIVE / CAUSALITY-PRESERVING GUARD TESTS ===
@@ -532,7 +538,18 @@ func TestAsyncReorderOfUnixNanoEmailBindsInsteadOfPick(t *testing.T) {
 		oRefused(t, "JWT fallback to same-mock request half (step 3a)", d, RefusalPick, "mock-323", "recorded after it")
 	})
 
-	t.Run("multiple distinct late answers truncate at maxLinePlaces with ellipsis", func(t *testing.T) {
+	t.Run("GUARD: late answer served before the test or in an older test stays RefusalPick", func(t *testing.T) {
+		earlierSend := iSent("mock-260", rBase.Add(10*time.Millisecond), "body.email", String, rEmail, fEmail)
+		beforeTestLate := lateRaw(rEmail, fEmail).ServedBeforeTheTest()
+		d := oWord(t, Decide(callWith([]Earlier{earlierSend}, []Raw{beforeTestLate})), rWord, fWord)
+		oRefused(t, "late answer served before test", d, RefusalPick, "mock-323", "recorded after it")
+
+		olderTestLate := lateRaw(rEmail, fEmail).ServedInAnOlderTest()
+		d = oWord(t, Decide(callWith([]Earlier{earlierSend}, []Raw{olderTestLate})), rWord, fWord)
+		oRefused(t, "late answer served in older test", d, RefusalPick, "mock-323", "recorded after it")
+	})
+
+	t.Run("multiple distinct late answers truncate at maxLinePlaces with ellipsis and populate AnsweredAfter", func(t *testing.T) {
 		earlierSend := iSent("mock-260", rBase.Add(10*time.Millisecond), "body.email", String, rEmail, fEmail)
 		var lates []Raw
 		for i := 0; i < maxLinePlaces+2; i++ {
@@ -550,6 +567,28 @@ func TestAsyncReorderOfUnixNanoEmailBindsInsteadOfPick(t *testing.T) {
 		}
 		if !strings.Contains(d.Line, ", …") {
 			t.Fatalf("expected maxLinePlaces ellipsis in line; got %q", d.Line)
+		}
+		if strings.Count(d.Line, "held the value before the call in both runs") != 1 {
+			t.Fatalf("expected reason once in truncated line; got %q", d.Line)
+		}
+		if len(d.AnsweredAfter) != maxLinePlaces+2 {
+			t.Fatalf("AnsweredAfter = %+v; want %d entries", d.AnsweredAfter, maxLinePlaces+2)
+		}
+	})
+
+	t.Run("GUARD: OutcomeRefused beside excused late answer leaves AnsweredAfter empty", func(t *testing.T) {
+		// Two earlier sends where the second was its own clock read produce
+		// RefusalTwoSources inside copied() after excuseLate passes; withAside
+		// must omit AnsweredAfter when the decision is refused.
+		sendA := iSent("mock-260", rBase.Add(5*time.Millisecond), "body.email", String, rEmail, fEmail)
+		sendB := iSent("mock-261", rBase.Add(10*time.Millisecond), "body.email", String, rEmail, fEmail)
+		sendB.Seen[0].Clock = true
+		d := oWord(t, Decide(callWith([]Earlier{sendA, sendB}, []Raw{lateRaw(rEmail, fEmail)})), rWord, fWord)
+		if d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalTwoSources {
+			t.Fatalf("Outcome = %v refusal = %+v; want RefusalTwoSources; line=%q", d.Outcome, d.Refusal, d.Line)
+		}
+		if len(d.AnsweredAfter) != 0 {
+			t.Fatalf("AnsweredAfter = %+v; want empty on OutcomeRefused", d.AnsweredAfter)
 		}
 	})
 }

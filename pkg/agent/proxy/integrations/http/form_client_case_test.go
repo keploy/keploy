@@ -247,3 +247,118 @@ func TestReqViewPutBackAndFitVariablesFormURLEncoded(t *testing.T) {
 		})
 	}
 }
+
+// TestFormContentTypeWithJSONBodyRedactedPlacesAndLearnShape pins that a JSON
+// body sent under application/x-www-form-urlencoded (exact or parameterized)
+// is still read as JSON by both redactedPlacesOf (excusing only the redacted
+// JSON leaf, not the whole body or sibling fields) and learnNoise.shape
+// (yielding JSON leaves rather than a single form key).
+func TestFormContentTypeWithJSONBodyRedactedPlacesAndLearnShape(t *testing.T) {
+	for _, ct := range []string{
+		"application/x-www-form-urlencoded",
+		"application/x-www-form-urlencoded; charset=UTF-8",
+	} {
+		t.Run(ct, func(t *testing.T) {
+			req := &models.HTTPReq{
+				Method: "POST",
+				URL:    "http://api.local/orders",
+				Header: map[string]string{"Content-Type": ct, "Host": "api.local"},
+				Body:   `{"secret":"REDACTED_TOKEN","keep":"ok","qty":2}`,
+			}
+			rp := redactedPlacesOf(req, []string{"^REDACTED_TOKEN$"})
+			if rp.fieldsIn != bodyJSON {
+				t.Fatalf("redactedPlacesOf fieldsIn = %v; want bodyJSON", rp.fieldsIn)
+			}
+			if rp.body {
+				t.Fatalf("redactedPlacesOf redacted whole body; want only secret leaf")
+			}
+			if !rp.fields["secret"] {
+				t.Fatalf("redactedPlacesOf fields = %v; want secret redacted", rp.fields)
+			}
+			if rp.fields["keep"] || rp.fields["qty"] {
+				t.Fatalf("redactedPlacesOf fields = %v; sibling fields must not be redacted", rp.fields)
+			}
+
+			parts := recordedParts(&models.Mock{Spec: models.MockSpec{HTTPReq: req}})
+			sh := learnNoise{}.shape(parts, sameDest)
+			if sh.Fixed["body"] != "json" {
+				t.Fatalf("learnNoise.shape Fixed[body] = %q; want json", sh.Fixed["body"])
+			}
+			if sh.Leaves["body.secret"].Value != "REDACTED_TOKEN" || sh.Leaves["body.keep"].Value != "ok" || sh.Leaves["body.qty"].Value != "2" {
+				t.Fatalf("learnNoise.shape Leaves = %+v; want JSON leaves secret/keep/qty", sh.Leaves)
+			}
+			for k := range sh.Leaves {
+				if strings.Contains(k, `"secret"`) {
+					t.Fatalf("learnNoise.shape produced form junk key %q", k)
+				}
+			}
+		})
+	}
+}
+
+// TestLearnPlanNamesUnbindableFormKeyReason verifies that when a client test's
+// form request holds a value at an unbindable form key (repeated or dotted),
+// the HTTP learn refusal names the exact reason instead of a generic message.
+func TestLearnPlanNamesUnbindableFormKeyReason(t *testing.T) {
+	const recInst, fullInst = "cli-inst-1794207702156240454", "cli-inst-1794207771159240454"
+	for _, tc := range []struct {
+		name      string
+		recBody   string
+		liveBody  string
+		wantInWhy string
+	}{
+		{
+			name:      "repeated form key",
+			recBody:   "installation_id=" + recInst + "&installation_id=" + recInst,
+			liveBody:  "installation_id=" + fullInst,
+			wantInWhy: "form key repeats",
+		},
+		{
+			name:      "dotted form key",
+			recBody:   "user.installation_id=" + recInst,
+			liveBody:  "user.installation_id=" + fullInst,
+			wantInWhy: "form key holds '.', '[' or ']'",
+		},
+		{
+			name:      "invalid escape in form body",
+			recBody:   "discount=50%&installation_id=" + recInst,
+			liveBody:  "discount=50%&installation_id=" + fullInst,
+			wantInWhy: "invalid percent-escape",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sent := time.Now()
+			h, n, opts := learnOn(t)
+			tr := learn.NewTracker()
+			tr.SetClientTests(true)
+			tr.Begin()
+			recReq := &models.HTTPReq{
+				Method:    "POST",
+				URL:       "http://localhost:8083/oauth/par",
+				Timestamp: learnAt.Add(-time.Second),
+				Header:    map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+				Body:      tc.recBody,
+			}
+			tr.SetCases([]learn.ClientCase{{Name: "post-oauth-par-2", Req: recReq}})
+			liveReq := *recReq
+			liveReq.Body = tc.liveBody
+			liveReq.Timestamp = sent
+			if !tr.Incoming(&liveReq, "", sent) {
+				t.Fatal("incoming form request did not pair")
+			}
+			db := &learnDb{perTest: []*models.Mock{
+				learnRecorded("mock-0", 0, "POST", "/v1/rate-limit", `{"installation_id":"`+recInst+`"}`, nil, `{"ok":true}`),
+			}}
+			in := live("POST", "/v1/rate-limit", `{"installation_id":"`+fullInst+`"}`, nil)
+			in.arrived = sent.Add(2 * time.Millisecond)
+
+			served, miss, _ := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
+			if served != nil || miss == nil {
+				t.Fatalf("learnMatch: served=%v miss=%+v; want refusal", served != nil, miss)
+			}
+			if !strings.Contains(miss.res.Why, tc.wantInWhy) {
+				t.Fatalf("refusal why = %q; want substring %q", miss.res.Why, tc.wantInWhy)
+			}
+		})
+	}
+}

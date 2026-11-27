@@ -10,7 +10,7 @@ import "context"
 // what it left out.
 //
 // reqBytes is the request body decoded (pkg.Decompress, by its
-// Content-Encoding), before a multipart or url-encoded body is taken apart:
+// Content-Encoding), before a multipart body is taken apart:
 // the test case holds no more of it than that. respBytes is the response body
 // decoded, or 0 when it is over LargeBodyThreshold, as the test case then
 // keeps only its size.

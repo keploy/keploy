@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // A CLIENT TEST'S OWN REQUESTS.
@@ -144,7 +145,10 @@ const pairWordsBytes = 64 << 10
 // run made is one word, which no other run's holds: a word of letters and
 // digits (eachWord) would cut it into pieces (a second, a hex group) that
 // another run's value holds by chance, pairing the request with a
-// recording that is not its own.
+// recording that is not its own. For non-JSON application/x-www-form-urlencoded
+// bodies, each '&'-separated pair emits both its raw words and its per-pair
+// QueryUnescape'd key/value words so raw live bodies match both raw and legacy
+// pre-decoded recordings (including '+' and '%'-bearing values).
 func pairWords(req *models.HTTPReq, body bool, each func(string)) {
 	words := func(s string) {
 		for _, w := range strings.FieldsFunc(s, func(r rune) bool { return r <= ' ' || strings.ContainsRune(pairWordEnds, r) }) {
@@ -159,7 +163,34 @@ func pairWords(req *models.HTTPReq, body bool, each func(string)) {
 	if len(text) > pairWordsBytes {
 		text = text[:pairWordsBytes]
 	}
-	words(text)
+	var ct string
+	for k, v := range req.Header {
+		if strings.EqualFold(k, "Content-Type") {
+			ct = v
+			break
+		}
+	}
+	if text != "" && variables.IsFormMediaType(ct) && !variables.IsJSONDoc(req.Body) {
+		for _, pair := range strings.Split(text, "&") {
+			if pair == "" {
+				continue
+			}
+			words(pair)
+			k, v, hasEq := strings.Cut(pair, "=")
+			dk, kerr := url.QueryUnescape(k)
+			dv, verr := url.QueryUnescape(v)
+			if kerr == nil && (!hasEq || verr == nil) {
+				if dk != k {
+					words(dk)
+				}
+				if hasEq && dv != v {
+					words(dv)
+				}
+			}
+		}
+	} else {
+		words(text)
+	}
 	for _, f := range req.Form {
 		for _, v := range f.Values {
 			words(v)
