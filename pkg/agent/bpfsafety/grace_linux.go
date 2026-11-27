@@ -13,11 +13,11 @@
 // Defense: pin every trampoline program into a per-instance directory on the
 // HOST bpffs superblock (<host-bpffs>/keploy-grace/grace-<nonce>/) BEFORE
 // calling link.AttachTracing, hold flock(LOCK_EX) on that directory for the
-// lifetime of the process, and fail closed at PinBeforeAttach if grace pinning
-// is not armed (unless the explicit emergency override is set). Placing the
-// root at <host-bpffs>/keploy-grace/ keeps grace directories completely outside
-// <host-bpffs>/keploy/ so enterprise selfupdate.WipeBPFPins, inst-* sweeps,
-// and legacy map-pin cleanups never touch live or recently-exited grace dirs.
+// lifetime of the process, and fail closed at PinBeforeAttach if Init was never
+// called. Placing the root at <host-bpffs>/keploy-grace/ keeps grace
+// directories completely outside <host-bpffs>/keploy/ so enterprise
+// selfupdate.WipeBPFPins, inst-* sweeps, and legacy map-pin cleanups never
+// touch live or recently-exited grace dirs.
 //
 // On every exit (clean SIGTERM, self-update swap, rollout, or SIGKILL/OOM),
 // the exiting agent NEVER blocks exit: it closes the attach gate, runs all
@@ -29,11 +29,10 @@
 // exceeding Linux's 10m RCU-tasks stall bound) confirmed on two passes >= 1m
 // apart.
 //
-// In OSS hold mode without host bpffs (e.g. DinD / plain container under
-// KEPLOY_PROVEN), GracefulShutdown hands only the cloned BPF program FDs to a
-// detached holder process (re-exec of /proc/self/exe with setsid and
-// ExtraFiles) that sleeps >= 60s and exits while the main process exits
-// immediately.
+// Where no host bpffs is reachable (e.g. a customer's own manifest or an older
+// chart lacking /run/keploy/host-bpffs), Init does not abort startup: it keeps
+// recording in honest unprotected mode, logs one clear WARN naming the missing
+// mount, and surfaces unprotected status through metrics and telemetry.
 package bpfsafety
 
 import (
@@ -45,14 +44,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -65,9 +61,9 @@ import (
 
 const (
 	// DefaultHostBPFFSPath is the host bpffs mount point placed outside /sys
-	// by DaemonSet, K8s sidecar webhook, Docker, and Compose launchers so
-	// container-private /sys/fs/bpf overlays and containerd's AppArmor
-	// /sys/fs/[^c]*/** deny rules never affect grace pins.
+	// by DaemonSet, K8s sidecar webhook, replay pods, Docker, and Compose
+	// launchers so container-private /sys/fs/bpf overlays and containerd's
+	// AppArmor /sys/fs/[^c]*/** deny rules never affect grace pins.
 	DefaultHostBPFFSPath = "/run/keploy/host-bpffs"
 
 	// DefaultNativeBPFFSPath is the standard host bpffs mount on bare-metal/VM hosts.
@@ -79,11 +75,17 @@ const (
 	// and legacy map-pin cleanups can never delete live or cooling grace dirs.
 	GraceRootSubdir = "keploy-grace"
 
-	// DetachedHolderComm is the /proc/<pid>/comm (<= 15 bytes) and argv[0]
-	// assigned to the detached BPF program-FD holder process. Deliberately
-	// omits "keploy" so pgrep/pkill/pidof keploy and HasOtherKeployProcesses
-	// do not match or terminate the holder during its grace sleep.
-	DetachedHolderComm = "kp-bpf-hold"
+	// GraceModeHostBPFFS indicates host-bpffs grace pinning is active.
+	GraceModeHostBPFFS = "host-bpffs"
+
+	// GraceModeUnprotected indicates no host bpffs was reachable (or the
+	// explicit break-glass opt-out was set), so trampoline detach crash
+	// protection is OFF.
+	GraceModeUnprotected = "unprotected"
+
+	// UnprotectedWarnMessage is the exact single warning logged when Init
+	// cannot arm host-bpffs grace pinning and degrades to honest unprotected mode.
+	UnprotectedWarnMessage = "eBPF crash protection is OFF: mount the host's /sys/fs/bpf at /run/keploy/host-bpffs (see docs/kernel-safety.md)"
 
 	// EnvHostBPFFS overrides the host bpffs mount path.
 	EnvHostBPFFS = "KEPLOY_HOST_BPFFS"
@@ -97,9 +99,8 @@ const (
 	// "native"), avoiding brittle ambient heuristics like KUBERNETES_SERVICE_HOST.
 	EnvLaunchMode = "KEPLOY_LAUNCH_MODE"
 
-	// EnvAllowUnprotectedTrampolines is the explicit break-glass opt-out that
-	// permits attaching fentry/fexit trampolines without host bpffs grace
-	// pinning. Logged as ERROR on every start and surfaced in metrics/telemetry.
+	// EnvAllowUnprotectedTrampolines forces unprotected mode even when host
+	// bpffs is present (break-glass / diagnostics only).
 	EnvAllowUnprotectedTrampolines = "KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES"
 
 	// EnvGraceDuration optionally configures the reaper grace period.
@@ -126,15 +127,6 @@ const (
 	DefaultReapInterval = 3 * time.Minute
 	DefaultConfirmGap   = 1 * time.Minute
 
-	// DefaultInProcessHoldWait is the detached-holder prog-FD retention window
-	// (>= 60s) used ONLY by OSS unixconn when no host bpffs is available.
-	DefaultInProcessHoldWait = 60 * time.Second
-
-	// Internal env vars used exclusively when re-execing /proc/self/exe as a
-	// detached BPF program-FD holder process.
-	envDetachedHolderMS    = "KEPLOY_INTERNAL_BPF_HOLD_MS"
-	envDetachedHolderCount = "KEPLOY_INTERNAL_BPF_HOLD_COUNT"
-
 	// Production bounds enforced unless shortGraceTestMode or -tags bpfsafety_short_grace.
 	MinProdGracePeriod = 15 * time.Minute
 	MaxProdGracePeriod = 24 * time.Hour
@@ -142,8 +134,7 @@ const (
 	MaxProdConfirmGap  = 30 * time.Minute
 )
 
-// Mode identifies the runtime environment so Init selects the right mount path
-// and produces accurate per-mode remediation messages.
+// Mode identifies the runtime environment so Init selects the right mount path.
 type Mode string
 
 const (
@@ -161,20 +152,21 @@ type TestCleaner interface {
 	Cleanup(func())
 }
 
-// ErrGraceNotArmed is returned by PinBeforeAttach when trampoline grace
-// pinning has not been armed and the explicit break-glass opt-out is not set.
-var ErrGraceNotArmed = errors.New("bpf trampoline grace pinning is not armed (refusing unprotected fentry/fexit attach; call bpfsafety.Init first or set KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1)")
+// ErrGraceNotArmed is returned by PinBeforeAttach when bpfsafety.Init has not
+// been called (neither host-bpffs grace pinning nor honest unprotected mode is
+// initialized).
+var ErrGraceNotArmed = errors.New("bpf trampoline grace pinning is not armed (refusing unprotected fentry/fexit attach; call bpfsafety.Init first)")
 
 // ErrShuttingDown is returned by PinBeforeAttach once GracefulShutdown has
 // closed the attach gate.
 var ErrShuttingDown = errors.New("bpf trampoline safety gate is closed for shutdown (refusing late fentry/fexit attach)")
 
 // ErrPinFailed is wrapped around bpffs pin errors in PinBeforeAttach so callers
-// such as OSS unixconn can distinguish host-bpffs pin failures (e.g. EACCES)
-// from kernel link.AttachTracing failures (e.g. missing trampoline support).
+// can distinguish host-bpffs pin failures (e.g. EACCES, ENOSPC) from kernel
+// link.AttachTracing failures (e.g. missing trampoline support).
 var ErrPinFailed = errors.New("bpf trampoline grace pin failed")
 
-// MetricsObserver receives updated host-bpffs grace counts and opt-out status.
+// MetricsObserver receives updated host-bpffs grace counts and unprotected status.
 type MetricsObserver func(dirsPresent, pinnedProgs int, unprotected bool)
 
 var (
@@ -182,11 +174,11 @@ var (
 	stateMu                sync.Mutex
 	activeOwner            *graceOwner
 	detachHooks            []func()
-	inProcessHolds         []*ebpf.Program
 	unpinnedLockFDs        []int
 	privateOverlayDevs     = map[uint64]bool{}
 	metricsObserver        MetricsObserver
 	unprotectedTrampolines atomic.Bool
+	unprotectedWarned      atomic.Bool
 	shuttingDown           atomic.Bool
 	shortGraceTestMode     atomic.Bool
 	testBypassPin          atomic.Bool
@@ -250,10 +242,24 @@ func notifyMetrics(dirs, progs int) {
 	}
 }
 
-// UnprotectedTrampolinesActive reports whether this process started under
-// KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 without host bpffs grace pinning.
+// UnprotectedTrampolinesActive reports whether this process is running without
+// host-bpffs trampoline grace pinning (either because no host bpffs was
+// reachable or because KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 was set).
 func UnprotectedTrampolinesActive() bool {
 	return unprotectedTrampolines.Load()
+}
+
+// ActiveGraceMode returns GraceModeHostBPFFS when host-bpffs grace pinning is
+// armed, GraceModeUnprotected when Init fell back to unprotected mode, or ""
+// before Init has run.
+func ActiveGraceMode() string {
+	if Armed() {
+		return GraceModeHostBPFFS
+	}
+	if unprotectedTrampolines.Load() {
+		return GraceModeUnprotected
+	}
+	return ""
 }
 
 // Armed reports whether host bpffs trampoline grace pinning is currently active.
@@ -323,7 +329,7 @@ func SetBypassForTest(tb TestCleaner) {
 }
 
 // AllowShortGraceForTest lifts the 15m production floor on KEPLOY_BPF_GRACE_DURATION
-// and the 60s clean-exit self-unpin floor for Go tests.
+// for Go tests.
 func AllowShortGraceForTest(tb TestCleaner) {
 	tb.Helper()
 	prev := shortGraceTestMode.Swap(true)
@@ -339,12 +345,23 @@ func ResetShutdownForTest(tb TestCleaner) {
 	tb.Cleanup(func() { shuttingDown.Store(prev) })
 }
 
-// HasActiveWork reports whether this process has armed host-bpffs grace pins,
-// registered tracing detach hooks, or held in-process BPF program FDs that
-// GracefulShutdown must tear down on exit.
+// ResetUnprotectedForTest resets the unprotected-mode state and warn-once flag
+// for the duration of a test and restores them on cleanup.
+func ResetUnprotectedForTest(tb TestCleaner) {
+	tb.Helper()
+	prevUnprot := unprotectedTrampolines.Swap(false)
+	prevWarned := unprotectedWarned.Swap(false)
+	tb.Cleanup(func() {
+		unprotectedTrampolines.Store(prevUnprot)
+		unprotectedWarned.Store(prevWarned)
+	})
+}
+
+// HasActiveWork reports whether this process has armed host-bpffs grace pins or
+// registered tracing detach hooks that GracefulShutdown must tear down on exit.
 func HasActiveWork() bool {
 	stateMu.Lock()
-	ok := activeOwner != nil || len(inProcessHolds) > 0 || len(detachHooks) > 0
+	ok := activeOwner != nil || len(detachHooks) > 0
 	stateMu.Unlock()
 	return ok
 }
@@ -354,10 +371,17 @@ func HasActiveWork() bool {
 // and clearing any transient first_free_boottime stamp), and starts the
 // background reaper.
 //
+// On native Linux (ModeNative), if /sys/fs/bpf is not yet mounted as bpffs,
+// Init attempts to mount it so native hosts always use real host bpffs.
+//
+// Where no usable host bpffs mount is reachable (for example a customer's own
+// manifest or an older chart lacking /run/keploy/host-bpffs), Init never aborts
+// recording: it enters honest unprotected mode, logs UnprotectedWarnMessage
+// once, sets UnprotectedTrampolinesActive()=true, updates metrics, and returns
+// nil.
+//
 // Serialized and idempotent when already armed. Refuses to reopen the attach
-// gate once GracefulShutdown has started (returns ErrShuttingDown). Fail-closed
-// by default, wrapping utils.ErrEnvironmentUnsupported so the process exits
-// with ExitEnvironmentUnsupported (6) and supervisors do not indict the binary.
+// gate once GracefulShutdown has started (returns ErrShuttingDown).
 func Init(ctx context.Context, logger *zap.Logger, mode Mode) error {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -377,21 +401,15 @@ func Init(ctx context.Context, logger *zap.Logger, mode Mode) error {
 		return nil
 	}
 
+	if strings.TrimSpace(os.Getenv(EnvAllowUnprotectedTrampolines)) == "1" {
+		enterUnprotectedMode(logger, mode, errors.New("KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 set"))
+		return nil
+	}
+
 	owner, err := openGraceOwner(logger, mode)
 	if err != nil {
-		if strings.TrimSpace(os.Getenv(EnvAllowUnprotectedTrampolines)) == "1" {
-			unprotectedTrampolines.Store(true)
-			notifyMetrics(0, 0)
-			logger.Error("bpf-safety: running WITHOUT host bpffs trampoline grace pinning because KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 is set — detaching fentry/fexit programs on unpatched Linux 5.10..7.2.9 kernels can panic the node (CVE-2026-98800)",
-				zap.String("mode", string(mode)),
-				zap.String("remediation", modeRemediation(mode, err)),
-				zap.Error(err))
-			return nil
-		}
-		unprotectedTrampolines.Store(false)
-		notifyMetrics(0, 0)
-		return fmt.Errorf("bpf trampoline safety preflight failed (%s): %w — %s (for an emergency break-glass override only, set %s=1): %w",
-			mode, err, modeRemediation(mode, err), EnvAllowUnprotectedTrampolines, utils.ErrEnvironmentUnsupported)
+		enterUnprotectedMode(logger, mode, err)
+		return nil
 	}
 
 	reaperCtx, reaperCancel := context.WithCancel(ctx)
@@ -417,113 +435,18 @@ func Init(ctx context.Context, logger *zap.Logger, mode Mode) error {
 	return nil
 }
 
-func init() {
-	raw := strings.TrimSpace(os.Getenv(envDetachedHolderMS))
-	if raw == "" {
-		return
-	}
-	ms, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || ms <= 0 {
-		os.Exit(0)
-	}
-	count := 0
-	if rawCount := strings.TrimSpace(os.Getenv(envDetachedHolderCount)); rawCount != "" {
-		if n, perr := strconv.Atoi(rawCount); perr == nil && n > 0 {
-			count = n
+func enterUnprotectedMode(logger *zap.Logger, mode Mode, cause error) {
+	unprotectedTrampolines.Store(true)
+	notifyMetrics(0, 0)
+	if unprotectedWarned.CompareAndSwap(false, true) && logger != nil {
+		fields := []zap.Field{
+			zap.String("mode", string(mode)),
+			zap.String("graceMode", GraceModeUnprotected),
 		}
-	}
-	// Detached BPF program-FD holder mode: parent already detached all tracing
-	// links and exited. Inherited ExtraFiles (FDs 3..3+count-1) keep struct
-	// bpf_prog referenced across RCU-tasks grace periods until this process
-	// exits.
-	//
-	// 1. Ignore SIGHUP/SIGINT/SIGQUIT so terminal/session teardown or Ctrl-C
-	//    cannot terminate the holder early before RCU-tasks finishes.
-	signal.Ignore(syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT)
-	// 2. Rename /proc/self/comm away from "keploy" so pgrep/pkill/pidof keploy
-	//    and HasOtherKeployProcesses ignore the holder.
-	setHolderProcessName(DetachedHolderComm)
-	// 3. Enforce FD hygiene by construction: close every FD >= 3+count via
-	//    close_range (so no non-CLOEXEC FD inherited from a launcher stays
-	//    open for 60s) and close any FD inside 3..3+count-1 that is not a
-	//    genuine BPF program FD.
-	sanitizeHolderFDs(count)
-	// 4. Sleep using unix.Nanosleep (immune to EINTR and independent of Go's
-	//    netpoll after close_range) and exit via exit_group.
-	sleepDurationRaw(time.Duration(ms) * time.Millisecond)
-	unix.Exit(0)
-}
-
-func setHolderProcessName(comm string) {
-	fd, err := unix.Open("/proc/self/comm", unix.O_WRONLY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return
-	}
-	_, _ = unix.Write(fd, []byte(comm))
-	_ = unix.Close(fd)
-}
-
-func sanitizeHolderFDs(count int) {
-	if count < 0 {
-		count = 0
-	}
-	firstClose := 3 + count
-	if err := closeFDsFrom(firstClose); err != nil {
-		closeFDsFromProc(firstClose)
-	}
-	for fd := 3; fd < firstClose; fd++ {
-		if !isBPFProgramFD(fd) {
-			_ = unix.Close(fd)
+		if cause != nil {
+			fields = append(fields, zap.Error(cause))
 		}
-	}
-}
-
-func closeFDsFrom(first int) error {
-	_, _, errno := unix.Syscall(unix.SYS_CLOSE_RANGE, uintptr(first), uintptr(^uint32(0)), 0)
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func closeFDsFromProc(first int) {
-	entries, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		fd, perr := strconv.Atoi(e.Name())
-		if perr != nil || fd < first {
-			continue
-		}
-		_ = unix.Close(fd)
-	}
-}
-
-func isBPFProgramFD(fd int) bool {
-	target, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
-	if err == nil {
-		return target == "anon_inode:bpf-prog"
-	}
-	data, ferr := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
-	if ferr != nil {
-		return false
-	}
-	return strings.Contains(string(data), "prog_type:")
-}
-
-func sleepDurationRaw(d time.Duration) {
-	if d <= 0 {
-		return
-	}
-	req := unix.NsecToTimespec(d.Nanoseconds())
-	var rem unix.Timespec
-	for {
-		err := unix.Nanosleep(&req, &rem)
-		if !errors.Is(err, unix.EINTR) {
-			return
-		}
-		req = rem
+		logger.Warn(UnprotectedWarnMessage, fields...)
 	}
 }
 
@@ -551,39 +474,14 @@ func RegisterDetachHook(fn func()) {
 	stateMu.Unlock()
 }
 
-func modeRemediation(mode Mode, cause error) string {
-	causeStr := ""
-	if cause != nil {
-		causeStr = cause.Error()
-	}
-	switch mode {
-	case ModeDaemonSet:
-		return fmt.Sprintf("mount host /sys/fs/bpf at %s (upgrade the k8s-proxy Helm chart to the matching release)", DefaultHostBPFFSPath)
-	case ModeK8sSidecar:
-		return fmt.Sprintf("mount host /sys/fs/bpf at %s (upgrade the k8s-proxy webhook to the matching release and ensure the node has bpffs mounted at /sys/fs/bpf)", DefaultHostBPFFSPath)
-	case ModeCompose:
-		if strings.Contains(causeStr, "not a bpffs filesystem") {
-			return fmt.Sprintf("the Docker host's /sys/fs/bpf is not a mounted bpffs (e.g. Docker-in-Docker without a host bpffs bind); mount host bpffs into the Docker daemon at /sys/fs/bpf so -v /sys/fs/bpf:%s resolves to BPF_FS_MAGIC", DefaultHostBPFFSPath)
-		}
-		return fmt.Sprintf("mount host /sys/fs/bpf at %s in your docker compose agent service (-v /sys/fs/bpf:%s)", DefaultHostBPFFSPath, DefaultHostBPFFSPath)
-	case ModeDocker:
-		if strings.Contains(causeStr, "not a bpffs filesystem") {
-			return fmt.Sprintf("the Docker host's /sys/fs/bpf is not a mounted bpffs (e.g. Docker-in-Docker without a host bpffs bind); mount host bpffs into the Docker daemon at /sys/fs/bpf so -v /sys/fs/bpf:%s resolves to BPF_FS_MAGIC", DefaultHostBPFFSPath)
-		}
-		return fmt.Sprintf("pass -v /sys/fs/bpf:%s to docker run (or upgrade the keploy CLI)", DefaultHostBPFFSPath)
-	default:
-		return fmt.Sprintf("ensure host bpffs is mounted writable at %s (mount -t bpf bpf %s on the host) or set %s", DefaultNativeBPFFSPath, DefaultNativeBPFFSPath, EnvHostBPFFS)
-	}
-}
-
 // PinBeforeAttach pins prog into the active host-bpffs grace directory BEFORE
 // link.AttachTracing is called.
 //
 // Fail-closed BY CONSTRUCTION: if GracefulShutdown has started, returns
-// ErrShuttingDown; if Init has not armed grace pinning and neither
-// KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 nor SetBypassForTest is active,
-// returns ErrGraceNotArmed so no production path can silently attach an
-// unprotected trampoline.
+// ErrShuttingDown; if Init has never been called (neither host-bpffs pinning
+// nor honest unprotected mode is initialized) and SetBypassForTest is not
+// active, returns ErrGraceNotArmed so no production path can silently bypass
+// bpfsafety.Init.
 func PinBeforeAttach(prog *ebpf.Program, object, name, role string) error {
 	if prog == nil {
 		return errors.New("cannot pin nil BPF program for trampoline grace")
@@ -613,79 +511,34 @@ func AttachTracing(prog *ebpf.Program, object, name, role string) (link.Link, er
 	return link.AttachTracing(link.TracingOptions{Program: prog})
 }
 
-// AttachTracingWithInProcessHold attaches prog via link.AttachTracing while
-// keeping a cloned program FD alive so GracefulShutdown can hand it off to a
-// detached holder process (>= 60s) without blocking process exit. Used ONLY by
-// OSS unixconn when no host bpffs is available (e.g. DinD / plain container
-// under KEPLOY_PROVEN) so fexit retains its exact in-kernel peer filter with
-// zero capture regression.
-//
-// Enterprise proxyless/netio/classic-scope callers MUST use PinBeforeAttach /
-// AttachTracing (fail-closed) and never this helper.
-func AttachTracingWithInProcessHold(prog *ebpf.Program) (link.Link, error) {
-	if prog == nil {
-		return nil, errors.New("cannot attach nil BPF program")
-	}
-	if shuttingDown.Load() {
-		return nil, ErrShuttingDown
-	}
-	held, err := prog.Clone()
-	if err != nil {
-		return nil, fmt.Errorf("clone BPF program for detached grace hold: %w", err)
-	}
-	l, err := link.AttachTracing(link.TracingOptions{Program: prog})
-	if err != nil {
-		_ = held.Close()
-		return nil, err
-	}
-	stateMu.Lock()
-	if shuttingDown.Load() {
-		stateMu.Unlock()
-		// Shutdown raced with attach: close the link immediately and hand the
-		// cloned prog FD to a detached holder before returning ErrShuttingDown.
-		_ = l.Close()
-		if _, herr := spawnDetachedHolder(zap.L(), []*ebpf.Program{held}, DefaultInProcessHoldWait); herr != nil {
-			zap.L().Warn("bpf-safety: failed to start detached holder on shutdown race; exiting without blocking", zap.Error(herr))
-		}
-		_ = held.Close()
-		return nil, ErrShuttingDown
-	}
-	inProcessHolds = append(inProcessHolds, held)
-	stateMu.Unlock()
-	return l, nil
+// attachPinnedReaperNoop attaches a cached reaper no-op program that was
+// already pinned into the reaper's own active grace directory by
+// graceReaper.forceRebuildTarget.
+func attachPinnedReaperNoop(prog *ebpf.Program) (link.Link, error) {
+	return link.AttachTracing(link.TracingOptions{Program: prog})
 }
 
 // GracefulShutdown closes the attach gate, runs all registered link-detach
 // hooks synchronously, cancels the background reaper, and returns IMMEDIATELY
-// without blocking process exit:
+// without blocking process exit.
 //
-//   - With host bpffs armed: leaves the grace directory pinned on host bpffs
-//     and keeps owner.lockFD open until process exit (kernel releases flock on
-//     exit) so the >= 15m cross-process reaper safely reaps it. No self-unpin
-//     and zero exit stall.
-//   - Without host bpffs (OSS hold mode): hands only the cloned BPF program
-//     FDs via ExtraFiles to a detached holder process (re-exec of
-//     /proc/self/exe with setsid, /dev/null stdio) that sleeps >= 60s (wait,
-//     clamped >= DefaultInProcessHoldWait in production) and exits while the
-//     main process exits immediately. If running as container PID 1 (where the
-//     container dies with this process) or spawn fails, logs once and exits
-//     immediately without blocking.
-func GracefulShutdown(_ context.Context, logger *zap.Logger, wait time.Duration) {
+// With host bpffs armed, it leaves the grace directory pinned on host bpffs
+// and keeps owner.lockFD open until process exit (kernel releases flock on
+// exit) so the >= 15m cross-process reaper safely reaps it. No self-unpin and
+// zero exit stall.
+func GracefulShutdown(_ context.Context, logger *zap.Logger) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 
 	// Close the attach gate and snapshot state atomically under stateMu so no
-	// concurrent RegisterDetachHook or AttachTracingWithInProcessHold can race
-	// past shutdown.
+	// concurrent RegisterDetachHook or PinBeforeAttach can race past shutdown.
 	stateMu.Lock()
 	shuttingDown.Store(true)
 	hooks := detachHooks
 	detachHooks = nil
 	owner := activeOwner
 	activeOwner = nil
-	holds := inProcessHolds
-	inProcessHolds = nil
 	stateMu.Unlock()
 
 	utils.TeardownStep()
@@ -700,6 +553,9 @@ func GracefulShutdown(_ context.Context, logger *zap.Logger, wait time.Duration)
 		if owner.reaperCancel != nil {
 			owner.reaperCancel()
 		}
+		if owner.reaper != nil {
+			owner.reaper.closeNoopCache()
+		}
 		// Leave the directory pinned on host bpffs and keep owner.lockFD open
 		// until process exit so the kernel releases flock only once this
 		// process is truly gone; the >= 15m cross-process reaper then safely
@@ -711,125 +567,22 @@ func GracefulShutdown(_ context.Context, logger *zap.Logger, wait time.Duration)
 			zap.String("graceDir", owner.dir),
 			zap.Duration("reapAfter", owner.reaper.gracePeriod))
 	}
-
-	if len(holds) > 0 {
-		pid, err := spawnDetachedHolder(logger, holds, wait)
-		if err != nil {
-			logger.Warn("bpf-safety: failed to start detached BPF program-FD holder; exiting without blocking",
-				zap.Int("heldProgs", len(holds)),
-				zap.Error(err))
-		} else if pid > 0 {
-			logger.Info("bpf-safety: handed BPF program FDs to detached holder process; exiting immediately",
-				zap.Int("holderPid", pid),
-				zap.Int("heldProgs", len(holds)),
-				zap.Duration("holdWait", effectiveHoldWait(wait)))
-		}
-		for _, p := range holds {
-			_ = p.Close()
-		}
-	}
 	utils.TeardownStep()
 }
 
-func effectiveHoldWait(wait time.Duration) time.Duration {
-	shortAllowed := shortGraceTestMode.Load() || shortGraceBuildEnabled
-	if !shortAllowed {
-		if wait < DefaultInProcessHoldWait {
-			return DefaultInProcessHoldWait
+// ensureNativeBPFFS mounts bpffs at /sys/fs/bpf on native Linux hosts when it
+// is not yet mounted (or remounts read-write if mounted read-only). Best-effort:
+// any error is surfaced by the subsequent ValidateHostBPFFSPath check.
+func ensureNativeBPFFS() {
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err == nil && stfs.Type == unix.BPF_FS_MAGIC {
+		if stfs.Flags&unix.ST_RDONLY != 0 {
+			_ = unix.Mount("bpf", DefaultNativeBPFFSPath, "bpf", uintptr(unix.MS_REMOUNT), "")
 		}
-		return wait
+		return
 	}
-	if wait <= 0 {
-		return DefaultInProcessHoldWait
-	}
-	return wait
-}
-
-// spawnDetachedHolder starts a detached copy of /proc/self/exe in a new
-// session (setsid) carrying ONLY the duplicated BPF program FDs via ExtraFiles
-// and /dev/null stdio so callers waiting on stdout/stderr pipes never stall.
-// Sets argv[0] to DetachedHolderComm so pgrep/pkill keploy ignore the holder.
-// When running as container PID 1 (or a direct child of a container init like
-// tini/dumb-init), logs a warning once because no child can outlive container
-// PID-namespace teardown, and still spawns best-effort without blocking exit.
-func spawnDetachedHolder(logger *zap.Logger, holds []*ebpf.Program, wait time.Duration) (int, error) {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-	if os.Getpid() == 1 || (os.Getppid() == 1 && runningInContainerNamespace()) {
-		logger.Warn("bpf-safety: running as container PID 1 (or under container init) without host bpffs; detached prog-FD holder cannot outlive PID-namespace exit (exiting without blocking; mount host /sys/fs/bpf at /run/keploy/host-bpffs for crash-surviving protection)",
-			zap.Int("pid", os.Getpid()),
-			zap.Int("ppid", os.Getppid()),
-			zap.Int("heldProgs", len(holds)))
-	}
-	d := effectiveHoldWait(wait)
-	ms := d.Milliseconds()
-	if ms <= 0 {
-		ms = 1
-	}
-
-	extra := make([]*os.File, 0, len(holds))
-	closeExtra := func() {
-		for _, f := range extra {
-			_ = f.Close()
-		}
-	}
-	for i, p := range holds {
-		if p == nil {
-			continue
-		}
-		dupFD, derr := unix.FcntlInt(uintptr(p.FD()), unix.F_DUPFD_CLOEXEC, 3)
-		if derr != nil {
-			closeExtra()
-			return 0, fmt.Errorf("dup BPF prog FD %d for detached holder: %w", i, derr)
-		}
-		extra = append(extra, os.NewFile(uintptr(dupFD), fmt.Sprintf("bpf-prog-hold-%d", i)))
-	}
-	if len(extra) == 0 {
-		return 0, nil
-	}
-
-	// Exec /proc/self/exe directly so the spawn survives binary replacement,
-	// unlinking, or mount-namespace changes, and set argv[0] to
-	// DetachedHolderComm so process-name matching for "keploy" skips it.
-	cmd := exec.Command("/proc/self/exe")
-	cmd.Args = []string{DetachedHolderComm}
-	cmd.Env = []string{
-		fmt.Sprintf("%s=%d", envDetachedHolderMS, ms),
-		fmt.Sprintf("%s=%d", envDetachedHolderCount, len(extra)),
-	}
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.ExtraFiles = extra
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	startErr := cmd.Start()
-	closeExtra()
-	if startErr != nil {
-		return 0, startErr
-	}
-	pid := cmd.Process.Pid
-	_ = cmd.Process.Release()
-	return pid, nil
-}
-
-func runningInContainerNamespace() bool {
-	if _, err := os.Stat("/.dockerenv"); err == nil {
-		return true
-	}
-	if _, err := os.Stat("/run/.containerenv"); err == nil {
-		return true
-	}
-	if b, err := os.ReadFile("/proc/1/cgroup"); err == nil {
-		s := string(b)
-		if strings.Contains(s, "docker") || strings.Contains(s, "containerd") ||
-			strings.Contains(s, "kubepods") || strings.Contains(s, "crio") ||
-			strings.Contains(s, "libpod") {
-			return true
-		}
-	}
-	return false
+	_ = os.MkdirAll(DefaultNativeBPFFSPath, 0o755)
+	_ = unix.Mount("bpf", DefaultNativeBPFFSPath, "bpf", 0, "")
 }
 
 // resolveHostBPFFSMount locates and validates the host bpffs mount point for mode.
@@ -842,9 +595,10 @@ func resolveHostBPFFSMount(mode Mode) (string, error) {
 		return override, nil
 	}
 
-	// Containerized modes (DaemonSet, K8s sidecar, Compose, Docker) MUST use
-	// /run/keploy/host-bpffs outside /sys so EnsureBPFFS's private /sys/fs/bpf
-	// overlay and containerd AppArmor /sys/fs/[^c]*/** rules never affect pins.
+	// Containerized modes (DaemonSet, K8s sidecar, replay pods, Compose, Docker)
+	// MUST use /run/keploy/host-bpffs outside /sys so EnsureBPFFS's private
+	// /sys/fs/bpf overlay and containerd AppArmor /sys/fs/[^c]*/** rules never
+	// affect pins.
 	if containerMode {
 		if err := ValidateHostBPFFSPath(DefaultHostBPFFSPath, true); err != nil {
 			return "", fmt.Errorf("host bpffs mount %s unavailable: %w", DefaultHostBPFFSPath, err)
@@ -852,10 +606,12 @@ func resolveHostBPFFSMount(mode Mode) (string, error) {
 		return DefaultHostBPFFSPath, nil
 	}
 
-	// Native host CLI/agent: prefer /run/keploy/host-bpffs if mounted, else /sys/fs/bpf.
+	// Native host CLI/agent: prefer /run/keploy/host-bpffs if mounted, else
+	// ensure /sys/fs/bpf is mounted as bpffs and use it.
 	if err := ValidateHostBPFFSPath(DefaultHostBPFFSPath, false); err == nil {
 		return DefaultHostBPFFSPath, nil
 	}
+	ensureNativeBPFFS()
 	if err := ValidateHostBPFFSPath(DefaultNativeBPFFSPath, false); err != nil {
 		return "", fmt.Errorf("host bpffs mount %s unavailable: %w", DefaultNativeBPFFSPath, err)
 	}
@@ -1049,15 +805,19 @@ func openGraceOwnerInRoot(root string, logger *zap.Logger) (*graceOwner, error) 
 		return nil, fmt.Errorf("clear transient grace stamp in %s: %w", finalDir, err)
 	}
 
-	reaper := newGraceReaper(root, self, gracePeriod, reapInterval, confirmGap, logger)
-	reaper.reapPrefix = reapPrefix
-	return &graceOwner{
+	owner := &graceOwner{
 		root:   root,
 		dir:    finalDir,
 		self:   self,
 		lockFD: fd,
-		reaper: reaper,
-	}, nil
+	}
+	reaper := newGraceReaper(root, self, gracePeriod, reapInterval, confirmGap, logger)
+	reaper.reapPrefix = reapPrefix
+	reaper.pinNoop = func(prog *ebpf.Program, funcName string) error {
+		return owner.pinProgram(prog, "bpfsafety_reaper", funcName, "rb")
+	}
+	owner.reaper = reaper
+	return owner, nil
 }
 
 func resolveGraceTiming() (gracePeriod, reapInterval, confirmGap time.Duration) {
@@ -1118,15 +878,22 @@ func clockBoottimeNs() uint64 {
 }
 
 // sharedStamp is persisted in <graceDir>/first_free_boottime across processes.
+// Layout (32 bytes; backward-compatible with 16-byte stamps from v3.7.27):
+//   - [0:8]   firstFreeBootNs: CLOCK_BOOTTIME when rebuild succeeded
+//   - [8:16]  deadlineHitBootNs: CLOCK_BOOTTIME when gracePeriod elapsed
+//   - [16:24] rebuiltBootNs: non-zero once every fentry/fexit target in dir was rebuilt
+//   - [24:32] runCntAtRebuild: cumulative bpf_prog_info.run_cnt right after rebuild
 type sharedStamp struct {
 	firstFreeBootNs   uint64
 	deadlineHitBootNs uint64
+	rebuiltBootNs     uint64
+	runCntAtRebuild   uint64
 }
 
-// stampStore reads and writes the 16-byte shared CLOCK_BOOTTIME stamp inside a
+// stampStore reads and writes the 32-byte shared CLOCK_BOOTTIME stamp inside a
 // grace directory. On real bpffs (BPF_FS_MAGIC), it uses a pinned 1-entry
-// 16-byte BPF_MAP_TYPE_ARRAY so no extra host filesystem mount is required. On
-// non-bpffs test filesystems (t.TempDir()), it uses a 16-byte regular file.
+// 32-byte BPF_MAP_TYPE_ARRAY so no extra host filesystem mount is required. On
+// non-bpffs test filesystems (t.TempDir()), it uses a 32-byte regular file.
 type stampStore interface {
 	read(dir string) (sharedStamp, bool, error)
 	write(dir string, s sharedStamp) error
@@ -1150,11 +917,15 @@ func (a autoStampStore) read(dir string) (sharedStamp, bool, error) {
 			return sharedStamp{}, false, err
 		}
 		defer func() { _ = m.Close() }()
-		var buf [16]byte
-		if err := m.Lookup(uint32(0), &buf); err != nil {
+		valSize := m.ValueSize()
+		if valSize < 16 {
+			return sharedStamp{}, false, nil
+		}
+		buf := make([]byte, valSize)
+		if err := m.Lookup(uint32(0), buf); err != nil {
 			return sharedStamp{}, false, err
 		}
-		return decodeStamp(buf[:]), true, nil
+		return decodeStamp(buf), true, nil
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
@@ -1174,53 +945,68 @@ func (a autoStampStore) write(dir string, s sharedStamp) error {
 	buf := encodeStamp(s)
 	if a.isBPFFS(dir) {
 		m, err := ebpf.LoadPinnedMap(p, nil)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			m, err = ebpf.NewMap(&ebpf.MapSpec{
-				Name:       "grace_stamp",
-				Type:       ebpf.Array,
-				KeySize:    4,
-				ValueSize:  16,
-				MaxEntries: 1,
-			})
-			if err != nil {
-				return err
-			}
-			if err := m.Update(uint32(0), buf[:], ebpf.UpdateAny); err != nil {
-				_ = m.Close()
-				return err
-			}
-			if err := m.Pin(p); err != nil {
-				_ = m.Close()
-				return err
-			}
-			return m.Close()
+		if err == nil && m.ValueSize() == uint32(len(buf)) {
+			defer func() { _ = m.Close() }()
+			return m.Update(uint32(0), buf[:], ebpf.UpdateAny)
 		}
-		defer func() { _ = m.Close() }()
-		return m.Update(uint32(0), buf[:], ebpf.UpdateAny)
+		if err == nil {
+			// Upgrade legacy 16-byte stamp map to 32 bytes.
+			_ = m.Close()
+			_ = os.Remove(p)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		m, err = ebpf.NewMap(&ebpf.MapSpec{
+			Name:       "grace_stamp",
+			Type:       ebpf.Array,
+			KeySize:    4,
+			ValueSize:  uint32(len(buf)),
+			MaxEntries: 1,
+		})
+		if err != nil {
+			return err
+		}
+		if err := m.Update(uint32(0), buf[:], ebpf.UpdateAny); err != nil {
+			_ = m.Close()
+			return err
+		}
+		if err := m.Pin(p); err != nil {
+			_ = m.Close()
+			return err
+		}
+		return m.Close()
 	}
 	return os.WriteFile(p, buf[:], 0o600)
 }
 
-func encodeStamp(s sharedStamp) [16]byte {
-	var b [16]byte
+func encodeStamp(s sharedStamp) [32]byte {
+	var b [32]byte
 	binary.LittleEndian.PutUint64(b[0:8], s.firstFreeBootNs)
 	binary.LittleEndian.PutUint64(b[8:16], s.deadlineHitBootNs)
+	binary.LittleEndian.PutUint64(b[16:24], s.rebuiltBootNs)
+	binary.LittleEndian.PutUint64(b[24:32], s.runCntAtRebuild)
 	return b
 }
 
 func decodeStamp(b []byte) sharedStamp {
-	return sharedStamp{
-		firstFreeBootNs:   binary.LittleEndian.Uint64(b[0:8]),
-		deadlineHitBootNs: binary.LittleEndian.Uint64(b[8:16]),
+	var s sharedStamp
+	if len(b) >= 16 {
+		s.firstFreeBootNs = binary.LittleEndian.Uint64(b[0:8])
+		s.deadlineHitBootNs = binary.LittleEndian.Uint64(b[8:16])
 	}
+	if len(b) >= 32 {
+		s.rebuiltBootNs = binary.LittleEndian.Uint64(b[16:24])
+		s.runCntAtRebuild = binary.LittleEndian.Uint64(b[24:32])
+	}
+	return s
 }
 
 // graceReaper scans <host-bpffs>/keploy-grace/ at startup and periodically,
-// using flock(LOCK_EX|LOCK_NB) for owner liveness and a shared CLOCK_BOOTTIME
-// stamp persisted inside each dead directory so short-lived lanes and
+// using flock(LOCK_EX|LOCK_NB) for owner liveness, forcing a kernel trampoline
+// rebuild per unique fentry/fexit target before starting the grace clock (so a
+// prior -ENOMEM bpf_trampoline_unlink_prog failure cannot leave a stale image
+// calling a program that gets unpinned later), and persisting a shared
+// CLOCK_BOOTTIME stamp inside each dead directory so short-lived lanes and
 // crash-looping DaemonSet pods still reap expired directories in bounded time.
 type graceReaper struct {
 	root         string
@@ -1232,13 +1018,18 @@ type graceReaper struct {
 	logger       *zap.Logger
 	bootNowNs    func() uint64
 	stamps       stampStore
+	pinNoop      func(prog *ebpf.Program, funcName string) error
+	rebuildFn    func(dirPath string) (uint64, error)
+	runCntFn     func(dirPath string) (uint64, error)
+	noopMu       sync.Mutex
+	noopCache    map[string]*ebpf.Program
 }
 
 func newGraceReaper(root, self string, gracePeriod, reapInterval, confirmGap time.Duration, logger *zap.Logger) *graceReaper {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &graceReaper{
+	r := &graceReaper{
 		root:         root,
 		self:         self,
 		reapPrefix:   GraceDirPrefix,
@@ -1249,6 +1040,9 @@ func newGraceReaper(root, self string, gracePeriod, reapInterval, confirmGap tim
 		bootNowNs:    clockBoottimeNs,
 		stamps:       autoStampStore{},
 	}
+	r.rebuildFn = r.forceRebuildDirTargets
+	r.runCntFn = r.sumDirRunCnt
+	return r
 }
 
 func (r *graceReaper) start(ctx context.Context) {
@@ -1321,10 +1115,28 @@ func (r *graceReaper) round() (dirsPresent, pinnedProgs int) {
 			pinnedProgs += countPinnedProgs(dirPath)
 			continue
 		}
-		if !ok || s.firstFreeBootNs == 0 || nowNs < s.firstFreeBootNs {
-			// First observation after owner exit (or boot clock reset): record firstFree.
-			if werr := r.stamps.write(dirPath, sharedStamp{firstFreeBootNs: nowNs}); werr != nil {
-				r.logger.Warn("bpf-safety: failed to write shared first-free stamp", zap.String("graceDir", dirPath), zap.Error(werr))
+		// Phase 1: before starting the grace countdown, force a trampoline
+		// rebuild per unique fentry/fexit target in dirPath so any stale
+		// trampoline left behind by a prior -ENOMEM bpf_trampoline_unlink_prog
+		// failure is replaced before the 15m+1m grace window begins.
+		if !ok || s.rebuiltBootNs == 0 || nowNs < s.rebuiltBootNs {
+			runCnt, rerr := r.rebuildFn(dirPath)
+			if rerr != nil {
+				r.logger.Warn("bpf-safety: trampoline rebuild failed for dead grace directory; keeping pins and retrying next pass",
+					zap.String("graceDir", dirPath),
+					zap.Error(rerr))
+				_ = unix.Close(fd)
+				dirsPresent++
+				pinnedProgs += countPinnedProgs(dirPath)
+				continue
+			}
+			newStamp := sharedStamp{
+				firstFreeBootNs: nowNs,
+				rebuiltBootNs:   nowNs,
+				runCntAtRebuild: runCnt,
+			}
+			if werr := r.stamps.write(dirPath, newStamp); werr != nil {
+				r.logger.Warn("bpf-safety: failed to write shared rebuild stamp", zap.String("graceDir", dirPath), zap.Error(werr))
 			}
 			_ = unix.Close(fd)
 			dirsPresent++
@@ -1332,7 +1144,7 @@ func (r *graceReaper) round() (dirsPresent, pinnedProgs int) {
 			continue
 		}
 
-		elapsedNs := nowNs - s.firstFreeBootNs
+		elapsedNs := nowNs - s.rebuiltBootNs
 		if elapsedNs < graceNs {
 			_ = unix.Close(fd)
 			dirsPresent++
@@ -1340,8 +1152,33 @@ func (r *graceReaper) round() (dirsPresent, pinnedProgs int) {
 			continue
 		}
 
-		// Grace period elapsed: require confirmation on two separate passes at
-		// least confirmGap apart so a VM pause/resume jump cannot reap at once.
+		// Verify pinned programs stopped executing (when bpf stats are enabled,
+		// run_cnt must remain flat after rebuild). If any prog ran since the
+		// rebuild, reset rebuiltBootNs=0, keep pins, and force another rebuild.
+		curRunCnt, cerr := r.runCntFn(dirPath)
+		if cerr != nil {
+			r.logger.Warn("bpf-safety: failed to verify pinned prog run_cnt; keeping pins and retrying next pass",
+				zap.String("graceDir", dirPath), zap.Error(cerr))
+			_ = unix.Close(fd)
+			dirsPresent++
+			pinnedProgs += countPinnedProgs(dirPath)
+			continue
+		}
+		if curRunCnt > s.runCntAtRebuild {
+			r.logger.Warn("bpf-safety: pinned program still executing after trampoline rebuild; refusing to unpin and scheduling fresh rebuild",
+				zap.String("graceDir", dirPath),
+				zap.Uint64("runCntAtRebuild", s.runCntAtRebuild),
+				zap.Uint64("currentRunCnt", curRunCnt))
+			_ = r.stamps.write(dirPath, sharedStamp{firstFreeBootNs: nowNs})
+			_ = unix.Close(fd)
+			dirsPresent++
+			pinnedProgs += countPinnedProgs(dirPath)
+			continue
+		}
+
+		// Phase 2: grace period elapsed after confirmed rebuild; require
+		// confirmation on two separate passes at least confirmGap apart so a
+		// VM pause/resume jump cannot reap at once.
 		if s.deadlineHitBootNs == 0 || nowNs < s.deadlineHitBootNs {
 			s.deadlineHitBootNs = nowNs
 			if werr := r.stamps.write(dirPath, s); werr != nil {

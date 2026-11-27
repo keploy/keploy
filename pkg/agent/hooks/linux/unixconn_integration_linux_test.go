@@ -149,7 +149,7 @@ func TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss(t *testing.T) {
 			t.Fatalf("expected >= %d pinned unixconn fexit progs in %s, got %d", len(unixFexitPrograms), graceDir, pinned)
 		}
 		t.Cleanup(func() {
-			bpfsafety.GracefulShutdown(context.Background(), zap.NewNop(), 0)
+			bpfsafety.GracefulShutdown(context.Background(), zap.NewNop())
 			_ = os.RemoveAll(graceDir)
 		})
 	}
@@ -274,22 +274,21 @@ func TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt(t *testing.T) {
 	}
 }
 
-// TestUnixConnNoHostBPFFSKeepsFexitWithInProcessHold proves on a real kernel
+// TestUnixConnNoHostBPFFSEntersHonestUnprotectedMode proves on a real kernel
 // inside a container PID namespace that when host bpffs is unavailable (e.g.
 // DinD or a plain classic container without /run/keploy/host-bpffs), unixconn
-// keeps fexit (with its exact in-kernel peer filter — zero capture regression
-// on member-owned sockets) via detached-holder prog-FD retention instead of
-// degrading to syscall tracepoints, returns from GracefulShutdown immediately
-// without blocking exit, and keeps the programs loaded until the detached
-// holder's wait expires.
-func TestUnixConnNoHostBPFFSKeepsFexitWithInProcessHold(t *testing.T) {
+// keeps recording with its fexit in-kernel peer filter, enters honest
+// unprotected mode (UnprotectedTrampolinesActive() == true,
+// ActiveGraceMode() == GraceModeUnprotected), and returns from GracefulShutdown
+// immediately without spawning a detached holder or blocking exit.
+func TestUnixConnNoHostBPFFSEntersHonestUnprotectedMode(t *testing.T) {
 	if !inOwnPIDNamespace(t) {
 		return
 	}
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Fatal(err)
 	}
-	// Point host bpffs at a non-bpffs temp dir so bpfsafety.Init returns ErrEnvironmentUnsupported.
+	// Point host bpffs at a non-bpffs temp dir so bpfsafety.Init degrades honestly.
 	t.Setenv(bpfsafety.EnvHostBPFFS, t.TempDir())
 	t.Setenv(bpfsafety.EnvAllowUnprotectedTrampolines, "")
 	t.Setenv(provenswitch.Env, "1")
@@ -312,34 +311,13 @@ func TestUnixConnNoHostBPFFSKeepsFexitWithInProcessHold(t *testing.T) {
 		t.Fatal("unixconn failed to load without host bpffs")
 	}
 	if u.fallback {
-		t.Fatalf("unixconn wrongly degraded to tracepoint fallback without host bpffs (why=%q); want fexit with detached holder", u.why)
+		t.Fatalf("unixconn wrongly degraded to tracepoint fallback without host bpffs (why=%q)", u.why)
 	}
-	if !u.inProcessHold {
-		t.Fatal("expected u.inProcessHold=true when host bpffs is unavailable")
+	if !bpfsafety.UnprotectedTrampolinesActive() {
+		t.Fatal("expected bpfsafety.UnprotectedTrampolinesActive()=true when host bpffs is unavailable")
 	}
-	if strings.Contains(u.why, bpfsafety.EnvAllowUnprotectedTrampolines) {
-		t.Fatalf("OSS unixconn hold detail should not mention %s: %q", bpfsafety.EnvAllowUnprotectedTrampolines, u.why)
-	}
-
-	// Capture kernel program IDs of every unixconn fexit program BEFORE shutdown
-	// so we can prove on the real kernel that they remain loaded AFTER
-	// GracefulShutdown closes all links/FDs and returns immediately, and are
-	// freed AFTER the detached holder process exits.
-	var progIDs []ebpf.ProgramID
-	for _, name := range unixFexitPrograms {
-		p := u.coll.Programs[name]
-		if p == nil {
-			t.Fatalf("missing fexit program %s in unixconn collection", name)
-		}
-		info, err := p.Info()
-		if err != nil {
-			t.Fatalf("prog %s info: %v", name, err)
-		}
-		id, ok := info.ID()
-		if !ok {
-			t.Fatalf("prog %s has no kernel ID", name)
-		}
-		progIDs = append(progIDs, id)
+	if got := bpfsafety.ActiveGraceMode(); got != bpfsafety.GraceModeUnprotected {
+		t.Fatalf("bpfsafety.ActiveGraceMode() = %q, want %q", got, bpfsafety.GraceModeUnprotected)
 	}
 
 	startUnixHelper(t, "listen "+own)
@@ -358,47 +336,13 @@ func TestUnixConnNoHostBPFFSKeepsFexitWithInProcessHold(t *testing.T) {
 		detached = true
 	})
 
-	// GracefulShutdown MUST return immediately (handing prog FDs to detached 2s
-	// holder process rather than blocking the caller for 2s).
 	start := time.Now()
-	bpfsafety.GracefulShutdown(context.Background(), zap.NewNop(), 2*time.Second)
+	bpfsafety.GracefulShutdown(context.Background(), zap.NewNop())
 	elapsed := time.Since(start)
 	if !detached {
 		t.Fatal("GracefulShutdown did not run detach hooks synchronously")
 	}
-	if elapsed >= 1*time.Second {
-		t.Fatalf("GracefulShutdown blocked for %v (>= 1s); must hand off to detached holder immediately", elapsed)
-	}
-
-	// Every fexit program MUST STILL be loaded in the kernel at W-0.5s (1.5s of
-	// the 2s hold) after GracefulShutdown returned!
-	if rem := time.Until(start.Add(1500 * time.Millisecond)); rem > 0 {
-		time.Sleep(rem)
-	}
-	for _, id := range progIDs {
-		alive, err := ebpf.NewProgramFromID(id)
-		if err != nil {
-			t.Fatalf("detached holder failed: fexit prog %d disappeared before W-0.5s (1.5s of 2s hold): %v", id, err)
-		}
-		_ = alive.Close()
-	}
-
-	// Once W + 3s (5s) elapses, the detached 2s holder MUST have exited and
-	// every prog ID MUST be gone.
-	deadline := start.Add(5 * time.Second)
-	for _, id := range progIDs {
-		gone := false
-		for time.Now().Before(deadline) {
-			p, err := ebpf.NewProgramFromID(id)
-			if err != nil {
-				gone = true
-				break
-			}
-			_ = p.Close()
-			time.Sleep(100 * time.Millisecond)
-		}
-		if !gone {
-			t.Fatalf("fexit prog %d still loaded at W+3s (5s) after detached 2s holder was spawned", id)
-		}
+	if elapsed >= 5*time.Second {
+		t.Fatalf("GracefulShutdown blocked for %v (>= 5s); must not hold exit", elapsed)
 	}
 }

@@ -14,7 +14,6 @@ import (
 
 const (
 	ciliumLinkImportPath = "github.com/cilium/ebpf/link"
-	bpfsafetyImportPath  = "go.keploy.io/server/v3/pkg/agent/bpfsafety"
 )
 
 var forbiddenCiliumTrampolineFuncs = map[string]bool{
@@ -26,14 +25,11 @@ var forbiddenCiliumTrampolineFuncs = map[string]bool{
 
 // TestNoUnpinnedAttachTracingOutsideBPFSafety enforces the CVE-2026-98800
 // structural guard across the OSS repository:
-//  1. Resolves github.com/cilium/ebpf/link by import path (catching standard,
+//   - Resolves github.com/cilium/ebpf/link by import path (catching standard,
 //     aliased, and dot imports) and rejects any call or reference to
 //     AttachTracing, AttachLSM, AttachFreplace, AttachRawLink, or
 //     AttachRawTracepoint with an empty/missing Name outside
-//     pkg/agent/bpfsafety/grace_linux.go's choke points.
-//  2. Restricts AttachTracingWithInProcessHold exclusively to
-//     pkg/agent/hooks/linux/unixconn.go (and its own definition in
-//     pkg/agent/bpfsafety/grace_linux.go).
+//     pkg/agent/bpfsafety/grace_linux.go's single AttachTracing choke point.
 func TestNoUnpinnedAttachTracingOutsideBPFSafety(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
 	var violations []string
@@ -108,8 +104,6 @@ func resolveImportNames(file *ast.File, targetPath, defaultName string) importNa
 
 func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) []string {
 	linkImps := resolveImportNames(file, ciliumLinkImportPath, "link")
-	safetyImps := resolveImportNames(file, bpfsafetyImportPath, "bpfsafety")
-	inBPFSafetyPkg := file.Name != nil && file.Name.Name == "bpfsafety"
 
 	var out []string
 	var walk func(n ast.Node, encl *ast.FuncDecl)
@@ -130,7 +124,7 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 			if name, ok := matchImportedFunc(x.Fun, linkImps, forbiddenCiliumTrampolineFuncs); ok {
 				allowed := rel == "pkg/agent/bpfsafety/grace_linux.go" &&
 					name == "AttachTracing" &&
-					(fnName == "AttachTracing" || fnName == "AttachTracingWithInProcessHold")
+					(fnName == "AttachTracing" || fnName == "attachPinnedReaperNoop")
 				if !allowed {
 					out = append(out, fmt.Sprintf("%s:%d (%s): direct link.%s outside bpfsafety choke point", rel, fset.Position(x.Pos()).Line, fnName, name))
 				}
@@ -146,23 +140,9 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 				out = append(out, fmt.Sprintf("%s:%d (%s): direct attachTracingFn outside bpfsafety choke point", rel, fset.Position(x.Pos()).Line, fnName))
 				return
 			}
-			if isHoldCall(x.Fun, safetyImps, inBPFSafetyPkg) {
-				allowed := rel == "pkg/agent/hooks/linux/unixconn.go" || rel == "pkg/agent/bpfsafety/grace_linux.go"
-				if !allowed {
-					out = append(out, fmt.Sprintf("%s:%d (%s): AttachTracingWithInProcessHold is restricted to pkg/agent/hooks/linux/unixconn.go", rel, fset.Position(x.Pos()).Line, fnName))
-				}
-				return
-			}
 		case *ast.SelectorExpr:
 			if name, ok := matchImportedFunc(x, linkImps, forbiddenCiliumTrampolineFuncs); ok {
 				out = append(out, fmt.Sprintf("%s:%d (%s): link.%s reference outside bpfsafety choke point", rel, fset.Position(x.Pos()).Line, fnName, name))
-				return
-			}
-			if isHoldCall(x, safetyImps, false) {
-				allowed := rel == "pkg/agent/hooks/linux/unixconn.go" || rel == "pkg/agent/bpfsafety/grace_linux.go"
-				if !allowed {
-					out = append(out, fmt.Sprintf("%s:%d (%s): AttachTracingWithInProcessHold reference is restricted to pkg/agent/hooks/linux/unixconn.go", rel, fset.Position(x.Pos()).Line, fnName))
-				}
 				return
 			}
 		case *ast.Ident:
@@ -172,10 +152,6 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 			}
 			if linkImps.dot && forbiddenCiliumTrampolineFuncs[x.Name] {
 				out = append(out, fmt.Sprintf("%s:%d (%s): dot-imported link.%s outside bpfsafety choke point", rel, fset.Position(x.Pos()).Line, fnName, x.Name))
-				return
-			}
-			if safetyImps.dot && x.Name == "AttachTracingWithInProcessHold" && rel != "pkg/agent/hooks/linux/unixconn.go" {
-				out = append(out, fmt.Sprintf("%s:%d (%s): dot-imported AttachTracingWithInProcessHold outside unixconn.go", rel, fset.Position(x.Pos()).Line, fnName))
 				return
 			}
 		}
@@ -206,18 +182,6 @@ func matchImportedFunc(e ast.Expr, imps importNames, funcs map[string]bool) (str
 		}
 	}
 	return "", false
-}
-
-func isHoldCall(e ast.Expr, safetyImps importNames, inBPFSafetyPkg bool) bool {
-	switch x := e.(type) {
-	case *ast.SelectorExpr:
-		id, ok := x.X.(*ast.Ident)
-		return ok && safetyImps.names[id.Name] && x.Sel.Name == "AttachTracingWithInProcessHold"
-	case *ast.Ident:
-		return (safetyImps.dot || inBPFSafetyPkg) && x.Name == "AttachTracingWithInProcessHold"
-	default:
-		return false
-	}
 }
 
 // rawTracepointHasEmptyName returns true when AttachRawTracepoint's options
@@ -313,13 +277,6 @@ func bad() { link.AttachRawLink(link.RawLinkOptions{}) }`,
 			src: `package hooks
 import "github.com/cilium/ebpf/link"
 func bad() { link.AttachRawTracepoint(link.RawTracepointOptions{Name: ""}) }`,
-		},
-		{
-			name: "AttachTracingWithInProcessHold_outside_unixconn",
-			rel:  "pkg/agent/hooks/linux/other.go",
-			src: `package hooks
-import "go.keploy.io/server/v3/pkg/agent/bpfsafety"
-func bad() { bpfsafety.AttachTracingWithInProcessHold(nil) }`,
 		},
 	}
 

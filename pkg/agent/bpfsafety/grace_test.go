@@ -5,15 +5,11 @@ package bpfsafety
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -22,8 +18,6 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
-
-	"go.keploy.io/server/v3/utils"
 )
 
 func resetStateForTest(t *testing.T) {
@@ -32,7 +26,6 @@ func resetStateForTest(t *testing.T) {
 	prevOwner := activeOwner
 	prevObs := metricsObserver
 	prevHooks := detachHooks
-	prevHolds := inProcessHolds
 	prevLockFDs := unpinnedLockFDs
 	prevOverlays := make(map[uint64]bool, len(privateOverlayDevs))
 	for k, v := range privateOverlayDevs {
@@ -41,11 +34,11 @@ func resetStateForTest(t *testing.T) {
 	activeOwner = nil
 	metricsObserver = nil
 	detachHooks = nil
-	inProcessHolds = nil
 	unpinnedLockFDs = nil
 	privateOverlayDevs = map[uint64]bool{}
 	stateMu.Unlock()
 	prevUnprot := unprotectedTrampolines.Swap(false)
+	prevWarned := unprotectedWarned.Swap(false)
 	prevShuttingDown := shuttingDown.Swap(false)
 	prevBypass := testBypassPin.Swap(false)
 	t.Cleanup(func() {
@@ -56,11 +49,11 @@ func resetStateForTest(t *testing.T) {
 		activeOwner = prevOwner
 		metricsObserver = prevObs
 		detachHooks = prevHooks
-		inProcessHolds = prevHolds
 		unpinnedLockFDs = prevLockFDs
 		privateOverlayDevs = prevOverlays
 		stateMu.Unlock()
 		unprotectedTrampolines.Store(prevUnprot)
+		unprotectedWarned.Store(prevWarned)
 		shuttingDown.Store(prevShuttingDown)
 		testBypassPin.Store(prevBypass)
 	})
@@ -154,55 +147,49 @@ func TestPinBeforeAttachFailsClosedByConstruction(t *testing.T) {
 	}
 }
 
-func TestInitFailClosedPerModeMessagesAndOptOut(t *testing.T) {
+func TestInitWithoutHostBPFFSEntersHonestUnprotectedModeOnce(t *testing.T) {
 	resetStateForTest(t)
 	notBPFFS := t.TempDir()
 	t.Setenv(EnvHostBPFFS, notBPFFS)
 	t.Setenv(EnvAllowUnprotectedTrampolines, "")
 
-	cases := []struct {
-		mode Mode
-		want string
-	}{
-		{ModeDaemonSet, "k8s-proxy Helm chart"},
-		{ModeK8sSidecar, "k8s-proxy webhook"},
-		{ModeCompose, "Docker host's /sys/fs/bpf is not a mounted bpffs"},
-		{ModeDocker, "Docker host's /sys/fs/bpf is not a mounted bpffs"},
-		{ModeNative, "mount -t bpf"},
-	}
-	for _, tc := range cases {
-		err := Init(context.Background(), zap.NewNop(), tc.mode)
-		if err == nil {
-			t.Fatalf("mode %s: expected fail-closed error", tc.mode)
-		}
-		if !errors.Is(err, utils.ErrEnvironmentUnsupported) {
-			t.Fatalf("mode %s: error %v must wrap utils.ErrEnvironmentUnsupported", tc.mode, err)
-		}
-		if !strings.Contains(err.Error(), tc.want) {
-			t.Fatalf("mode %s: error %q missing mode-specific remediation %q", tc.mode, err.Error(), tc.want)
-		}
-		if tc.mode == ModeDocker && strings.Contains(err.Error(), "Helm") {
-			t.Fatalf("docker mode error wrongly mentions Helm: %q", err.Error())
-		}
-	}
-
-	t.Setenv(EnvAllowUnprotectedTrampolines, "1")
-	core, logs := observer.New(zapcore.ErrorLevel)
+	core, logs := observer.New(zapcore.WarnLevel)
 	var obsUnprot bool
-	SetMetricsObserver(func(_, _ int, unprot bool) { obsUnprot = unprot })
+	var obsCalls int
+	SetMetricsObserver(func(_, _ int, unprot bool) {
+		obsUnprot = unprot
+		obsCalls++
+	})
 
-	if err := Init(context.Background(), zap.New(core), ModeDaemonSet); err != nil {
-		t.Fatalf("Init with opt-out returned error: %v", err)
+	for _, mode := range []Mode{ModeDaemonSet, ModeK8sSidecar, ModeCompose, ModeDocker, ModeNative} {
+		if err := Init(context.Background(), zap.New(core), mode); err != nil {
+			t.Fatalf("mode %s: Init without host bpffs returned error %v, want nil (honest unprotected mode)", mode, err)
+		}
 	}
-	if !UnprotectedTrampolinesActive() || !obsUnprot {
-		t.Fatalf("UnprotectedTrampolinesActive=%v obsUnprot=%v, want both true", UnprotectedTrampolinesActive(), obsUnprot)
+	if !UnprotectedTrampolinesActive() || !obsUnprot || obsCalls == 0 {
+		t.Fatalf("UnprotectedTrampolinesActive=%v obsUnprot=%v obsCalls=%d, want true/true/>0", UnprotectedTrampolinesActive(), obsUnprot, obsCalls)
 	}
-	if logs.Len() == 0 || !strings.Contains(logs.All()[0].Message, EnvAllowUnprotectedTrampolines) {
-		t.Fatalf("expected ERROR log naming %s, got %+v", EnvAllowUnprotectedTrampolines, logs.All())
+	if got := ActiveGraceMode(); got != GraceModeUnprotected {
+		t.Fatalf("ActiveGraceMode() = %q, want %q", got, GraceModeUnprotected)
 	}
+	if Armed() {
+		t.Fatal("Armed() = true without host bpffs, want false")
+	}
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly 1 WARN across repeated Init calls, got %d: %+v", logs.Len(), logs.All())
+	}
+	msg := logs.All()[0].Message
+	if msg != UnprotectedWarnMessage {
+		t.Fatalf("WARN message = %q, want %q", msg, UnprotectedWarnMessage)
+	}
+	if strings.Contains(msg, EnvAllowUnprotectedTrampolines) {
+		t.Fatalf("WARN message must not mention %s: %q", EnvAllowUnprotectedTrampolines, msg)
+	}
+
+	// After honest unprotected Init, PinBeforeAttach permits attach so recording continues.
 	var dummy ebpf.Program
 	if err := PinBeforeAttach(&dummy, "proxyless", "keploy_tcp_sendmsg", "p"); err != nil {
-		t.Fatalf("PinBeforeAttach under explicit opt-out returned %v, want nil", err)
+		t.Fatalf("PinBeforeAttach under honest unprotected mode returned %v, want nil", err)
 	}
 }
 
@@ -253,14 +240,10 @@ func TestShortGraceBuildReapsOnlyOwnTestPrefix(t *testing.T) {
 	if !strings.HasPrefix(owner.self, GraceTestDirPrefix+"e2e-") {
 		t.Fatalf("short-grace owner.self = %q, want prefix %q", owner.self, GraceTestDirPrefix+"e2e-")
 	}
-	// Verify sanitizeTag strips '-' so "e2e-2" becomes "e2e2" and cannot collide with "e2e-".
 	if got := sanitizeTag("e2e-2"); got != "e2e2" {
 		t.Fatalf("sanitizeTag(\"e2e-2\") = %q, want \"e2e2\"", got)
 	}
 
-	// Place a dead production grace-* dir, a dead sibling test dir with another
-	// tag (including "e2e2" which came from "e2e-2"), plus a dead dir belonging
-	// to THIS test tag ("e2e").
 	prodDead := filepath.Join(root, GraceDirPrefix+"prod-dead-agent")
 	otherTestDead := filepath.Join(root, GraceTestDirPrefix+"e2e2-dead")
 	ownTestDead := filepath.Join(root, GraceTestDirPrefix+"e2e-dead")
@@ -276,7 +259,7 @@ func TestShortGraceBuildReapsOnlyOwnTestPrefix(t *testing.T) {
 	now := uint64(500 * time.Second)
 	owner.reaper.bootNowNs = func() uint64 { return now }
 
-	owner.reaper.round() // stamps ownTestDead
+	owner.reaper.round() // rebuilds + stamps ownTestDead
 	now += uint64(3 * time.Second)
 	owner.reaper.round() // hits deadline
 	now += uint64(2 * time.Second)
@@ -387,6 +370,140 @@ func TestSharedBoottimeStampAllowsCrossProcessReapOfCrashLoopsAndShortLanes(t *t
 	}
 }
 
+func TestReaperFailsClosedWhenTrampolineRebuildFails(t *testing.T) {
+	root := t.TempDir()
+	deadDir := filepath.Join(root, GraceDirPrefix+"dead-enomem")
+	if err := os.Mkdir(deadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deadDir, "000001-proxyless-unix_dgram_sendmsg-p"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := uint64(1000 * time.Second)
+	var rebuildErr error = unix.ENOMEM
+	rebuildCalls := 0
+	r := newGraceReaper(root, GraceDirPrefix+"self", 15*time.Minute, 3*time.Minute, 1*time.Minute, zap.NewNop())
+	r.bootNowNs = func() uint64 { return now }
+	r.rebuildFn = func(dirPath string) (uint64, error) {
+		rebuildCalls++
+		return 0, rebuildErr
+	}
+
+	// Repeated passes while rebuild fails MUST keep pins and never stamp or reap.
+	for i := 0; i < 4; i++ {
+		r.round()
+		now += uint64(10 * time.Minute)
+	}
+	if rebuildCalls != 4 {
+		t.Fatalf("rebuildCalls = %d, want 4", rebuildCalls)
+	}
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("deadDir was reaped despite rebuild ENOMEM failures: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(deadDir, stampFileName)); !os.IsNotExist(err) {
+		t.Fatalf("stamp file was written despite rebuild failure: err=%v", err)
+	}
+
+	// Once rebuild succeeds, full 15m + 1m window starts from THAT point.
+	rebuildErr = nil
+	r.round()
+	now += uint64(14 * time.Minute)
+	r.round()
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("deadDir reaped early after rebuild: %v", err)
+	}
+	now += uint64(1*time.Minute + time.Second)
+	r.round() // confirm pass 1
+	now += uint64(1*time.Minute + time.Second)
+	r.round() // reaped!
+	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
+		t.Fatalf("deadDir was NOT reaped after successful rebuild + 15m + 1m: err=%v", err)
+	}
+}
+
+func TestReaperRefusesUnpinAndRebuildsWhenRunCntIncreases(t *testing.T) {
+	root := t.TempDir()
+	deadDir := filepath.Join(root, GraceDirPrefix+"dead-still-running")
+	if err := os.Mkdir(deadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deadDir, "000001-proxyless-unix_dgram_sendmsg-p"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := uint64(1000 * time.Second)
+	curRunCnt := uint64(10)
+	rebuildCalls := 0
+	r := newGraceReaper(root, GraceDirPrefix+"self", 15*time.Minute, 3*time.Minute, 1*time.Minute, zap.NewNop())
+	r.bootNowNs = func() uint64 { return now }
+	r.rebuildFn = func(dirPath string) (uint64, error) {
+		rebuildCalls++
+		return curRunCnt, nil
+	}
+	r.runCntFn = func(dirPath string) (uint64, error) {
+		return curRunCnt, nil
+	}
+
+	r.round() // rebuild #1 at run_cnt=10
+	// Simulate stale trampoline STILL calling the pinned prog!
+	curRunCnt = 50
+	now += uint64(16 * time.Minute)
+	r.round() // detects run_cnt grew 10 -> 50, refuses confirm/unpin, resets rebuiltBootNs=0!
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("deadDir reaped while run_cnt was still increasing: %v", err)
+	}
+
+	// Next pass forces rebuild #2 (now stale trampoline stops calling prog).
+	now += uint64(3 * time.Minute)
+	r.round()
+	if rebuildCalls != 2 {
+		t.Fatalf("expected second rebuild after run_cnt increased, got rebuildCalls=%d", rebuildCalls)
+	}
+
+	// Run count stays flat at 50 for full 15m + 1m -> safely reaped.
+	now += uint64(15*time.Minute + time.Second)
+	r.round()
+	now += uint64(1*time.Minute + time.Second)
+	r.round()
+	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
+		t.Fatalf("deadDir not reaped once run_cnt stayed flat after second rebuild: %v", err)
+	}
+}
+
+func TestReaperUpgradesLegacy16ByteStampAndForcesRebuild(t *testing.T) {
+	root := t.TempDir()
+	deadDir := filepath.Join(root, GraceDirPrefix+"legacy-v3727")
+	if err := os.Mkdir(deadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deadDir, "000001-p"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Write a legacy 16-byte stamp that already passed its 15m deadline.
+	legacy := encodeStamp(sharedStamp{firstFreeBootNs: 100, deadlineHitBootNs: 200})
+	if err := os.WriteFile(filepath.Join(deadDir, stampFileName), legacy[:16], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := uint64(2000 * time.Second)
+	rebuilt := false
+	r := newGraceReaper(root, GraceDirPrefix+"self", 15*time.Minute, 3*time.Minute, 1*time.Minute, zap.NewNop())
+	r.bootNowNs = func() uint64 { return now }
+	r.rebuildFn = func(dirPath string) (uint64, error) {
+		rebuilt = true
+		return 0, nil
+	}
+
+	r.round()
+	if !rebuilt {
+		t.Fatal("expected legacy 16-byte stamp (rebuiltBootNs=0) to trigger force-rebuild before reaping")
+	}
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("legacy dir was reaped immediately instead of waiting full grace window after rebuild: %v", err)
+	}
+}
+
 func TestGracefulShutdown_HostBPFFSExitsImmediatelyAndLeavesPinForReaper(t *testing.T) {
 	resetStateForTest(t)
 	root := t.TempDir()
@@ -405,7 +522,6 @@ func TestGracefulShutdown_HostBPFFSExitsImmediatelyAndLeavesPinForReaper(t *test
 		if _, statErr := os.Stat(owner.dir); statErr != nil {
 			t.Errorf("detach hook saw missing owner.dir: %v", statErr)
 		}
-		// Attach gate must ALREADY be closed when detach hooks run.
 		var dummy ebpf.Program
 		if perr := PinBeforeAttach(&dummy, "proxyless", "late", "p"); !errors.Is(perr, ErrShuttingDown) {
 			t.Errorf("PinBeforeAttach during detach hook = %v, want ErrShuttingDown", perr)
@@ -414,7 +530,7 @@ func TestGracefulShutdown_HostBPFFSExitsImmediatelyAndLeavesPinForReaper(t *test
 	})
 
 	start := time.Now()
-	GracefulShutdown(context.Background(), zap.NewNop(), DefaultInProcessHoldWait)
+	GracefulShutdown(context.Background(), zap.NewNop())
 	elapsed := time.Since(start)
 	if elapsed > 500*time.Millisecond {
 		t.Fatalf("GracefulShutdown with host bpffs blocked exit for %v; must return immediately", elapsed)
@@ -428,9 +544,6 @@ func TestGracefulShutdown_HostBPFFSExitsImmediatelyAndLeavesPinForReaper(t *test
 	if Armed() {
 		t.Fatal("Armed() = true after GracefulShutdown; want false")
 	}
-	// Host-bpffs pins MUST stay intact for the >= 15m cross-process reaper, and
-	// owner.lockFD MUST stay open until process exit so flock releases only
-	// once the process is truly gone.
 	if _, err := os.Stat(owner.dir); err != nil {
 		t.Fatalf("GracefulShutdown prematurely deleted grace dir %s: %v", owner.dir, err)
 	}
@@ -446,7 +559,7 @@ func TestGracefulShutdown_HostBPFFSExitsImmediatelyAndLeavesPinForReaper(t *test
 
 func TestLateRegisterDetachHookRunsSynchronouslyAfterShutdown(t *testing.T) {
 	resetStateForTest(t)
-	GracefulShutdown(context.Background(), zap.NewNop(), 0)
+	GracefulShutdown(context.Background(), zap.NewNop())
 
 	ran := false
 	RegisterDetachHook(func() { ran = true })
@@ -457,9 +570,8 @@ func TestLateRegisterDetachHookRunsSynchronouslyAfterShutdown(t *testing.T) {
 
 func TestInitAfterGracefulShutdownRefusesToReopenGate(t *testing.T) {
 	resetStateForTest(t)
-	GracefulShutdown(context.Background(), zap.NewNop(), 0)
+	GracefulShutdown(context.Background(), zap.NewNop())
 
-	// Production Init MUST NOT reopen the attach gate once GracefulShutdown ran.
 	if err := Init(context.Background(), zap.NewNop(), ModeNative); !errors.Is(err, ErrShuttingDown) {
 		t.Fatalf("Init after GracefulShutdown = %v, want ErrShuttingDown", err)
 	}
@@ -468,7 +580,6 @@ func TestInitAfterGracefulShutdownRefusesToReopenGate(t *testing.T) {
 		t.Fatalf("PinBeforeAttach after failed post-shutdown Init = %v, want ErrShuttingDown", err)
 	}
 
-	// Only explicit test-only re-arm helper may clear the gate.
 	ResetShutdownForTest(t)
 	SetBypassForTest(t)
 	if err := PinBeforeAttach(&dummy, "proxyless", "rearmed", "p"); err != nil {
@@ -479,14 +590,11 @@ func TestInitAfterGracefulShutdownRefusesToReopenGate(t *testing.T) {
 func TestValidateHostBPFFSPath_RejectsNonBPFFSAndOverlay(t *testing.T) {
 	resetStateForTest(t)
 
-	// Non-bpffs temp directory rejected in both modes.
 	d := t.TempDir()
 	if err := ValidateHostBPFFSPath(d, false); err == nil || !strings.Contains(err.Error(), "not a bpffs filesystem") {
 		t.Fatalf("ValidateHostBPFFSPath(tmpfs, false) = %v, want not-a-bpffs error", err)
 	}
 
-	// If /sys/fs/bpf is a real bpffs on this host, prove RecordPrivateOverlayDev
-	// AND EnvHostBPFFSDev mismatch both reject it!
 	if dev, ok := bpffsDevice(DefaultNativeBPFFSPath); ok {
 		RecordPrivateOverlayDev(dev)
 		if err := ValidateHostBPFFSPath(DefaultNativeBPFFSPath, false); err == nil || !strings.Contains(err.Error(), "private bpffs overlay") {
@@ -539,88 +647,4 @@ func TestHasMountInfoBPFFS(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("hasMountInfoBPFFS(missing) = (%v, %v), want (false, nil)", ok, err)
 	}
-}
-
-func TestDetachedHolderClosesInheritedNonCLOEXECPipeImmediately(t *testing.T) {
-	runCase := func(t *testing.T, count int, passInExtraFiles bool) {
-		t.Helper()
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatalf("os.Pipe: %v", err)
-		}
-		defer func() { _ = r.Close() }()
-
-		cmd := exec.Command("/proc/self/exe")
-		cmd.Args = []string{DetachedHolderComm}
-		cmd.Env = []string{
-			fmt.Sprintf("%s=%d", envDetachedHolderMS, 60000),
-			fmt.Sprintf("%s=%d", envDetachedHolderCount, count),
-		}
-		cmd.Stdin = nil
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-		if passInExtraFiles {
-			cmd.ExtraFiles = []*os.File{w}
-		} else {
-			// Clear FD_CLOEXEC so w is genuinely inherited across exec at an FD >= 3+count.
-			if _, ferr := unix.FcntlInt(w.Fd(), unix.F_SETFD, 0); ferr != nil {
-				_ = w.Close()
-				t.Fatalf("clear FD_CLOEXEC: %v", ferr)
-			}
-		}
-
-		if err := cmd.Start(); err != nil {
-			_ = w.Close()
-			t.Fatalf("start holder: %v", err)
-		}
-		// Close parent's write end immediately; if the holder fails to close
-		// its inherited copy, reading r will block for 60s instead of returning EOF.
-		_ = w.Close()
-		t.Cleanup(func() {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		})
-
-		eofCh := make(chan error, 1)
-		go func() {
-			var buf [1]byte
-			_, rerr := r.Read(buf[:])
-			eofCh <- rerr
-		}()
-
-		select {
-		case rerr := <-eofCh:
-			if !errors.Is(rerr, io.EOF) {
-				t.Fatalf("expected io.EOF when holder closes inherited pipe, got %v", rerr)
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatalf("timed out waiting for EOF: detached holder kept inherited non-BPF pipe open (count=%d, extraFiles=%v)", count, passInExtraFiles)
-		}
-
-		// Verify /proc/<pid>/comm was renamed away from "keploy" to DetachedHolderComm.
-		commPath := fmt.Sprintf("/proc/%d/comm", cmd.Process.Pid)
-		deadline := time.Now().Add(2 * time.Second)
-		var comm string
-		for time.Now().Before(deadline) {
-			if b, cerr := os.ReadFile(commPath); cerr == nil {
-				comm = strings.TrimSpace(string(b))
-				if comm == DetachedHolderComm {
-					break
-				}
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if comm != DetachedHolderComm {
-			t.Fatalf("holder /proc/%d/comm = %q, want %q", cmd.Process.Pid, comm, DetachedHolderComm)
-		}
-	}
-
-	t.Run("inherited_non_cloexec_pipe_closed_by_close_range", func(t *testing.T) {
-		runCase(t, 0, false)
-	})
-	t.Run("non_bpf_fd_inside_count_slot_closed_immediately", func(t *testing.T) {
-		runCase(t, 1, true)
-	})
 }

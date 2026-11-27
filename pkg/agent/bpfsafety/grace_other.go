@@ -14,7 +14,9 @@ const (
 	DefaultHostBPFFSPath           = "/run/keploy/host-bpffs"
 	DefaultNativeBPFFSPath         = "/sys/fs/bpf"
 	GraceRootSubdir                = "keploy-grace"
-	DetachedHolderComm             = "kp-bpf-hold"
+	GraceModeHostBPFFS             = "host-bpffs"
+	GraceModeUnprotected           = "unprotected"
+	UnprotectedWarnMessage         = "eBPF crash protection is OFF: mount the host's /sys/fs/bpf at /run/keploy/host-bpffs (see docs/kernel-safety.md)"
 	EnvHostBPFFS                   = "KEPLOY_HOST_BPFFS"
 	EnvHostBPFFSDev                = "KEPLOY_HOST_BPFFS_DEV"
 	EnvLaunchMode                  = "KEPLOY_LAUNCH_MODE"
@@ -26,7 +28,6 @@ const (
 	DefaultGracePeriod             = 15 * time.Minute
 	DefaultReapInterval            = 3 * time.Minute
 	DefaultConfirmGap              = 1 * time.Minute
-	DefaultInProcessHoldWait       = 60 * time.Second
 	MinProdGracePeriod             = 15 * time.Minute
 	MaxProdGracePeriod             = 24 * time.Hour
 	MinProdConfirmGap              = 1 * time.Minute
@@ -59,6 +60,7 @@ type MetricsObserver func(dirsPresent, pinnedProgs int, unprotected bool)
 func DetectMode(daemonSet bool) Mode                                        { return ModeNative }
 func SetMetricsObserver(fn MetricsObserver)                                 {}
 func UnprotectedTrampolinesActive() bool                                    { return false }
+func ActiveGraceMode() string                                               { return "" }
 func Armed() bool                                                           { return false }
 func ActiveGraceDir() string                                                { return "" }
 func RecordPrivateOverlayDev(dev uint64)                                    {}
@@ -67,8 +69,8 @@ func ValidateHostBPFFSPath(path string, checkContainerHostMount bool) error { re
 func SetBypassForTest(tb TestCleaner)                                       {}
 func AllowShortGraceForTest(tb TestCleaner)                                 {}
 func ResetShutdownForTest(tb TestCleaner)                                   {}
+func ResetUnprotectedForTest(tb TestCleaner)                                {}
 func HasActiveWork() bool                                                   { return false }
 func Init(ctx context.Context, logger *zap.Logger, m Mode) error            { return nil }
 func RegisterDetachHook(fn func())                                          {}
-func GracefulShutdown(ctx context.Context, logger *zap.Logger, wait time.Duration) {
-}
+func GracefulShutdown(ctx context.Context, logger *zap.Logger)              {}
