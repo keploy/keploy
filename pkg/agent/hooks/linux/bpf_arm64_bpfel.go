@@ -54,7 +54,6 @@ const (
 	bpfMapReadySeen                   = "ready_seen"
 	bpfMapReadySocks                  = "ready_socks"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
-	bpfMapScopedPids                  = "scoped_pids"
 	bpfMapSocketClassifyFailures      = "socket_classify_failures"
 	bpfMapStopSignals                 = "stop_signals"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
@@ -83,7 +82,6 @@ const (
 	bpfProgK_readyExec                = "k_ready_exec"
 	bpfProgK_readyExit                = "k_ready_exit"
 	bpfProgK_readyFork                = "k_ready_fork"
-	bpfProgK_scopedFork               = "k_scoped_fork"
 	bpfProgK_sockCreate               = "k_sock_create"
 	bpfProgK_sockops                  = "k_sockops"
 	bpfProgK_stopSignal               = "k_stop_signal"
@@ -159,7 +157,6 @@ type bpfProgramSpecs struct {
 	K_readyExec             *ebpf.ProgramSpec `ebpf:"k_ready_exec"`
 	K_readyExit             *ebpf.ProgramSpec `ebpf:"k_ready_exit"`
 	K_readyFork             *ebpf.ProgramSpec `ebpf:"k_ready_fork"`
-	K_scopedFork            *ebpf.ProgramSpec `ebpf:"k_scoped_fork"`
 	K_sockCreate            *ebpf.ProgramSpec `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.ProgramSpec `ebpf:"k_sockops"`
 	K_stopSignal            *ebpf.ProgramSpec `ebpf:"k_stop_signal"`
@@ -217,7 +214,6 @@ type bpfMapSpecs struct {
 	ReadySeen                   *ebpf.MapSpec `ebpf:"ready_seen"`
 	ReadySocks                  *ebpf.MapSpec `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
-	ScopedPids                  *ebpf.MapSpec `ebpf:"scoped_pids"`
 	SocketClassifyFailures      *ebpf.MapSpec `ebpf:"socket_classify_failures"`
 	StopSignals                 *ebpf.MapSpec `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
@@ -294,7 +290,6 @@ type bpfMaps struct {
 	ReadySeen                   *ebpf.Map `ebpf:"ready_seen"`
 	ReadySocks                  *ebpf.Map `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
-	ScopedPids                  *ebpf.Map `ebpf:"scoped_pids"`
 	SocketClassifyFailures      *ebpf.Map `ebpf:"socket_classify_failures"`
 	StopSignals                 *ebpf.Map `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
@@ -347,7 +342,6 @@ func (m *bpfMaps) Close() error {
 		m.ReadySeen,
 		m.ReadySocks,
 		m.RedirectProxyMap,
-		m.ScopedPids,
 		m.SocketClassifyFailures,
 		m.StopSignals,
 		m.TargetNamespacePids,
@@ -389,7 +383,6 @@ type bpfPrograms struct {
 	K_readyExec             *ebpf.Program `ebpf:"k_ready_exec"`
 	K_readyExit             *ebpf.Program `ebpf:"k_ready_exit"`
 	K_readyFork             *ebpf.Program `ebpf:"k_ready_fork"`
-	K_scopedFork            *ebpf.Program `ebpf:"k_scoped_fork"`
 	K_sockCreate            *ebpf.Program `ebpf:"k_sock_create"`
 	K_sockops               *ebpf.Program `ebpf:"k_sockops"`
 	K_stopSignal            *ebpf.Program `ebpf:"k_stop_signal"`
@@ -425,7 +418,6 @@ func (p *bpfPrograms) Close() error {
 		p.K_readyExec,
 		p.K_readyExit,
 		p.K_readyFork,
-		p.K_scopedFork,
 		p.K_sockCreate,
 		p.K_sockops,
 		p.K_stopSignal,

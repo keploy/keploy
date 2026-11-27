@@ -327,19 +327,21 @@ type InstanceStamper interface {
 }
 
 // PIDScoper is the optional extension implemented by hooks that support
-// opt-in per-process subtree interception (structs.FlagScopedPids): when
-// active, only processes whose agent-namespace TGID and start_boottime ticks
-// (/proc/<pid>/stat field 22) were added via AddScopedPID — and descendants
-// below them in the real_parent tree — are matched by pid_filter, leaving an
-// outer build toolchain outside interception.
+// opt-in cgroup-based subtree interception (structs.FlagScopedPids): when
+// active, only processes inside the run's scoped cgroup v2 directory (and
+// nested sub-cgroups below it) are matched by pid_filter and classify_process,
+// leaving an outer build toolchain outside interception.
 type PIDScoper interface {
-	// AddScopedPID opts the process nsTgid (in the agent's PID namespace) with
-	// startTicks (/proc/<pid>/stat field 22) and its real_parent descendants
-	// into interception.
+	// AddScopedPID migrates the process nsTgid (in the agent's PID namespace,
+	// verified against startTicks from /proc/<pid>/stat field 22) into the
+	// run's scoped cgroup so it and every descendant it forks stay isolated.
 	AddScopedPID(nsTgid uint32, startTicks uint64) error
 	// ScopedPidsActive reports whether these hooks were loaded with
-	// structs.FlagScopedPids active in native mode.
+	// structs.FlagScopedPids armed in native mode.
 	ScopedPidsActive() bool
+	// ScopedStatus reports whether scoped mode was requested, whether the
+	// scoped cgroup is armed, and why it fell back if not.
+	ScopedStatus() models.ScopeStatus
 }
 
 // InstanceLoss counts the processes an instance forked that the kernel

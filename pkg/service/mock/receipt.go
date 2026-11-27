@@ -162,6 +162,12 @@ type Receipt struct {
 	// count that could not be read adds nothing here
 	// (ProcessTrackingUnread, CallCaptureUnread say it).
 	CaptureIncomplete models.CaptureLosses `yaml:"captureIncomplete,omitempty" json:"captureIncomplete,omitempty"`
+	// ScopedReady reports whether native Linux cgroup-based Go toolchain
+	// scoping was armed when requested (true) or fell back fail-closed to
+	// full-tree interception (false, e.g. read-only /sys/fs/cgroup or a
+	// non-delegated session without CAP_SYS_ADMIN). Nil when not requested.
+	ScopedReady       *bool  `yaml:"scoped_ready,omitempty" json:"scoped_ready,omitempty"`
+	ScopedReadyReason string `yaml:"scoped_ready_reason,omitempty" json:"scoped_ready_reason,omitempty"`
 	// UnchargedMisses are, under the proven switch, the misses MissedData
 	// counts that no test was charged with (models.UnmatchedCall.ChargedTo
 	// empty): a call made before the test process claimed the run, or

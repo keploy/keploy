@@ -145,9 +145,6 @@ func (a *Agent) captureCounts(ctx context.Context) (models.CaptureLosses, error)
 		if refusals.Excluded > 0 {
 			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMapExcluded, Count: refusals.Excluded, What: pidMapCause("excluded_pids", refusals.LastExcludedErr), Err: refusals.LastExcludedErr})
 		}
-		if refusals.Scoped > 0 {
-			out = append(out, models.CaptureLoss{Kind: models.CaptureLossPIDMap, Count: refusals.Scoped, What: pidMapCause("scoped_pids", refusals.LastScopedErr), Err: refusals.LastScopedErr})
-		}
 	}
 	return mergeKinds(out), nil
 }

@@ -206,6 +206,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// leaving the outer build toolchain outside interception. Available
 		// regardless of KEPLOY_PROVEN.
 		r.Post("/scope-pid", a.HandleScopePID)
+		r.Get("/scope-status", a.HandleScopeStatus)
 		// What an integration refused, for the run's verdict to name
 		// (scope_proven.go). The plain 404 with the switch off.
 		r.HandleFunc("/refusal", a.HandleRefusal)

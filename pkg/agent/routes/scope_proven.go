@@ -111,6 +111,24 @@ type pidScoperSvc interface {
 	ScopePID(ctx context.Context, caller int) (bool, *models.ScopeError)
 }
 
+type scopeStatusSvc interface {
+	ScopeStatus(ctx context.Context) models.ScopeStatus
+}
+
+// HandleScopeStatus reports whether native Linux cgroup-based Go toolchain
+// scoping was requested and armed (ready=true) or fell back to full-tree
+// interception (ready=false with reason and remedy).
+func (a *Agent) HandleScopeStatus(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.svc.(scopeStatusSvc)
+	if !ok {
+		render.Status(r, http.StatusOK)
+		render.JSON(w, r, models.ScopeStatus{})
+		return
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, s.ScopeStatus(r.Context()))
+}
+
 // HandleScopePID opts the calling process (read from the connection, never
 // from the request body) and every descendant in its real_parent tree into
 // interception when the hooks run with structs.FlagScopedPids. Unlike

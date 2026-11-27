@@ -106,9 +106,13 @@ type Hooks struct {
 	// SetInstance (instance.go); instanceMu guards it.
 	instanceMu   sync.Mutex
 	instanceFork link.Link
-	// scopedMu serialises AddScopedPID, sweepScopedPIDs, and scopedFork attach/close.
-	scopedMu   sync.Mutex
-	scopedFork link.Link
+	// scopedMu serialises cgroup-based scoped mode state (FlagScopedPids).
+	scopedMu        sync.Mutex
+	scopedRequested bool
+	scopedReady     bool
+	scopedReason    string
+	scopedCgroupDir string
+	scopedCgroupID  uint64
 	// instanceLock holds this agent's cross-PID-namespace flock ownership
 	// claim for the lifetime of loaded eBPF hooks.
 	instanceLock *instanceLock
@@ -361,8 +365,9 @@ func (h *Hooks) sendFinalAgentInfo(info structs.AgentInfo, start func(*structs.A
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
 	}
-	if info.IsDocker == 0 && (info.Flags&structs.FlagScopedPids) != 0 {
-		h.logger.Info("eBPF native scoped_pids mode active: only opted-in processes and their descendants will be intercepted")
+	if info.IsDocker == 0 && (info.Flags&structs.FlagScopedPids) != 0 && info.ScopedCgroupID != 0 {
+		h.logger.Info("eBPF native cgroup scoping active: only opted-in processes and their descendants will be intercepted",
+			zap.Uint64("scoped_cgroup_id", info.ScopedCgroupID))
 	}
 	h.sayBindFallback(info.Flags)
 	// The bind hooks steer from here (the flags are sent): a restarted
@@ -833,13 +838,40 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		info.Flags &^= structs.FlagProvenReady
 		info.Flags |= readyFlags
 
-		// In native scoped_pids mode, k_scoped_fork must be attached to
-		// sched_process_fork before FlagScopedPids takes effect so daemonized
-		// or orphaned children reparented to a subreaper client stay isolated.
-		// Fail closed if the tracepoint cannot attach.
+		// In native scoped mode, create a dedicated cgroup v2 directory inside
+		// the client's cgroup and pass its inode ID to BPF so kernel fork
+		// inheritance keeps all descendants (including reparented daemons)
+		// isolated without any tracing recursion guard. If no scoped cgroup can
+		// be created (e.g. read-only /sys/fs/cgroup or non-delegated session
+		// without CAP_SYS_ADMIN), fail closed to full-tree interception and
+		// record scoped_ready=false so the CLI and receipt explain the fallback.
 		if info.IsDocker == 0 && (info.Flags&structs.FlagScopedPids) != 0 {
-			if err := h.attachScopedFork(); err != nil {
-				return err
+			cgDir, cgID, scErr := h.setupScopedCgroup(cGroupPath, clientInfo.ClientNSPID)
+			h.scopedMu.Lock()
+			h.scopedRequested = true
+			if scErr != nil {
+				h.scopedReady = false
+				h.scopedReason = scErr.Error()
+				h.scopedCgroupDir = ""
+				h.scopedCgroupID = 0
+				info.Flags &^= structs.FlagScopedPids
+				info.ScopedCgroupID = 0
+			} else {
+				h.scopedReady = true
+				h.scopedReason = ""
+				h.scopedCgroupDir = cgDir
+				h.scopedCgroupID = cgID
+				info.ScopedCgroupID = cgID
+			}
+			h.scopedMu.Unlock()
+			if scErr != nil {
+				h.logger.Warn("go toolchain exemption unavailable (scoped_ready=false): could not create a scoped cgroup, falling back to full-tree interception — Go module downloads may be mocked or blocked",
+					zap.Error(scErr),
+					zap.String("remedy", scopedCgroupRemedy))
+			} else {
+				h.logger.Info("created scoped cgroup for Go toolchain exemption",
+					zap.String("scoped_cgroup_dir", cgDir),
+					zap.Uint64("scoped_cgroup_id", cgID))
 			}
 		}
 
@@ -1020,9 +1052,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if err := h.closeInstanceFork(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the sched_process_fork hook that keeps keploy instances")
 	}
-	if err := h.closeScopedFork(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the sched_process_fork hook that propagates scoped_pids")
-	}
+	h.closeScopedCgroup()
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}

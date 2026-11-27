@@ -35,13 +35,15 @@ type scopedCall struct {
 type fakeScoperHooks struct {
 	coreAgent.Hooks
 	active       bool
+	status       models.ScopeStatus
 	scoped       []scopedCall
 	err          error
 	setInstances []uint32
 	endedInsts   []uint32
 }
 
-func (f *fakeScoperHooks) ScopedPidsActive() bool { return f.active }
+func (f *fakeScoperHooks) ScopedPidsActive() bool            { return f.active }
+func (f *fakeScoperHooks) ScopedStatus() models.ScopeStatus  { return f.status }
 
 func (f *fakeScoperHooks) AddScopedPID(nsTgid uint32, startTicks uint64) error {
 	f.scoped = append(f.scoped, scopedCall{pid: nsTgid, start: startTicks})

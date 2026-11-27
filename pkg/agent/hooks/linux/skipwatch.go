@@ -158,10 +158,6 @@ var programSkips = map[string]programSkip{
 		by:       []string{"k_connect4", "k_connect6"},
 		gap:      "the calls of a process a skipped run left out, and of every process it forks, carry no instance: they are not told apart from calls no test worker made",
 	},
-	"k_scoped_fork": {
-		class: skipLoses,
-		does:  "propagates scoped_pids membership at fork time when FlagScopedPids is active so daemonized or orphaned children reparented to a subreaper client remain isolated (a skipped run on a preemptible kernel can leave a reparented child outside scoped_pids)",
-	},
 	// The kernel generates a signal with its target's siglock held and
 	// interrupts off, so a run is neither preempted nor nested on its CPU,
 	// and none is expected to be skipped. Nothing else notes the signal: a
@@ -687,10 +683,10 @@ func sweepGonePIDs(targets, excluded, starts, instances *ebpf.Map, only []uint32
 	return cleared, zombies, nil
 }
 
-// zombieProcess says the process tgid (in the caller's PID namespace) has
-// exited and waits to be reaped: its leader is a zombie and has no thread
-// left. A leader that exited while other threads of its process live is a
-// zombie too, but the process is not: that one keeps no sweep going.
+// zombieProcess says the process tgid (initial PID namespace) has exited and
+// waits to be reaped: its leader is a zombie and has no thread left. A
+// leader that exited while other threads of its process live is a zombie
+// too, but the process is not: that one keeps no sweep going.
 func zombieProcess(tgid uint32) bool {
 	if processState(tgid) != 'Z' {
 		return false
@@ -699,7 +695,7 @@ func zombieProcess(tgid uint32) bool {
 	return err == nil && len(tasks) == 1
 }
 
-// processState is the state letter of the process tgid (in the caller's PID
+// processState is the state letter of the process tgid (initial PID
 // namespace) in /proc/<tgid>/stat, 0 when it cannot be read.
 func processState(tgid uint32) byte {
 	b, err := os.ReadFile("/proc/" + strconv.FormatUint(uint64(tgid), 10) + "/stat")
@@ -711,43 +707,6 @@ func processState(tgid uint32) byte {
 		return 0
 	}
 	return b[i+2]
-}
-
-// readScopedProcStat and scopedKillZero are swapped by tests to inject
-// transient /proc read failures (such as EMFILE) without failing open.
-var (
-	readScopedProcStat = func(tgid uint32) ([]byte, error) {
-		return os.ReadFile("/proc/" + strconv.FormatUint(uint64(tgid), 10) + "/stat")
-	}
-	scopedKillZero = func(tgid uint32) error {
-		return unix.Kill(int(tgid), 0)
-	}
-)
-
-var errMalformedProcStat = errors.New("malformed /proc stat")
-
-// scopedProcStartTicks reads field 22 (start_boottime in USER_HZ=100 ticks) of
-// /proc/<tgid>/stat in the caller's PID namespace, preserving the underlying
-// OS error so callers can distinguish positive absence (ENOENT/ESRCH) from
-// transient read failures (EMFILE/EACCES).
-func scopedProcStartTicks(tgid uint32) (uint64, error) {
-	b, err := readScopedProcStat(tgid)
-	if err != nil {
-		return 0, err
-	}
-	i := strings.LastIndexByte(string(b), ')')
-	if i < 0 || i+2 >= len(b) {
-		return 0, errMalformedProcStat
-	}
-	fields := strings.Fields(string(b[i+2:]))
-	if len(fields) <= 19 {
-		return 0, errMalformedProcStat
-	}
-	v, err := strconv.ParseUint(fields[19], 10, 64)
-	if err != nil || v == 0 {
-		return 0, errMalformedProcStat
-	}
-	return v, nil
 }
 
 // sweepIfExitsSkipped sweeps the PID maps (sweepGonePIDs) when k_process_exit
@@ -765,11 +724,6 @@ func (h *Hooks) sweepIfExitsSkipped() {
 		return
 	}
 	n, zombies, err := sweepPIDs(h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.PidStartTimes, h.objects.InstanceOfTgid, only)
-	// scoped_pids is keyed by agent-namespace TGID, so dead/recycled entries
-	// can be swept in any PID namespace (even when sweepPIDs returns errNotHostPIDs).
-	if scopedErr := sweepScopedPIDs(h.objects.ScopedPids, &h.scopedMu); scopedErr != nil {
-		h.skips.sweepAgain()
-	}
 	switch {
 	case err != nil && !errors.Is(err, errNotHostPIDs):
 		// A sweep a map's churn cut short (an iteration aborted): the
@@ -856,74 +810,4 @@ func classifyFlag(flags uint32, classifies bool) uint32 {
 		flags |= structs.FlagClassifies
 	}
 	return flags
-}
-
-// sweepScopedPIDs deletes exited or recycled agent-namespace TGIDs from
-// scoped_pids (left behind if k_process_exit was skipped). Because scoped_pids
-// is keyed by the agent's own PID namespace TGID and stores start_boottime
-// ticks, this works in both host and container PID namespaces.
-//
-// Fail-closed: an entry is deleted ONLY on positive evidence that the process
-// is gone (kill(tgid, 0) returns ESRCH, /proc/<tgid>/stat returns ENOENT/ESRCH,
-// or the process is a single-task zombie) or that the TGID was recycled
-// (start_boottime ticks were successfully read and differ from storedStart).
-// On any other error (e.g. EMFILE, EACCES, malformed read), the entry is kept
-// and a non-nil error is returned so the caller schedules another sweep.
-// Holding mu and re-checking the stored start ticks before Delete prevents
-// deleting an entry freshly inserted by AddScopedPID for a reused PID.
-func sweepScopedPIDs(scoped *ebpf.Map, mu *sync.Mutex) error {
-	if scoped == nil {
-		return nil
-	}
-	stale := map[uint32]uint64{}
-	var retryErr error
-	var k uint32
-	var v uint64
-	it := scoped.Iterate()
-	for it.Next(&k, &v) {
-		killErr := scopedKillZero(k)
-		if errors.Is(killErr, unix.ESRCH) {
-			stale[k] = v
-			continue
-		}
-		if killErr != nil && !errors.Is(killErr, unix.EPERM) {
-			if retryErr == nil {
-				retryErr = killErr
-			}
-			continue
-		}
-		curStart, err := scopedProcStartTicks(k)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
-				stale[k] = v
-				continue
-			}
-			// Transient or unreadable error (e.g. EMFILE, EACCES): never fail
-			// open by deleting a live scoped process; ask for another sweep.
-			if retryErr == nil {
-				retryErr = err
-			}
-			continue
-		}
-		if curStart != v || zombieProcess(k) {
-			stale[k] = v
-		}
-	}
-	iterErr := it.Err()
-	if len(stale) > 0 {
-		if mu != nil {
-			mu.Lock()
-			defer mu.Unlock()
-		}
-		for k, oldStart := range stale {
-			var cur uint64
-			if err := scoped.Lookup(k, &cur); err == nil && cur == oldStart {
-				_ = scoped.Delete(k)
-			}
-		}
-	}
-	if iterErr != nil {
-		return iterErr
-	}
-	return retryErr
 }

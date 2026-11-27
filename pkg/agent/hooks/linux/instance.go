@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -13,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // Keploy instances (agent.InstanceStamper): a test worker's processes,
@@ -36,19 +40,35 @@ var _ agent.InstanceStamper = (*Hooks)(nil)
 var _ agent.PIDScoper = (*Hooks)(nil)
 
 // ScopedPidsActive reports whether these hooks were loaded with
-// structs.FlagScopedPids active in native mode.
+// structs.FlagScopedPids armed (a non-zero scoped cgroup ID) in native mode.
 func (h *Hooks) ScopedPidsActive() bool {
 	h.agentInfoMu.Lock()
 	defer h.agentInfoMu.Unlock()
-	return h.agentInfoSent && h.agentInfo.IsDocker == 0 && (h.agentInfo.Flags&structs.FlagScopedPids) != 0
+	return h.agentInfoSent && h.agentInfo.IsDocker == 0 && (h.agentInfo.Flags&structs.FlagScopedPids) != 0 && h.agentInfo.ScopedCgroupID != 0
 }
 
-// AddScopedPID opts the process nsTgid (in the agent's PID namespace, with
-// startTicks from /proc/<pid>/stat field 22) and every process it forks into
-// interception when structs.FlagScopedPids is active. k_scoped_fork is
-// attached before inserting so daemonized/orphaned children reparented to a
-// subreaper client inherit scoped_pids at fork time; pid_filter also walks
-// real_parent as defense in depth.
+// ScopedStatus reports whether cgroup-based Go toolchain scoping was requested,
+// whether the run's scoped cgroup was armed, and why it fell back if not.
+func (h *Hooks) ScopedStatus() models.ScopeStatus {
+	h.scopedMu.Lock()
+	defer h.scopedMu.Unlock()
+	st := models.ScopeStatus{
+		Requested: h.scopedRequested,
+		Ready:     h.scopedReady,
+		Reason:    h.scopedReason,
+	}
+	if st.Requested && !st.Ready {
+		st.Remedy = scopedCgroupRemedy
+	}
+	return st
+}
+
+// AddScopedPID migrates the process nsTgid (in the agent's PID namespace,
+// verified against startTicks from /proc/<pid>/stat field 22) into the run's
+// scoped cgroup v2 directory via cgroup.procs. Because Linux writes to
+// cgroup.procs atomically migrate the entire thread group and kernel
+// cgroup_fork() inherits membership across every subsequent fork/exec/setsid,
+// all descendants stay isolated without any tracing recursion guard.
 func (h *Hooks) AddScopedPID(nsTgid uint32, startTicks uint64) error {
 	if nsTgid == 0 || nsTgid > math.MaxInt32 {
 		return fmt.Errorf("%d is not a process's TGID", nsTgid)
@@ -56,60 +76,25 @@ func (h *Hooks) AddScopedPID(nsTgid uint32, startTicks uint64) error {
 	if startTicks == 0 {
 		return fmt.Errorf("missing start time for process %d", nsTgid)
 	}
-	h.objectsMutex.RLock()
-	defer h.objectsMutex.RUnlock()
-	scoped := h.objects.ScopedPids
-	if scoped == nil {
-		return errors.New("the hooks are not loaded: scoped_pids is not open")
-	}
-	if err := h.attachScopedFork(); err != nil {
-		return err
-	}
 	h.scopedMu.Lock()
-	defer h.scopedMu.Unlock()
-	if err := scoped.Update(nsTgid, startTicks, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("put process %d in scoped_pids: %w", nsTgid, err)
+	cgDir := h.scopedCgroupDir
+	h.scopedMu.Unlock()
+	if cgDir == "" {
+		return errors.New("the hooks are not loaded: scoped cgroup is not armed")
 	}
 	curStart, err := scopedProcStartTicks(nsTgid)
-	if gone(nsTgid) || err != nil || curStart != startTicks {
-		_ = scoped.Delete(nsTgid)
-		return fmt.Errorf("process %d exited before it could be added to scoped_pids", nsTgid)
+	if scopedProcessGone(nsTgid) || err != nil || curStart != startTicks {
+		return fmt.Errorf("process %d exited before it could be migrated to scoped cgroup", nsTgid)
+	}
+	procs := filepath.Join(cgDir, "cgroup.procs")
+	if err := os.WriteFile(procs, []byte(strconv.FormatUint(uint64(nsTgid), 10)+"\n"), 0o644); err != nil {
+		return fmt.Errorf("migrate process %d into scoped cgroup %s: %w", nsTgid, cgDir, err)
+	}
+	afterStart, err := scopedProcStartTicks(nsTgid)
+	if scopedProcessGone(nsTgid) || err != nil || afterStart != startTicks {
+		return fmt.Errorf("process %d exited while migrating to scoped cgroup", nsTgid)
 	}
 	return nil
-}
-
-// attachScopedFork attaches k_scoped_fork to sched_process_fork, once
-// (raw tracepoint: no tracefs). The caller holds objectsMutex for reading
-// (or is inside load() before unLoad can run); unLoad closes the link with
-// objectsMutex held for writing.
-func (h *Hooks) attachScopedFork() error {
-	h.scopedMu.Lock()
-	defer h.scopedMu.Unlock()
-	if h.scopedFork != nil {
-		return nil
-	}
-	if h.objects.K_scopedFork == nil {
-		return errors.New("the hooks are not loaded: k_scoped_fork is not open")
-	}
-	l, err := link.AttachRawTracepoint(link.RawTracepointOptions{Name: "sched_process_fork", Program: h.objects.K_scopedFork})
-	if err != nil {
-		return fmt.Errorf("attach k_scoped_fork, which propagates scoped_pids across forks, to sched_process_fork: %w", err)
-	}
-	h.scopedFork = l
-	return nil
-}
-
-// closeScopedFork detaches k_scoped_fork. The caller holds objectsMutex for
-// writing.
-func (h *Hooks) closeScopedFork() error {
-	h.scopedMu.Lock()
-	defer h.scopedMu.Unlock()
-	if h.scopedFork == nil {
-		return nil
-	}
-	err := h.scopedFork.Close()
-	h.scopedFork = nil
-	return err
 }
 
 // SetInstance puts the process tgid (a kernel TGID) in the instance of value

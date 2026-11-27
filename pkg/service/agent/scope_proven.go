@@ -534,6 +534,17 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	return nil
 }
 
+// ScopeStatus reports whether native Linux cgroup-based Go toolchain scoping
+// was requested at agent load, whether the scoped cgroup was armed, and why
+// it fell back to full-tree interception if not.
+func (a *Agent) ScopeStatus(_ context.Context) models.ScopeStatus {
+	h, ok := a.Hooks.(coreAgent.PIDScoper)
+	if !ok {
+		return models.ScopeStatus{}
+	}
+	return h.ScopedStatus()
+}
+
 // ScopePID opts caller (in the agent's PID namespace, read from the HTTP
 // connection) and every descendant in its real_parent tree into interception
 // when the hooks were loaded with structs.FlagScopedPids. Returns (false, nil)

@@ -20,12 +20,17 @@ type scopePIDSvc struct {
 	agent.Service
 	gotCaller int
 	scoped    bool
+	status    models.ScopeStatus
 	serr      *models.ScopeError
 }
 
 func (s *scopePIDSvc) ScopePID(_ context.Context, caller int) (bool, *models.ScopeError) {
 	s.gotCaller = caller
 	return s.scoped, s.serr
+}
+
+func (s *scopePIDSvc) ScopeStatus(_ context.Context) models.ScopeStatus {
+	return s.status
 }
 
 func TestHandleScopePIDRouteWorksWithProvenOffAndOn(t *testing.T) {
@@ -103,6 +108,41 @@ func TestHandleScopePIDPropagatesScopeErrorStatus(t *testing.T) {
 			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != tc.status {
 				t.Fatalf("status=%d, want %d", resp.StatusCode, tc.status)
+			}
+		})
+	}
+}
+
+func TestHandleScopeStatusRouteReportsReadyAndFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		st   models.ScopeStatus
+	}{
+		{"unrequested", models.ScopeStatus{}},
+		{"ready", models.ScopeStatus{Requested: true, Ready: true}},
+		{"fallback", models.ScopeStatus{Requested: true, Ready: false, Reason: "read-only file system", Remedy: "run with sudo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &scopePIDSvc{status: tc.st}
+			r := chi.NewRouter()
+			(DefaultRoutes{}).New(r, svc, zap.NewNop())
+			srv := httptest.NewServer(r)
+			defer srv.Close()
+
+			resp, err := srv.Client().Get(srv.URL + "/agent/scope-status")
+			if err != nil {
+				t.Fatalf("GET /agent/scope-status: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status=%d, want 200", resp.StatusCode)
+			}
+			var got models.ScopeStatus
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got != tc.st {
+				t.Fatalf("got %+v, want %+v", got, tc.st)
 			}
 		})
 	}
