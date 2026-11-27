@@ -2324,6 +2324,13 @@ func osAssignedPort(exclude []uint32, udp bool) (uint32, error) {
 	return 0, fmt.Errorf("failed to find a port other than %v", exclude)
 }
 
+type osPickOutcome struct {
+	port      uint32
+	found     bool
+	picks     int
+	listenErr error
+}
+
 // osAssignedDNSPort finds a port outside exclude that is free over both UDP
 // and TCP on platforms where the ephemeral range is unknown (Windows, macOS)
 // or exhausted above its ceiling.
@@ -2343,18 +2350,22 @@ func osAssignedPort(exclude []uint32, udp bool) (uint32, error) {
 //     independent TCP ":0" cursor and verify UDP while holding the TCP socket.
 //  3. If both sequential cursors sit inside excluded/held runs simultaneously,
 //     jump out via random probes (and random-start scan) across the dynamic
-//     range 49152-65535, then unprivileged ports 16384-49151.
+//     range 49152-65535, then ports 16384-49151.
 func osAssignedDNSPort(exclude []uint32) (uint32, error) {
 	asks := len(exclude) + 1 + udpHeldPicks
-	if port, found, err := osAssignedUDPFirst(exclude, asks); err != nil {
+	udpRes, err := osAssignedUDPFirst(exclude, asks)
+	if err != nil {
 		return 0, err
-	} else if found {
-		return port, nil
 	}
-	if port, found, err := osAssignedTCPFirst(exclude, asks); err != nil {
+	if udpRes.found {
+		return udpRes.port, nil
+	}
+	tcpRes, err := osAssignedTCPFirst(exclude, asks)
+	if err != nil {
 		return 0, err
-	} else if found {
-		return port, nil
+	}
+	if tcpRes.found {
+		return tcpRes.port, nil
 	}
 	if port, found, err := probeRange(dynamicPortLo, 65535, true, exclude); err != nil {
 		return 0, err
@@ -2366,10 +2377,19 @@ func osAssignedDNSPort(exclude []uint32) (uint32, error) {
 	} else if found {
 		return port, nil
 	}
-	return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after trying %d UDP and %d TCP OS picks and scanning unprivileged ports", exclude, asks, asks)
+	switch {
+	case udpRes.listenErr != nil && tcpRes.listenErr != nil:
+		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after %d UDP and %d TCP OS picks and scanning ports %d-65535 (udp :0: %w; tcp :0: %w)", exclude, udpRes.picks, tcpRes.picks, unprivilegedPortLo, udpRes.listenErr, tcpRes.listenErr)
+	case udpRes.listenErr != nil:
+		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after %d UDP and %d TCP OS picks and scanning ports %d-65535 (udp :0: %w)", exclude, udpRes.picks, tcpRes.picks, unprivilegedPortLo, udpRes.listenErr)
+	case tcpRes.listenErr != nil:
+		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after %d UDP and %d TCP OS picks and scanning ports %d-65535 (tcp :0: %w)", exclude, udpRes.picks, tcpRes.picks, unprivilegedPortLo, tcpRes.listenErr)
+	default:
+		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after %d UDP and %d TCP OS picks and scanning ports %d-65535", exclude, udpRes.picks, tcpRes.picks, unprivilegedPortLo)
+	}
 }
 
-func osAssignedUDPFirst(exclude []uint32, asks int) (uint32, bool, error) {
+func osAssignedUDPFirst(exclude []uint32, asks int) (osPickOutcome, error) {
 	var held []net.PacketConn
 	defer func() {
 		for _, pc := range held {
@@ -2379,7 +2399,7 @@ func osAssignedUDPFirst(exclude []uint32, asks int) (uint32, bool, error) {
 	for i := 0; i < asks; i++ {
 		pc, err := udpListen("udp", ":0")
 		if err != nil {
-			return 0, false, nil
+			return osPickOutcome{picks: i, listenErr: err}, nil
 		}
 		held = append(held, pc)
 		port := uint32(pc.LocalAddr().(*net.UDPAddr).Port)
@@ -2388,20 +2408,20 @@ func osAssignedUDPFirst(exclude []uint32, asks int) (uint32, bool, error) {
 		}
 		free, err := tcpFree(port)
 		if err != nil {
-			return 0, false, err
+			return osPickOutcome{picks: i + 1}, err
 		}
 		if free {
 			held = held[:len(held)-1]
 			if err := pc.Close(); err != nil {
-				return 0, false, fmt.Errorf("failed to release probe socket on UDP port %d: %w", port, err)
+				return osPickOutcome{picks: i + 1}, fmt.Errorf("failed to release probe socket on UDP port %d: %w", port, err)
 			}
-			return port, true, nil
+			return osPickOutcome{port: port, found: true, picks: i + 1}, nil
 		}
 	}
-	return 0, false, nil
+	return osPickOutcome{picks: asks}, nil
 }
 
-func osAssignedTCPFirst(exclude []uint32, asks int) (uint32, bool, error) {
+func osAssignedTCPFirst(exclude []uint32, asks int) (osPickOutcome, error) {
 	var held []net.Listener
 	defer func() {
 		for _, ln := range held {
@@ -2411,7 +2431,7 @@ func osAssignedTCPFirst(exclude []uint32, asks int) (uint32, bool, error) {
 	for i := 0; i < asks; i++ {
 		ln, err := portListen(context.Background(), "tcp", ":0")
 		if err != nil {
-			return 0, false, nil
+			return osPickOutcome{picks: i, listenErr: err}, nil
 		}
 		held = append(held, ln)
 		port := uint32(ln.Addr().(*net.TCPAddr).Port)
@@ -2420,17 +2440,17 @@ func osAssignedTCPFirst(exclude []uint32, asks int) (uint32, bool, error) {
 		}
 		free, err := udpFree(port)
 		if err != nil {
-			return 0, false, err
+			return osPickOutcome{picks: i + 1}, err
 		}
 		if free {
 			held = held[:len(held)-1]
 			if err := ln.Close(); err != nil {
-				return 0, false, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
+				return osPickOutcome{picks: i + 1}, fmt.Errorf("failed to release probe listener on port %d: %w", port, err)
 			}
-			return port, true, nil
+			return osPickOutcome{port: port, found: true, picks: i + 1}, nil
 		}
 	}
-	return 0, false, nil
+	return osPickOutcome{picks: asks}, nil
 }
 
 // udpHeldPicks is how many OS ":0" picks blocked on the opposite protocol each

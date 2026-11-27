@@ -182,6 +182,8 @@ func TestTheOSsPickForADNSPortIsFreeOverUDP(t *testing.T) {
 
 		nextUDP := 55000
 		nextTCP := 61000
+		var openedTCP []*pickListener
+		var checkedUDP []uint32
 		udpListen = func(network, address string) (net.PacketConn, error) {
 			if address == ":0" {
 				p := nextUDP
@@ -192,16 +194,32 @@ func TestTheOSsPickForADNSPortIsFreeOverUDP(t *testing.T) {
 			if _, err := fmt.Sscanf(address, ":%d", &p); err != nil {
 				return nil, err
 			}
-			if p == 61000 {
+			// Verify the matching TCP listener is STILL held open while UDP is probed.
+			foundOpen := false
+			for _, l := range openedTCP {
+				if uint32(l.port) == p && !l.closed {
+					foundOpen = true
+				}
+			}
+			if !foundOpen {
+				t.Errorf("UDP probe on %d ran without TCP listener held open", p)
+			}
+			checkedUDP = append(checkedUDP, p)
+			if p == 61001 {
 				return nil, errors.New("udp held")
 			}
 			return &udpStandIn{port: int(p)}, nil
 		}
 		portListen = func(_ context.Context, network, address string) (net.Listener, error) {
 			if address == ":0" {
-				p := nextTCP
+				// Verify every previously rejected TCP :0 pick stays held until stage 2 returns.
+				if n := len(openedTCP); n > 0 && openedTCP[n-1].closed {
+					t.Errorf("previous rejected TCP pick %d was closed before next :0 ask", openedTCP[n-1].port)
+				}
+				l := &pickListener{port: nextTCP}
 				nextTCP++
-				return &pickListener{port: p}, nil
+				openedTCP = append(openedTCP, l)
+				return l, nil
 			}
 			// Every port in the 55000..55099 UDP cursor block is excluded on TCP!
 			var p uint32
@@ -214,9 +232,15 @@ func TestTheOSsPickForADNSPortIsFreeOverUDP(t *testing.T) {
 			return &pickListener{port: int(p)}, nil
 		}
 
-		got, err := availablePortAbove(unknown, 0, true)
-		if err != nil || got != 61001 {
-			t.Fatalf("stage2 fallback = %d, %v; want 61001", got, err)
+		// 61000 is excluded (must be skipped without probing UDP); 61001 is held over UDP; 61002 wins.
+		got, err := availablePortAbove(unknown, 0, true, 61000)
+		if err != nil || got != 61002 || len(openedTCP) != 3 || !slices.Equal(checkedUDP, []uint32{61001, 61002}) {
+			t.Fatalf("stage2 fallback = %d, %v, tcpPicks=%d udpChecked=%v; want 61002 with udpChecked=[61001 61002]", got, err, len(openedTCP), checkedUDP)
+		}
+		for _, l := range openedTCP {
+			if !l.closed {
+				t.Fatalf("TCP listener on %d was not closed", l.port)
+			}
 		}
 	})
 
@@ -258,6 +282,51 @@ func TestTheOSsPickForADNSPortIsFreeOverUDP(t *testing.T) {
 		}
 	})
 
+	t.Run("stage3_unprivileged_range_fallback_probes_16384_to_49151_over_udp_and_tcp", func(t *testing.T) {
+		wasUDP, wasTCP, wasOff, wasProbe := udpListen, portListen, portOffset, portProbe
+		t.Cleanup(func() { udpListen, portListen, portOffset, portProbe = wasUDP, wasTCP, wasOff, wasProbe })
+
+		udpListen = func(network, address string) (net.PacketConn, error) {
+			return nil, errors.New("udp ephemeral exhausted")
+		}
+		portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+			return nil, errors.New("tcp ephemeral exhausted")
+		}
+		// Deterministic scan starting at each range's lower bound so a shifted floor
+		// (e.g. 1024 instead of 16384) is caught on the very first probe of the fallback range.
+		portOffset = func(uint32) (uint32, bool) { return 0, false }
+		var probedBelowFloor []uint32
+		var probedNonUDP []uint32
+		var probedExcluded bool
+		portProbe = func(port uint32, udp bool) (bool, error) {
+			if !udp {
+				probedNonUDP = append(probedNonUDP, port)
+			}
+			if port < 16384 {
+				probedBelowFloor = append(probedBelowFloor, port)
+			}
+			if port == 16384 {
+				probedExcluded = true
+			}
+			// Dynamic range 49152-65535 is fully taken; only 16385 in 16384-49151 is free.
+			return port == 16385, nil
+		}
+
+		got, err := availablePortAbove(unknown, 0, true, 16384)
+		if err != nil || got != 16385 {
+			t.Fatalf("stage3 16384-49151 fallback = %d, %v; want 16385", got, err)
+		}
+		if len(probedNonUDP) > 0 {
+			t.Fatalf("fallback range probed without UDP on ports (first 5): %v", probedNonUDP[:min(5, len(probedNonUDP))])
+		}
+		if len(probedBelowFloor) > 0 {
+			t.Fatalf("fallback range probed below 16384 floor (first 5): %v", probedBelowFloor[:min(5, len(probedBelowFloor))])
+		}
+		if probedExcluded {
+			t.Fatalf("fallback range probed excluded port 16384")
+		}
+	})
+
 	t.Run("all_stages_exhausted_returns_error_without_hanging", func(t *testing.T) {
 		wasUDP, wasTCP, wasOff, wasProbe := udpListen, portListen, portOffset, portProbe
 		t.Cleanup(func() { udpListen, portListen, portOffset, portProbe = wasUDP, wasTCP, wasOff, wasProbe })
@@ -284,8 +353,68 @@ func TestTheOSsPickForADNSPortIsFreeOverUDP(t *testing.T) {
 		portProbe = func(uint32, bool) (bool, error) { return false, nil }
 
 		got, err := availablePortAbove(unknown, 0, true)
-		if err == nil || !strings.Contains(err.Error(), "free over UDP and TCP") {
-			t.Fatalf("exhausted = %d, %v; want error naming UDP and TCP", got, err)
+		if err == nil || !strings.Contains(err.Error(), "free over UDP and TCP") ||
+			!strings.Contains(err.Error(), "after 9 UDP and 9 TCP OS picks") ||
+			!strings.Contains(err.Error(), "16384-65535") {
+			t.Fatalf("exhausted = %d, %v; want error naming UDP and TCP, actual pick counts (9/9), and 16384-65535", got, err)
+		}
+	})
+
+	t.Run("listen_zero_errors_preserved_and_actual_pick_counts_reported", func(t *testing.T) {
+		wasUDP, wasTCP, wasOff, wasProbe := udpListen, portListen, portOffset, portProbe
+		t.Cleanup(func() { udpListen, portListen, portOffset, portProbe = wasUDP, wasTCP, wasOff, wasProbe })
+
+		errUDPZero := errors.New("WSAENOBUFS udp")
+		errTCPZero := errors.New("WSAENOBUFS tcp")
+		portOffset = func(uint32) (uint32, bool) { return 0, false }
+		portProbe = func(uint32, bool) (bool, error) { return false, nil }
+
+		// Both :0 listens fail immediately: 0 picks obtained, both OS errors wrapped, exact range named.
+		udpListen = func(network, address string) (net.PacketConn, error) { return nil, errUDPZero }
+		portListen = func(_ context.Context, network, address string) (net.Listener, error) { return nil, errTCPZero }
+
+		got, err := availablePortAbove(unknown, 0, true, 16789, 26789)
+		if err == nil || got != 0 {
+			t.Fatalf("both :0 failed = %d, %v; want error", got, err)
+		}
+		if !errors.Is(err, errUDPZero) || !errors.Is(err, errTCPZero) {
+			t.Fatalf("final error dropped :0 OS errors: %v", err)
+		}
+		if !strings.Contains(err.Error(), "after 0 UDP and 0 TCP OS picks") || !strings.Contains(err.Error(), "16384-65535") {
+			t.Fatalf("final error has inaccurate counts or range: %v", err)
+		}
+
+		// Partial stage 1 (2 UDP picks before :0 fails) + full stage 2 (9 TCP picks, all UDP-blocked).
+		udpAsks := 0
+		nextTCP := 62000
+		udpListen = func(network, address string) (net.PacketConn, error) {
+			if address == ":0" {
+				udpAsks++
+				if udpAsks <= 2 {
+					return &udpStandIn{port: 54000 + udpAsks}, nil
+				}
+				return nil, errUDPZero
+			}
+			return nil, errors.New("udp blocked")
+		}
+		portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+			if address == ":0" {
+				p := nextTCP
+				nextTCP++
+				return &pickListener{port: p}, nil
+			}
+			return nil, errors.New("tcp blocked")
+		}
+
+		got, err = availablePortAbove(unknown, 0, true)
+		if err == nil || got != 0 {
+			t.Fatalf("partial stage1 + full stage2 = %d, %v; want error", got, err)
+		}
+		if !errors.Is(err, errUDPZero) {
+			t.Fatalf("final error dropped stage1 :0 OS error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "after 2 UDP and 9 TCP OS picks") || !strings.Contains(err.Error(), "16384-65535") {
+			t.Fatalf("final error has inaccurate counts or range: %v", err)
 		}
 	})
 
