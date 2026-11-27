@@ -1959,13 +1959,15 @@ type TestFailure struct {
 }
 
 type TestFailureStore struct {
-	mu       sync.Mutex
-	failures []TestFailure
+	mu          sync.Mutex
+	failures    []TestFailure
+	unmadeCalls map[[2]string][]TestFailure
 }
 
 func NewTestFailureStore() *TestFailureStore {
 	return &TestFailureStore{
-		failures: make([]TestFailure, 0),
+		failures:    make([]TestFailure, 0),
+		unmadeCalls: make(map[[2]string][]TestFailure),
 	}
 }
 
@@ -2186,6 +2188,23 @@ func isPayloadDiffRow(f TestFailure) bool {
 // row belongs to a confirmed PASSED test (never for failed tests' payload
 // diffs, OBSOLETE tests, or sets whose results could not be read).
 func outgoingDiffTableWarnMessage(rows []TestFailure, passedTests map[[2]string]bool, testRunResult bool, failedTestCount int) string {
+	hasUnmade, hasDrifted := false, false
+	for _, f := range rows {
+		if f.FailureReason == unmadeCallReason {
+			hasUnmade = true
+		} else {
+			hasDrifted = true
+		}
+	}
+	if hasUnmade && !hasDrifted {
+		if testRunResult {
+			return "Tests passed, but some recorded outgoing calls were not seen in their test window (an outgoing call made after the response is written is not attributable to this test's window)."
+		}
+		return "Some recorded outgoing calls were not seen in their test window (an outgoing call made after the response is written is not attributable to this test's window)."
+	}
+	if hasUnmade && hasDrifted && testRunResult {
+		return "Tests passed, but some outgoing calls differed from or were not seen against the recorded mocks."
+	}
 	if testRunResult {
 		return "Tests passed, but some outgoing calls did not match the recorded mocks."
 	}
@@ -2365,11 +2384,11 @@ func (tfs *TestFailureStore) PrintOutgoingDiffTable(w io.Writer, rows []TestFail
 	seen := map[diffKey]int{}
 	out := make([]diffRow, 0, len(rows))
 	for _, f := range rows {
-		if f.FailureReason != models.ErrMockNotFound {
+		if f.FailureReason != models.ErrMockNotFound && f.FailureReason != unmadeCallReason {
 			continue
 		}
 		r := f.MismatchReport
-		if r != nil && !r.CountsAgainstTest() {
+		if f.FailureReason == models.ErrMockNotFound && r != nil && !r.CountsAgainstTest() {
 			continue
 		}
 		testName := f.TestID
@@ -2378,7 +2397,9 @@ func (tfs *TestFailureStore) PrintOutgoingDiffTable(w io.Writer, rows []TestFail
 		}
 		callText, emptySummary := formatOutgoingCallText(r)
 		fieldsText := "no matching mock"
-		if r != nil {
+		if f.FailureReason == unmadeCallReason {
+			fieldsText = unmadeCallFieldsText
+		} else if r != nil {
 			fieldsText = summarizeChangedFields(r)
 		}
 		uncappedFields := strings.TrimSpace(sanitizeTableCell(fieldsText))

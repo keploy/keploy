@@ -125,6 +125,10 @@ type payloadOnDisk struct {
 	mysqlSessionReusable    bool
 	// authored is IsAuthored's: whether the mock's Spec.Authored was set.
 	authored bool
+	// messageDelivery is isBuiltInMessageDelivery's: whether the mock carries
+	// a built-in broker message delivery (SQS ReceiveMessage with Messages,
+	// Kafka Fetch with records), answered before the payload was dropped.
+	messageDelivery bool
 	// replaces is Replaces': the recording a derived mock replaces in its
 	// own test.
 	replaces string
@@ -139,7 +143,7 @@ type payloadOnDisk struct {
 
 // onDiskPredicates is every registry whose predicates read a mock's payload;
 // a mock whose payload is on disk keeps each one's answer by its index.
-var onDiskPredicates = [...]*mockPredicates{&carryOverHooks, &stagedHooks, &releaseHooks, &answerPlacedHooks, &idleHooks, &sessionReusableHooks}
+var onDiskPredicates = [...]*mockPredicates{&carryOverHooks, &stagedHooks, &releaseHooks, &answerPlacedHooks, &idleHooks, &sessionReusableHooks, &messageDeliveryHooks}
 
 // predicateBit is r's bit in payloadOnDisk.matched.
 func predicateBit(r *mockPredicates) uint8 {
@@ -167,6 +171,7 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
 	d.authored = m.Spec.Authored != nil
+	d.messageDelivery, _ = isBuiltInMessageDelivery(m)
 	d.replaces = m.Spec.Authored.replaces()
 	d.httpPassThrough = extractHTTPPassThrough(m)
 	if f := m.Spec.Fault; f != nil {

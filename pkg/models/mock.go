@@ -307,6 +307,15 @@ func (m *Mock) StoredSize() int64 { return m.storedSize }
 // HasSpilledResponse reports whether the response is elided (needs hydration).
 func (m *Mock) HasSpilledResponse() bool { return m.responseHydrator != nil }
 
+// MarkMessageDelivery records that m carries a broker message delivery
+// (IsMessageDelivery), preserved when the agent's on-disk store spills m's
+// response body out of memory.
+func (m *Mock) MarkMessageDelivery() {
+	if m != nil {
+		m.TestModeInfo.messageDeliveryState = deliveryYes
+	}
+}
+
 // IsAsync reports whether this mock is async-egress — i.e. it carries an
 // AsyncMeta block. Presence of the block IS the signal (see AsyncMeta); this
 // is the single predicate the record mapping, replay collection, and engine
@@ -431,6 +440,13 @@ type TestModeInfo struct {
 	// Unexported so json/bson/yaml/gob ignore it; sits in Concurrent's padding
 	// so Mock stays in the 640 B size class.
 	readThroughState uint8
+
+	// messageDeliveryState caches IsMessageDelivery at ingest (DeriveLifetime /
+	// MarkMessageDelivery) so hot consume paths avoid re-parsing large Kafka
+	// or SQS payloads, and so spilled on-disk mocks preserve delivery status.
+	// Unexported so json/bson/yaml/gob ignore it; sits in readThroughState's
+	// padding so Mock stays in the 640 B size class.
+	messageDeliveryState uint8
 
 	// ServedIn is, on a copy exact serving serves an open test
 	// (KEPLOY_PROVEN), the number of that test's view; zero on every other mock. A
