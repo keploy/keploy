@@ -1670,17 +1670,44 @@ type outLane struct {
 	ch    chan<- *models.Mock
 	queue []queuedMock
 	bytes int64
-	spill OutQueueSpillLane
-	// spillMeta mirrors lane.spill 1-to-1 in FIFO order so done callbacks and
-	// test owners survive spill/corrupt-read paths without encoding closures.
+	// tail holds mocks buffered in RAM behind an active spill when Put
+	// declines (e.g. shared disk budget exhausted) so Stage 2 keeps its full
+	// RAM queueBound in strict FIFO order (queue -> spill -> tail).
+	tail      []queuedMock
+	tailBytes int64
+	// spillMu serializes lane.spill and lane.spillMeta outside outQueueMu so
+	// spill Put/Peek I/O never blocks RAM operations or OutQueued. Never
+	// nested with outQueueMu.
+	spillMu   sync.Mutex
+	spill     OutQueueSpillLane
 	spillMeta []spillItemMeta
-	draining  bool
-	inHand    bool
-	drained   chan struct{}
+	// spillCount mirrors len(spillMeta) (updated under spillMu); spillInFlight
+	// and spillWait are guarded by outQueueMu so drainOutQueue never exits
+	// while a Put is in progress outside outQueueMu.
+	spillCount    atomic.Int64
+	spillInFlight int
+	spillWait     chan struct{}
+	draining      bool
+	inHand        bool
+	drained       chan struct{}
 	// closing is nil once CloseOutChan has closed it.
 	closing chan struct{}
 	// epoch is the revokeEpoch it was last the current channel's in.
 	epoch uint64
+}
+
+func (l *outLane) wakeSpillLocked() {
+	if l.spillWait != nil {
+		close(l.spillWait)
+		l.spillWait = nil
+	}
+}
+
+func (l *outLane) spillWaitChLocked() <-chan struct{} {
+	if l.spillWait == nil {
+		l.spillWait = make(chan struct{})
+	}
+	return l.spillWait
 }
 
 // HandOnProgress is a count that moves whenever the manager hands a mock on
@@ -1821,52 +1848,95 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 			ramCap = rl
 		}
 	}
-	alreadySpilled := lane.spill != nil && lane.spill.Len() > 0
+	dropFullLocked := func() MockDrop {
+		epoch := lane.epoch
+		m.outQueueMu.Unlock()
+		n, left := m.countDrop(mock, owner, epoch, string(MockDroppedOutputFull))
+		m.outChanMu.RUnlock()
+		m.sayDrop(mock, string(MockDroppedOutputFull), n)
+		m.sayLeftOutAfter(mock, string(MockDroppedOutputFull), n, left)
+		m.toldDropped(mock)
+		tell(false, epoch)
+		return MockDroppedOutputFull
+	}
+	startDrainerLocked := func() {
+		if !lane.draining {
+			lane.draining = true
+			lane.drained = make(chan struct{})
+			go m.drainOutQueue(lane, lane.closing)
+		}
+	}
+	// If a RAM tail is already queued behind the spill (because the spill
+	// filled), keep appending to the tail up to bound so newer mocks never
+	// overtake the tail into the spill.
+	if len(lane.tail) > 0 {
+		if processOutQueued.Load()+size > bound {
+			return dropFullLocked()
+		}
+		lane.tail = append(lane.tail, queuedMock{mock: mock, owner: owner, size: size, done: done})
+		lane.tailBytes += size
+		processOutQueued.Add(size)
+		startDrainerLocked()
+		m.outQueueMu.Unlock()
+		m.outChanMu.RUnlock()
+		return MockTaken
+	}
+	alreadySpilled := lane.spillCount.Load() > 0 || lane.spillInFlight > 0
 	overRAM := (len(lane.queue) > 0 || lane.inHand) && processOutQueued.Load()+size > ramCap
 	if alreadySpilled || overRAM {
-		spilled := false
 		if spillFactory != nil {
+			// Run Put outside outQueueMu (serialized by lane.spillMu) so disk
+			// I/O and encryption never hold outQueueMu.
+			lane.spillInFlight++
+			startDrainerLocked()
+			m.outQueueMu.Unlock()
+
+			lane.spillMu.Lock()
 			if lane.spill == nil {
 				lane.spill = spillFactory.NewLane()
 			}
-			if lane.spill != nil && lane.spill.Put(mock, owner, size) {
+			spilled := lane.spill != nil && lane.spill.Put(mock, owner, size)
+			if spilled {
 				lane.spillMeta = append(lane.spillMeta, newSpillItemMeta(mock, owner, done))
-				if !lane.draining {
-					lane.draining = true
-					lane.drained = make(chan struct{})
-					go m.drainOutQueue(lane, lane.closing)
-				}
-				spilled = true
+				lane.spillCount.Add(1)
 			}
-		}
-		if spilled {
+			lane.spillMu.Unlock()
+
+			m.outQueueMu.Lock()
+			lane.spillInFlight--
+			lane.wakeSpillLocked()
+			if spilled {
+				m.outQueueMu.Unlock()
+				m.outChanMu.RUnlock()
+				return MockTaken
+			}
+			// Spill declined (e.g. shared disk budget exhausted): keep using
+			// RAM up to bound so spilling never drops worse than no spill.
+			// Place behind any active spill in lane.tail to preserve strict FIFO.
+			if processOutQueued.Load()+size > bound {
+				return dropFullLocked()
+			}
+			if lane.spillCount.Load() > 0 || lane.spillInFlight > 0 || len(lane.tail) > 0 {
+				lane.tail = append(lane.tail, queuedMock{mock: mock, owner: owner, size: size, done: done})
+				lane.tailBytes += size
+			} else {
+				lane.queue = append(lane.queue, queuedMock{mock: mock, owner: owner, size: size, done: done})
+				lane.bytes += size
+			}
+			processOutQueued.Add(size)
+			startDrainerLocked()
 			m.outQueueMu.Unlock()
 			m.outChanMu.RUnlock()
 			return MockTaken
 		}
-		// Spill declined or is disabled: if nothing is ahead in spill and RAM
-		// still has headroom up to the hard bound, keep buffering in RAM;
-		// otherwise fail closed via MockDroppedOutputFull.
-		if alreadySpilled || processOutQueued.Load()+size > bound {
-			epoch := lane.epoch
-			m.outQueueMu.Unlock()
-			n, left := m.countDrop(mock, owner, epoch, string(MockDroppedOutputFull))
-			m.outChanMu.RUnlock()
-			m.sayDrop(mock, string(MockDroppedOutputFull), n)
-			m.sayLeftOutAfter(mock, string(MockDroppedOutputFull), n, left)
-			m.toldDropped(mock)
-			tell(false, epoch)
-			return MockDroppedOutputFull
+		if processOutQueued.Load()+size > bound {
+			return dropFullLocked()
 		}
 	}
 	lane.queue = append(lane.queue, queuedMock{mock: mock, owner: owner, size: size, done: done})
 	lane.bytes += size
 	processOutQueued.Add(size)
-	if !lane.draining {
-		lane.draining = true
-		lane.drained = make(chan struct{})
-		go m.drainOutQueue(lane, lane.closing)
-	}
+	startDrainerLocked()
 	m.outQueueMu.Unlock()
 	m.outChanMu.RUnlock()
 	return MockTaken
@@ -1906,15 +1976,25 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 			processOutQueued.Add(-q.size)
 			epoch = lane.epoch
 			m.outQueueMu.Unlock()
-		case lane.spill != nil && lane.spill.Len() > 0:
+		case lane.spillCount.Load() > 0:
+			lane.inHand = true
+			epoch = lane.epoch
+			m.outQueueMu.Unlock()
+
+			// Read from spill outside outQueueMu (serialized by lane.spillMu).
+			lane.spillMu.Lock()
+			if lane.spill == nil || lane.spill.Len() == 0 {
+				lane.spillMu.Unlock()
+				continue
+			}
 			sm, sOwner, sSize, err := lane.spill.Peek()
 			if err != nil {
 				lostCount := lane.spill.Discard()
 				lane.spill = nil
 				lostMeta := lane.spillMeta
 				lane.spillMeta = nil
-				epoch = lane.epoch
-				m.outQueueMu.Unlock()
+				lane.spillCount.Store(0)
+				lane.spillMu.Unlock()
 				m.dropCorruptSpill(lostMeta, lostCount, epoch, err)
 				continue
 			}
@@ -1928,19 +2008,48 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 					lane.spillMeta = nil
 				}
 			}
+			lane.spillCount.Add(-1)
+			lane.spillMu.Unlock()
 			if sOwner == "" {
 				sOwner = meta.owner
 			}
 			q = queuedMock{mock: sm, owner: sOwner, size: sSize, done: meta.done}
+		case lane.spillInFlight > 0:
+			waitCh := lane.spillWaitChLocked()
+			m.outQueueMu.Unlock()
+			<-waitCh
+			continue
+		case len(lane.tail) > 0:
+			// RAM head and spill are empty: promote the RAM tail to RAM head
+			// so subsequent bursts can spill again as disk budget frees up.
+			lane.queue, lane.bytes = lane.tail, lane.tailBytes
+			lane.tail, lane.tailBytes = nil, 0
+			q = lane.queue[0]
+			lane.queue[0] = queuedMock{}
+			lane.queue = lane.queue[1:]
+			lane.bytes -= q.size
 			lane.inHand = true
+			processOutQueued.Add(-q.size)
 			epoch = lane.epoch
 			m.outQueueMu.Unlock()
 		default:
-			if lane.spill != nil {
+			// Discard any empty spill handle outside outQueueMu, then re-check
+			// before ending draining so no concurrent send is stranded.
+			m.outQueueMu.Unlock()
+			lane.spillMu.Lock()
+			if lane.spill != nil && lane.spill.Len() == 0 {
 				lane.spill.Discard()
 				lane.spill = nil
+				lane.spillMeta = nil
 			}
-			lane.queue, lane.spillMeta, lane.draining = nil, nil, false // do not keep a burst's backing array
+			lane.spillMu.Unlock()
+
+			m.outQueueMu.Lock()
+			if len(lane.queue) > 0 || lane.spillCount.Load() > 0 || lane.spillInFlight > 0 || len(lane.tail) > 0 {
+				m.outQueueMu.Unlock()
+				continue
+			}
+			lane.queue, lane.tail, lane.draining = nil, nil, false // do not keep a burst's backing array
 			delete(m.outOld, lane)
 			m.outQueueMu.Unlock()
 			return
@@ -1969,6 +2078,21 @@ func (m *SyncMockManager) dropCorruptSpill(lostMeta []spillItemMeta, lostCount i
 	for _, meta := range lostMeta {
 		stub := meta.stubMock()
 		m.dropOut(stub, meta.owner, epoch, "out-queue spill unreadable")
+		// If the real mock was attributedReusable (for example, a MySQL
+		// session-reusable command whose protocol payload was not retained in
+		// meta) and stubMock() could not reconstruct that predicate, still
+		// open the shared leave-out span fail-closed from its request time.
+		if meta.owner == "" && !meta.undeliv && meta.reusable && !attributedReusable(stub) {
+			from := meta.reqTime
+			if from.IsZero() {
+				from = beforeAnyRequest
+			}
+			m.sharedLossMu.Lock()
+			if epoch == m.revokeEpoch.Load() {
+				m.openSharedLocked(from, epoch)
+			}
+			m.sharedLossMu.Unlock()
+		}
 		m.toldDropped(stub)
 		m.handedOn.Add(1)
 		if meta.done != nil {
@@ -2018,11 +2142,16 @@ func (m *SyncMockManager) deliverQueued(out chan<- *models.Mock, mock *models.Mo
 // session's stream is not the one the revoke would go on.
 func (m *SyncMockManager) giveUpOutQueue(lane *outLane, hand queuedMock, why string) {
 	m.outQueueMu.Lock()
-	lost := append([]queuedMock{hand}, lane.queue...)
-	processOutQueued.Add(-lane.bytes)
-	lane.queue, lane.bytes, lane.inHand = nil, 0, false
+	headLost := append([]queuedMock{hand}, lane.queue...)
+	tailLost := lane.tail
+	processOutQueued.Add(-(lane.bytes + lane.tailBytes))
+	lane.queue, lane.bytes, lane.tail, lane.tailBytes, lane.inHand = nil, 0, nil, 0, false
+	epoch := lane.epoch
+	m.outQueueMu.Unlock()
+
 	var detached OutQueueSpillLane
 	var detachedMeta []spillItemMeta
+	lane.spillMu.Lock()
 	if lane.spill != nil {
 		if lane.spill.Len() > 0 {
 			detached = lane.spill.Detach()
@@ -2033,12 +2162,16 @@ func (m *SyncMockManager) giveUpOutQueue(lane *outLane, hand queuedMock, why str
 			lane.spillMeta = nil
 		}
 		lane.spill = nil
+		lane.spillCount.Store(0)
 	}
-	epoch := lane.epoch
-	m.outQueueMu.Unlock()
-	m.dropQueued(lost, epoch, why)
+	lane.spillMu.Unlock()
+
+	m.dropQueued(headLost, epoch, why)
 	if detached != nil {
 		m.dropSpilledLane(detached, detachedMeta, epoch, why)
+	}
+	if len(tailLost) > 0 {
+		m.dropQueued(tailLost, epoch, why)
 	}
 }
 

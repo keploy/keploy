@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"maps"
 	"sync/atomic"
 	"time"
 
@@ -15,8 +16,9 @@ import (
 //
 // Implementations live outside OSS (for example, the encrypted disk spill in
 // enterprise). Returning false from Put (spill disabled, disk full, or broken)
-// preserves SyncMockManager's existing fail-closed drop and test-case leave-out
-// path.
+// falls back to a bounded RAM tail behind the spill up to queueBound, and past
+// queueBound preserves SyncMockManager's existing fail-closed drop and
+// test-case leave-out path.
 type OutQueueSpill interface {
 	// NewLane creates an independent FIFO spill for one output channel lane,
 	// or returns nil when spilling is disabled.
@@ -29,12 +31,14 @@ type OutQueueSpill interface {
 }
 
 // OutQueueSpillLane is one outLane's FIFO overflow store. All methods except
-// those called on a lane returned by Detach run under
-// SyncMockManager.outQueueMu.
+// those called on a lane returned by Detach are serialized by the lane's own
+// spill mutex (outside SyncMockManager.outQueueMu so disk I/O and encryption
+// do not block RAM queue operations or OutQueued).
 type OutQueueSpillLane interface {
 	// Put appends (mock, owner, size) to the tail of the lane's spill FIFO.
 	// Returns false if spill capacity is exhausted or unavailable so the
-	// caller falls back to MockDroppedOutputFull.
+	// caller falls back to the RAM tail (up to queueBound) or
+	// MockDroppedOutputFull.
 	Put(mock *models.Mock, owner string, size int64) bool
 
 	// Len reports how many mocks are currently held in this spill lane.
@@ -59,16 +63,23 @@ type OutQueueSpillLane interface {
 	Discard() int
 }
 
+// spillItemMeta retains only lightweight attribution and fail-closed metadata
+// for each spilled mock (never payload bytes) so a corrupt spill read can
+// still attribute drops (ConnectionID, Metadata) and open the exact same
+// per-test or shared orphan leave-out spans as a RAM drop.
 type spillItemMeta struct {
 	owner     string
 	done      func(delivered bool, epoch uint64)
 	kind      models.Kind
 	name      string
-	mockType  string
+	connID    string
+	metadata  map[string]string
 	reqTime   time.Time
 	lifetime  models.Lifetime
 	isStartup bool
 	undeliv   bool
+	async     *models.AsyncMeta
+	reusable  bool
 }
 
 func newSpillItemMeta(mock *models.Mock, owner string, done func(delivered bool, epoch uint64)) spillItemMeta {
@@ -76,28 +87,41 @@ func newSpillItemMeta(mock *models.Mock, owner string, done func(delivered bool,
 	if mock != nil {
 		meta.kind = mock.Kind
 		meta.name = mock.Name
-		if mock.Spec.Metadata != nil {
-			meta.mockType = mock.Spec.Metadata["type"]
+		meta.connID = mock.ConnectionID
+		if len(mock.Spec.Metadata) > 0 {
+			meta.metadata = maps.Clone(mock.Spec.Metadata)
 		}
 		meta.reqTime = mock.Spec.ReqTimestampMock
 		meta.lifetime = mock.TestModeInfo.Lifetime
 		meta.isStartup = mock.TestModeInfo.IsStartup
 		meta.undeliv = mock.IsUndelivered()
+		if mock.Spec.Async != nil {
+			a := *mock.Spec.Async
+			meta.async = &a
+		}
+		meta.reusable = attributedReusable(mock)
 	}
 	return meta
 }
 
 func (im spillItemMeta) stubMock() *models.Mock {
 	var md map[string]string
-	if im.mockType != "" {
-		md = map[string]string{"type": im.mockType}
+	if len(im.metadata) > 0 {
+		md = maps.Clone(im.metadata)
+	}
+	var async *models.AsyncMeta
+	if im.async != nil {
+		a := *im.async
+		async = &a
 	}
 	m := &models.Mock{
-		Kind: im.kind,
-		Name: im.name,
+		Kind:         im.kind,
+		Name:         im.name,
+		ConnectionID: im.connID,
 		Spec: models.MockSpec{
 			Metadata:         md,
 			ReqTimestampMock: im.reqTime,
+			Async:            async,
 		},
 		TestModeInfo: models.TestModeInfo{
 			Lifetime:  im.lifetime,
