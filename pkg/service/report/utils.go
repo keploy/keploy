@@ -264,8 +264,8 @@ func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
 		}
 		expected, actual := statusTexts(test)
 		sb.WriteString("Path: " + path + "\n")
-		sb.WriteString(fmt.Sprintf("  Expected: %s\n", expected))
-		sb.WriteString(fmt.Sprintf("  Actual: %s\n\n", actual))
+		fmt.Fprintf(&sb, "  Expected: %s\n", expected)
+		fmt.Fprintf(&sb, "  Actual: %s\n\n", actual)
 	}
 
 	// Headers
