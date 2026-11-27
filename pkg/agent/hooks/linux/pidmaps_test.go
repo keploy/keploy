@@ -103,10 +103,11 @@ func TestWatchPIDMapRefusalsWarnsAtTheFirstRefusalOfEachMapOnce(t *testing.T) {
 		t.Fatalf("the WARN's next_step is %q, want the remedy for its error (%q)", fields["next_step"], models.PIDMapRefusalRemedy(refused.LastErr))
 	}
 
-	// More refusals, of both maps.
+	// More refusals, of all three maps.
 	more := pidMapInsertFailure{Failures: 50, LastTGID: 4343, LastErr: -int32(unix.E2BIG)}
 	excl := pidMapInsertFailure{Failures: 2, LastTGID: 77, LastErr: -int32(unix.EBUSY)}
-	counts.set(pidMapCounts{target: more, excluded: excl, targetCap: 10240, excludedCap: 10240}, nil)
+	scoped := pidMapInsertFailure{Failures: 1, LastTGID: 88, LastErr: -int32(unix.E2BIG)}
+	counts.set(pidMapCounts{target: more, excluded: excl, scoped: scoped, targetCap: 10240, excludedCap: 10240, scopedCap: 10240}, nil)
 	counts.readsPast(t, 3)
 	if n := len(warnsFor(logs, "target_namespace_pids")); n != 1 {
 		t.Fatalf("%d WARN lines for target_namespace_pids after more refusals, want still 1", n)
@@ -118,6 +119,13 @@ func TestWatchPIDMapRefusalsWarnsAtTheFirstRefusalOfEachMapOnce(t *testing.T) {
 	// Its cause is the bucket lock, not a full map: its own next step.
 	if ef := exclWarns[0].ContextMap(); ef["error"] != "EBUSY" || ef["next_step"] != models.PIDMapRefusalRemedy(-int32(unix.EBUSY)) || ef["next_step"] == fields["next_step"] {
 		t.Fatalf("excluded_pids' WARN says %v; want error EBUSY and the lock's next step, not the full map's", ef)
+	}
+	scopedWarns := warnsFor(logs, "scoped_pids")
+	if n := len(scopedWarns); n != 1 {
+		t.Fatalf("%d WARN lines for scoped_pids after its first refusal, want 1: %v", n, logs.All())
+	}
+	if sf := scopedWarns[0].ContextMap(); sf["refused_inserts"] != uint64(1) || sf["tgid"] != uint32(88) || sf["error"] != "E2BIG" || sf["capacity"] != uint32(10240) {
+		t.Fatalf("scoped_pids' WARN says %v; want refused_inserts 1, tgid 88, error E2BIG, capacity 10240", sf)
 	}
 }
 

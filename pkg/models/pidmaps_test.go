@@ -19,13 +19,15 @@ func TestPIDMapRefusalsSince(t *testing.T) {
 		{"growth", PIDMapRefusals{Target: 4}, PIDMapRefusals{Target: 6, Excluded: 2, LastTargetTGID: 11}, PIDMapRefusals{Target: 2, Excluded: 2, LastTargetTGID: 11}},
 		{"a restarted agent", PIDMapRefusals{Target: 4, Excluded: 3}, PIDMapRefusals{Target: 1, LastTargetTGID: 5}, PIDMapRefusals{Target: 1, LastTargetTGID: 5}},
 		{"the maps' sizes are the later read's", PIDMapRefusals{Target: 4}, PIDMapRefusals{Target: 5, LastTargetTGID: 7, TargetCapacity: 10240, ExcludedCapacity: 10240}, PIDMapRefusals{Target: 1, LastTargetTGID: 7, TargetCapacity: 10240, ExcludedCapacity: 10240}},
+		{"scoped_pids growth", PIDMapRefusals{Scoped: 1, LastScopedTGID: 2, LastScopedErr: -7}, PIDMapRefusals{Scoped: 3, LastScopedTGID: 8, LastScopedErr: -7, ScopedCapacity: 10240}, PIDMapRefusals{Scoped: 2, LastScopedTGID: 8, LastScopedErr: -7, ScopedCapacity: 10240}},
+		{"scoped_pids no growth clears example", PIDMapRefusals{Scoped: 2, LastScopedTGID: 8, LastScopedErr: -7}, PIDMapRefusals{Scoped: 2, LastScopedTGID: 8, LastScopedErr: -7}, PIDMapRefusals{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.now.Since(tc.base)
 			if got != tc.want {
 				t.Fatalf("%+v.Since(%+v) = %+v, want %+v", tc.now, tc.base, got, tc.want)
 			}
-			if got.Any() != (tc.want.Target > 0 || tc.want.Excluded > 0) {
+			if got.Any() != (tc.want.Target > 0 || tc.want.Excluded > 0 || tc.want.Scoped > 0) {
 				t.Fatalf("Any() = %v for %+v", got.Any(), got)
 			}
 		})
@@ -81,6 +83,8 @@ func TestPIDMapRefusalsCaptureIncomplete(t *testing.T) {
 		{PIDMapRefusals{Target: 1}, []string{"live processes"}, []string{"CPU contention", "memory"}},
 		// Two maps, two causes: both remedies, each once.
 		{PIDMapRefusals{Target: 1, LastTargetErr: -7, Excluded: 1, LastExcludedErr: -12}, []string{"live processes", "memory is short"}, nil},
+		// scoped_pids refusal from k_scoped_fork.
+		{PIDMapRefusals{Scoped: 2, LastScopedErr: -7, ScopedCapacity: 10240}, []string{"capture incomplete", "scoped_pids (10240 entries)", "refused 2 insert(s)", "E2BIG", "escaped isolation", "live processes"}, []string{"target_namespace_pids", "excluded_pids"}},
 	} {
 		got := tc.r.CaptureIncomplete()
 		for _, w := range tc.want {

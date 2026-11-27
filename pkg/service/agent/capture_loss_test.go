@@ -207,6 +207,13 @@ func TestEachPIDMapsLossCarriesItsOwnErrno(t *testing.T) {
 		{Kind: models.CaptureLossPIDMap, Count: 4, What: "target_namespace_pids, " + models.PIDMapRefusalCause(-7), Err: -7},
 		{Kind: models.CaptureLossPIDMapExcluded, Count: 2, What: "excluded_pids, " + models.PIDMapRefusalCause(-110), Err: -110},
 	}, got)
+
+	a.Hooks = countingHooks{refusals: models.PIDMapRefusals{Scoped: 1, LastScopedErr: -7}}
+	got, err = a.CaptureLosses(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, models.CaptureLosses{
+		{Kind: models.CaptureLossPIDMap, Count: 1, What: "scoped_pids, " + models.PIDMapRefusalCause(-7), Err: -7},
+	}, got)
 }
 
 // Two sources of one kind keep the first errno either of them says.

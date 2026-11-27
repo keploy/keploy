@@ -44,11 +44,11 @@ func (h *Hooks) ScopedPidsActive() bool {
 }
 
 // AddScopedPID opts the process nsTgid (in the agent's PID namespace, with
-// startTicks from /proc/<pid>/stat field 22) and every descendant in its
-// real_parent tree into interception when structs.FlagScopedPids is active.
-// Unlike SetInstance, scoped_pids is keyed by the agent's own PID namespace
-// TGID and checked during pid_filter's existing ancestry walk, so it works in
-// both host and container PID namespaces without attaching k_instance_fork.
+// startTicks from /proc/<pid>/stat field 22) and every process it forks into
+// interception when structs.FlagScopedPids is active. k_scoped_fork is
+// attached before inserting so daemonized/orphaned children reparented to a
+// subreaper client inherit scoped_pids at fork time; pid_filter also walks
+// real_parent as defense in depth.
 func (h *Hooks) AddScopedPID(nsTgid uint32, startTicks uint64) error {
 	if nsTgid == 0 || nsTgid > math.MaxInt32 {
 		return fmt.Errorf("%d is not a process's TGID", nsTgid)
@@ -62,17 +62,54 @@ func (h *Hooks) AddScopedPID(nsTgid uint32, startTicks uint64) error {
 	if scoped == nil {
 		return errors.New("the hooks are not loaded: scoped_pids is not open")
 	}
+	if err := h.attachScopedFork(); err != nil {
+		return err
+	}
 	h.scopedMu.Lock()
 	defer h.scopedMu.Unlock()
 	if err := scoped.Update(nsTgid, startTicks, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("put process %d in scoped_pids: %w", nsTgid, err)
 	}
-	curStart, ok := scopedProcStartTicks(nsTgid)
-	if gone(nsTgid) || !ok || curStart != startTicks {
+	curStart, err := scopedProcStartTicks(nsTgid)
+	if gone(nsTgid) || err != nil || curStart != startTicks {
 		_ = scoped.Delete(nsTgid)
 		return fmt.Errorf("process %d exited before it could be added to scoped_pids", nsTgid)
 	}
 	return nil
+}
+
+// attachScopedFork attaches k_scoped_fork to sched_process_fork, once
+// (raw tracepoint: no tracefs). The caller holds objectsMutex for reading
+// (or is inside load() before unLoad can run); unLoad closes the link with
+// objectsMutex held for writing.
+func (h *Hooks) attachScopedFork() error {
+	h.scopedMu.Lock()
+	defer h.scopedMu.Unlock()
+	if h.scopedFork != nil {
+		return nil
+	}
+	if h.objects.K_scopedFork == nil {
+		return errors.New("the hooks are not loaded: k_scoped_fork is not open")
+	}
+	l, err := link.AttachRawTracepoint(link.RawTracepointOptions{Name: "sched_process_fork", Program: h.objects.K_scopedFork})
+	if err != nil {
+		return fmt.Errorf("attach k_scoped_fork, which propagates scoped_pids across forks, to sched_process_fork: %w", err)
+	}
+	h.scopedFork = l
+	return nil
+}
+
+// closeScopedFork detaches k_scoped_fork. The caller holds objectsMutex for
+// writing.
+func (h *Hooks) closeScopedFork() error {
+	h.scopedMu.Lock()
+	defer h.scopedMu.Unlock()
+	if h.scopedFork == nil {
+		return nil
+	}
+	err := h.scopedFork.Close()
+	h.scopedFork = nil
+	return err
 }
 
 // SetInstance puts the process tgid (a kernel TGID) in the instance of value

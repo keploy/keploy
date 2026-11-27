@@ -106,9 +106,9 @@ type Hooks struct {
 	// SetInstance (instance.go); instanceMu guards it.
 	instanceMu   sync.Mutex
 	instanceFork link.Link
-	// scopedMu serialises AddScopedPID and sweepScopedPIDs so a concurrent
-	// sweep cannot delete an entry just inserted for a reused PID.
-	scopedMu sync.Mutex
+	// scopedMu serialises AddScopedPID, sweepScopedPIDs, and scopedFork attach/close.
+	scopedMu   sync.Mutex
+	scopedFork link.Link
 	// instanceLock holds this agent's cross-PID-namespace flock ownership
 	// claim for the lifetime of loaded eBPF hooks.
 	instanceLock *instanceLock
@@ -833,6 +833,16 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		info.Flags &^= structs.FlagProvenReady
 		info.Flags |= readyFlags
 
+		// In native scoped_pids mode, k_scoped_fork must be attached to
+		// sched_process_fork before FlagScopedPids takes effect so daemonized
+		// or orphaned children reparented to a subreaper client stay isolated.
+		// Fail closed if the tracepoint cannot attach.
+		if info.IsDocker == 0 && (info.Flags&structs.FlagScopedPids) != 0 {
+			if err := h.attachScopedFork(); err != nil {
+				return err
+			}
+		}
+
 		// A client keploy cannot register would have none of its
 		// pass-through ports bypassed, so the start fails here rather than
 		// going on without them.
@@ -1009,6 +1019,9 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	h.stopAppConns()
 	if err := h.closeInstanceFork(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the sched_process_fork hook that keeps keploy instances")
+	}
+	if err := h.closeScopedFork(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the sched_process_fork hook that propagates scoped_pids")
 	}
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")

@@ -40,21 +40,30 @@ type PIDMapRefusals struct {
 	Target uint64 `json:"target"`
 	// Excluded counts refused inserts into excluded_pids.
 	Excluded uint64 `json:"excluded"`
+	// Scoped counts refused fork-propagation inserts into scoped_pids
+	// (k_scoped_fork under FlagScopedPids).
+	Scoped uint64 `json:"scoped,omitempty"`
 	// LastTargetTGID is the TGID (in the initial PID namespace) of the latest
 	// process refused a place in target_namespace_pids; 0 when none was.
 	// Only an example: two refused at once may leave either.
 	LastTargetTGID uint32 `json:"lastTargetTgid,omitempty"`
-	// TargetCapacity and ExcludedCapacity are how many processes each map
-	// holds (its max_entries); 0 when the agent did not say.
+	// LastScopedTGID is the TGID (in the initial PID namespace) of the latest
+	// child process k_scoped_fork failed to record in scoped_pids; 0 when none.
+	LastScopedTGID uint32 `json:"lastScopedTgid,omitempty"`
+	// TargetCapacity, ExcludedCapacity, and ScopedCapacity are how many
+	// processes each map holds (its max_entries); 0 when the agent did not say.
 	TargetCapacity   uint32 `json:"targetCapacity,omitempty"`
 	ExcludedCapacity uint32 `json:"excludedCapacity,omitempty"`
-	// LastTargetErr and LastExcludedErr are the kernel's (negative, Linux)
-	// errno for the latest refusal into each map; 0 when none was refused or
-	// the agent did not say (an older agent). They say why: a full map
-	// (-E2BIG) is not the only cause -- from Linux 6.15 an insert can also fail
-	// on the map's bucket lock -- so a report must not claim "full" without it.
+	ScopedCapacity   uint32 `json:"scopedCapacity,omitempty"`
+	// LastTargetErr, LastExcludedErr, and LastScopedErr are the kernel's
+	// (negative, Linux) errno for the latest refusal into each map; 0 when
+	// none was refused or the agent did not say (an older agent). They say why:
+	// a full map (-E2BIG) is not the only cause -- from Linux 6.15 an insert
+	// can also fail on the map's bucket lock -- so a report must not claim
+	// "full" without it.
 	LastTargetErr   int32 `json:"lastTargetErr,omitempty"`
 	LastExcludedErr int32 `json:"lastExcludedErr,omitempty"`
+	LastScopedErr   int32 `json:"lastScopedErr,omitempty"`
 }
 
 // ErrPIDMapRefusalsUnsupported reports that an agent cannot say whether the
@@ -64,7 +73,7 @@ var ErrPIDMapRefusalsUnsupported = errors.New("agent cannot report refused inser
 
 // Any reports whether any insert was refused.
 func (r PIDMapRefusals) Any() bool {
-	return r.Target > 0 || r.Excluded > 0
+	return r.Target > 0 || r.Excluded > 0 || r.Scoped > 0
 }
 
 // Since is what r grew by after base, an earlier read of the same agent. A
@@ -78,12 +87,19 @@ func (r PIDMapRefusals) Since(base PIDMapRefusals) PIDMapRefusals {
 	if r.Excluded >= base.Excluded {
 		d.Excluded = r.Excluded - base.Excluded
 	}
+	if r.Scoped >= base.Scoped {
+		d.Scoped = r.Scoped - base.Scoped
+	}
 	if d.Target == 0 {
 		d.LastTargetTGID = 0
 		d.LastTargetErr = 0
 	}
 	if d.Excluded == 0 {
 		d.LastExcludedErr = 0
+	}
+	if d.Scoped == 0 {
+		d.LastScopedTGID = 0
+		d.LastScopedErr = 0
 	}
 	return d
 }
@@ -101,6 +117,9 @@ func (r PIDMapRefusals) CaptureIncomplete() string {
 	if r.Excluded > 0 {
 		lost = append(lost, fmt.Sprintf("the agent's PID map excluded_pids%s refused %d insert(s)%s, so at least one process that predates the run, or a child of one, was not excluded: calls of its children may have been captured as the app's", pidMapHolds(r.ExcludedCapacity), r.Excluded, pidMapBecause(r.LastExcludedErr)))
 	}
+	if r.Scoped > 0 {
+		lost = append(lost, fmt.Sprintf("the agent's PID map scoped_pids%s refused %d insert(s)%s, so at least one forked child of a scoped process could not be recorded at fork time and may have escaped isolation", pidMapHolds(r.ScopedCapacity), r.Scoped, pidMapBecause(r.LastScopedErr)))
+	}
 	if len(lost) == 0 {
 		return ""
 	}
@@ -116,6 +135,7 @@ func (r PIDMapRefusals) CaptureIncomplete() string {
 	}
 	add(r.Target, r.LastTargetErr)
 	add(r.Excluded, r.LastExcludedErr)
+	add(r.Scoped, r.LastScopedErr)
 	return "capture incomplete: " + strings.Join(lost, "; and ") + ". " + strings.Join(remedies, ". ") + "."
 }
 

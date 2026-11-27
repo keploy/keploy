@@ -35,6 +35,7 @@ import (
 const (
 	pidMapTarget   uint32 = 0
 	pidMapExcluded uint32 = 1
+	pidMapScoped   uint32 = 2
 )
 
 // pidMapInsertFailure mirrors struct pid_map_insert_failure_t.
@@ -46,15 +47,15 @@ type pidMapInsertFailure struct {
 
 // pidMapCounts is one read of pid_map_insert_failures.
 type pidMapCounts struct {
-	target, excluded pidMapInsertFailure
-	// targetCap and excludedCap are the maps' max_entries.
-	targetCap, excludedCap uint32
+	target, excluded, scoped pidMapInsertFailure
+	// targetCap, excludedCap, and scopedCap are the maps' max_entries.
+	targetCap, excludedCap, scopedCap uint32
 }
 
 func (c pidMapCounts) refusals() models.PIDMapRefusals {
 	r := models.PIDMapRefusals{
-		Target: c.target.Failures, Excluded: c.excluded.Failures,
-		TargetCapacity: c.targetCap, ExcludedCapacity: c.excludedCap,
+		Target: c.target.Failures, Excluded: c.excluded.Failures, Scoped: c.scoped.Failures,
+		TargetCapacity: c.targetCap, ExcludedCapacity: c.excludedCap, ScopedCapacity: c.scopedCap,
 	}
 	if r.Target > 0 {
 		r.LastTargetTGID = c.target.LastTGID
@@ -63,12 +64,17 @@ func (c pidMapCounts) refusals() models.PIDMapRefusals {
 	if r.Excluded > 0 {
 		r.LastExcludedErr = c.excluded.LastErr
 	}
+	if r.Scoped > 0 {
+		r.LastScopedTGID = c.scoped.LastTGID
+		r.LastScopedErr = c.scoped.LastErr
+	}
 	return r
 }
 
-// readPIDMapCounts reads both slots of failures, the loaded
-// pid_map_insert_failures; targets and excluded are the maps it counts for.
-func readPIDMapCounts(failures, targets, excluded *ebpf.Map) (pidMapCounts, error) {
+// readPIDMapCounts reads all slots of failures, the loaded
+// pid_map_insert_failures; targets, excluded, and scoped are the maps it
+// counts for.
+func readPIDMapCounts(failures, targets, excluded, scoped *ebpf.Map) (pidMapCounts, error) {
 	var c pidMapCounts
 	if failures == nil {
 		return c, errors.New("pid_map_insert_failures is not loaded")
@@ -79,11 +85,17 @@ func readPIDMapCounts(failures, targets, excluded *ebpf.Map) (pidMapCounts, erro
 	if err := failures.Lookup(pidMapExcluded, &c.excluded); err != nil {
 		return c, fmt.Errorf("read pid_map_insert_failures[excluded_pids]: %w", err)
 	}
+	if err := failures.Lookup(pidMapScoped, &c.scoped); err != nil {
+		return c, fmt.Errorf("read pid_map_insert_failures[scoped_pids]: %w", err)
+	}
 	if targets != nil {
 		c.targetCap = targets.MaxEntries()
 	}
 	if excluded != nil {
 		c.excludedCap = excluded.MaxEntries()
+	}
+	if scoped != nil {
+		c.scopedCap = scoped.MaxEntries()
 	}
 	return c, nil
 }
@@ -93,7 +105,7 @@ func readPIDMapCounts(failures, targets, excluded *ebpf.Map) (pidMapCounts, erro
 func (h *Hooks) pidMapCounts() (pidMapCounts, error) {
 	h.objectsMutex.RLock()
 	defer h.objectsMutex.RUnlock()
-	return readPIDMapCounts(h.objects.PidMapInsertFailures, h.objects.TargetNamespacePids, h.objects.ExcludedPids)
+	return readPIDMapCounts(h.objects.PidMapInsertFailures, h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.ScopedPids)
 }
 
 // PIDMapRefusals counts the inserts into target_namespace_pids and
@@ -133,7 +145,7 @@ const pidMapPollInterval = time.Second
 func watchPIDMapRefusals(ctx context.Context, logger *zap.Logger, read func() (pidMapCounts, error), interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	var warnedTarget, warnedExcluded bool
+	var warnedTarget, warnedExcluded, warnedScoped bool
 	check := func() {
 		c, err := read()
 		if err != nil {
@@ -149,6 +161,11 @@ func watchPIDMapRefusals(ctx context.Context, logger *zap.Logger, read func() (p
 			warnedExcluded = true
 			logger.Warn("the kernel refused a process a place in the agent's PID map excluded_pids"+refusedBecause(c.excluded.LastErr)+": that process started before the recording, or is a child of one that did, and its own children may be recorded or mocked as the app's",
 				pidMapFields("excluded_pids", c.excluded, c.excludedCap)...)
+		}
+		if !warnedScoped && c.scoped.Failures > 0 {
+			warnedScoped = true
+			logger.Warn("the kernel refused a forked child a place in the agent's PID map scoped_pids"+refusedBecause(c.scoped.LastErr)+": if that child reparents to the client, its calls may escape isolation",
+				pidMapFields("scoped_pids", c.scoped, c.scopedCap)...)
 		}
 	}
 	for {
