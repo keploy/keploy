@@ -5,6 +5,7 @@ package bpfsafety
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -57,6 +58,7 @@ func resetStateForTest(t *testing.T) {
 	prevShuttingDown := shuttingDown.Swap(false)
 	prevBypass := testBypassPin.Swap(false)
 	prevDynFn := dynamicTrampImageCheckFn
+	prevValFn := validateHostBPFFSPathFn
 	prevOpenFn := openGraceOwnerInRootFn
 	t.Cleanup(func() {
 		stateMu.Lock()
@@ -80,6 +82,7 @@ func resetStateForTest(t *testing.T) {
 		shuttingDown.Store(prevShuttingDown)
 		testBypassPin.Store(prevBypass)
 		dynamicTrampImageCheckFn = prevDynFn
+		validateHostBPFFSPathFn = prevValFn
 		openGraceOwnerInRootFn = prevOpenFn
 	})
 }
@@ -309,6 +312,161 @@ func TestInitWithoutHostBPFFSEntersHonestUnprotectedModeOnce(t *testing.T) {
 	if err := PinBeforeAttach(&dummy, "proxyless", "unix_stream_recvmsg", "p"); err != nil {
 		t.Fatalf("PinBeforeAttach with explicit %s=1 on static kernel = %v, want nil", EnvAllowUnprotectedTrampolines, err)
 	}
+}
+
+func TestInitRetriesTransientMountCheckAndGraceSetupErrors(t *testing.T) {
+	t.Run("transient_mount_check_enomem_recovers_on_retry", func(t *testing.T) {
+		resetStateForTest(t)
+		fakeMount := t.TempDir()
+		t.Setenv(EnvHostBPFFS, fakeMount)
+		t.Setenv(EnvAllowUnprotectedTrampolines, "")
+
+		var valCalls int
+		validateHostBPFFSPathFn = func(path string, _ bool) error {
+			valCalls++
+			if valCalls == 1 {
+				return fmt.Errorf("statfs %s: %w", path, unix.ENOMEM)
+			}
+			return nil
+		}
+		openGraceOwnerInRootFn = openGraceOwnerInRoot
+
+		core, logs := observer.New(zapcore.WarnLevel)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := Init(ctx, zap.New(core), ModeDaemonSet); err != nil {
+			t.Fatalf("Init = %v, want nil", err)
+		}
+		defer func() {
+			stateMu.Lock()
+			o := activeOwner
+			activeOwner = nil
+			stateMu.Unlock()
+			if o != nil {
+				if o.reaper != nil {
+					o.reaper.stopAndWait(o.reaperCancel)
+				}
+				_ = unix.Close(o.lockFD)
+			}
+		}()
+
+		if valCalls != 2 {
+			t.Fatalf("validateHostBPFFSPathFn calls = %d, want 2 (1 retry on ENOMEM)", valCalls)
+		}
+		if !Armed() || UnprotectedTrampolinesActive() {
+			t.Fatalf("expected Armed=true Unprotected=false after mount-check retry, got armed=%v unprot=%v", Armed(), UnprotectedTrampolinesActive())
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("expected 0 WARNs after transient retry recovery, got %+v", logs.All())
+		}
+	})
+
+	t.Run("persistent_mount_check_enomem_logs_system_error_not_mount_hint", func(t *testing.T) {
+		resetStateForTest(t)
+		fakeMount := t.TempDir()
+		t.Setenv(EnvHostBPFFS, fakeMount)
+		t.Setenv(EnvAllowUnprotectedTrampolines, "")
+
+		var valCalls int
+		validateHostBPFFSPathFn = func(path string, _ bool) error {
+			valCalls++
+			return fmt.Errorf("statfs %s: %w", path, unix.ENOMEM)
+		}
+
+		core, logs := observer.New(zapcore.WarnLevel)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := Init(ctx, zap.New(core), ModeDaemonSet); err != nil {
+			t.Fatalf("Init = %v, want nil", err)
+		}
+		if valCalls != 2 {
+			t.Fatalf("validateHostBPFFSPathFn calls = %d, want 2 (initial + 1 retry)", valCalls)
+		}
+		if Armed() || !UnprotectedTrampolinesActive() {
+			t.Fatalf("expected unprotected mode, got armed=%v unprot=%v", Armed(), UnprotectedTrampolinesActive())
+		}
+		if logs.Len() != 1 || logs.All()[0].Message != UnprotectedMountCheckErrWarnMessage {
+			t.Fatalf("WARN = %+v, want %q", logs.All(), UnprotectedMountCheckErrWarnMessage)
+		}
+		if strings.Contains(logs.All()[0].Message, "mount the host's /sys/fs/bpf") {
+			t.Fatalf("persistent mount-check ENOMEM logged misleading mount hint: %q", logs.All()[0].Message)
+		}
+
+		dynamicTrampImageCheckFn = func() bool { return false }
+		var dummy ebpf.Program
+		if err := PinBeforeAttach(&dummy, "proxyless", "unix_stream_recvmsg", "p"); !errors.Is(err, ErrAnchorUnpinned) {
+			t.Fatalf("static kernel PinBeforeAttach after persistent mount-check ENOMEM = %v, want ErrAnchorUnpinned", err)
+		}
+	})
+
+	t.Run("config_absent_mount_error_does_not_retry_and_logs_mount_hint", func(t *testing.T) {
+		resetStateForTest(t)
+		t.Setenv(EnvHostBPFFS, "/nonexistent/keploy-bpffs-test")
+		t.Setenv(EnvAllowUnprotectedTrampolines, "")
+
+		var valCalls int
+		validateHostBPFFSPathFn = func(path string, _ bool) error {
+			valCalls++
+			return fmt.Errorf("statfs %s: %w", path, unix.ENOENT)
+		}
+
+		core, logs := observer.New(zapcore.WarnLevel)
+		if err := Init(context.Background(), zap.New(core), ModeDaemonSet); err != nil {
+			t.Fatalf("Init = %v, want nil", err)
+		}
+		if valCalls != 1 {
+			t.Fatalf("ENOENT should not retry mount check; calls = %d, want 1", valCalls)
+		}
+		if logs.Len() != 1 || logs.All()[0].Message != UnprotectedWarnMessage {
+			t.Fatalf("WARN = %+v, want %q", logs.All(), UnprotectedWarnMessage)
+		}
+	})
+
+	t.Run("transient_grace_dir_init_error_recovers_on_retry", func(t *testing.T) {
+		resetStateForTest(t)
+		fakeMount := t.TempDir()
+		t.Setenv(EnvHostBPFFS, fakeMount)
+		t.Setenv(EnvAllowUnprotectedTrampolines, "")
+
+		validateHostBPFFSPathFn = func(string, bool) error { return nil }
+		var openCalls int
+		openGraceOwnerInRootFn = func(root string, logger *zap.Logger) (*graceOwner, error) {
+			openCalls++
+			if openCalls == 1 {
+				return nil, fmt.Errorf("statfs grace root %s: %w", root, unix.ENOMEM)
+			}
+			return openGraceOwnerInRoot(root, logger)
+		}
+
+		core, logs := observer.New(zapcore.WarnLevel)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := Init(ctx, zap.New(core), ModeDaemonSet); err != nil {
+			t.Fatalf("Init = %v, want nil", err)
+		}
+		defer func() {
+			stateMu.Lock()
+			o := activeOwner
+			activeOwner = nil
+			stateMu.Unlock()
+			if o != nil {
+				if o.reaper != nil {
+					o.reaper.stopAndWait(o.reaperCancel)
+				}
+				_ = unix.Close(o.lockFD)
+			}
+		}()
+
+		if openCalls != 2 {
+			t.Fatalf("openGraceOwnerInRootFn calls = %d, want 2 (kills M54)", openCalls)
+		}
+		if !Armed() || UnprotectedTrampolinesActive() {
+			t.Fatalf("expected Armed=true Unprotected=false after grace-dir retry, got armed=%v unprot=%v", Armed(), UnprotectedTrampolinesActive())
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("expected 0 WARNs after grace-dir retry recovery, got %+v", logs.All())
+		}
+	})
 }
 
 func TestTestTagBuildReapsOnlyOwnTestPrefix(t *testing.T) {

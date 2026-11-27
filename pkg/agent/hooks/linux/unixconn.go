@@ -247,9 +247,12 @@ func loadUnixConnWith(logger *zap.Logger, objs *bpfObjects, fallback bool) (*uni
 		// program (CVE-2026-98800 defense on Linux 5.10..7.2.9).
 		//
 		// Where host bpffs is unavailable, bpfsafety.Init degrades honestly to
-		// unprotected mode (logs one WARN, sets UnprotectedTrampolinesActive)
-		// without failing startup, so fexit keeps its exact in-kernel peer
-		// filter under KEPLOY_PROVEN.
+		// unprotected mode (logs one cause-specific WARN, sets
+		// UnprotectedTrampolinesActive) without failing startup: dynamic-
+		// trampoline kernels (5.10.28+, 5.11.11+, 5.12+) keep fexit's in-kernel
+		// peer filter, while static-trampoline kernels (5.10.0–5.10.27 and
+		// 5.11.0–5.11.10) fail closed with ErrAnchorUnpinned and fall back to
+		// the syscall tracepoints below.
 		mode := bpfsafety.DetectMode(false)
 		if initErr := bpfsafety.Init(context.Background(), logger, mode); initErr != nil {
 			u.close()

@@ -56,6 +56,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -94,6 +95,12 @@ const (
 	// cannot find a writable host bpffs mount and degrades to honest
 	// unprotected mode.
 	UnprotectedWarnMessage = "eBPF crash protection is OFF: mount the host's /sys/fs/bpf at /run/keploy/host-bpffs (see docs/kernel-safety.md)"
+
+	// UnprotectedMountCheckErrWarnMessage is logged when checking the host
+	// bpffs mount itself failed with an operational system error (for example
+	// transient statfs/stat ENOMEM or EIO) even after retry, rather than bpffs
+	// being absent or misconfigured.
+	UnprotectedMountCheckErrWarnMessage = "eBPF crash protection is OFF: host bpffs mount check failed with a system error (see docs/kernel-safety.md)"
 
 	// UnprotectedInitErrWarnMessage is logged when a host bpffs mount validated
 	// but grace directory initialization failed (for example under memory
@@ -219,8 +226,10 @@ var (
 	shortGraceTestMode        atomic.Bool
 	testBypassPin             atomic.Bool
 
-	// dynamicTrampImageCheckFn and openGraceOwnerInRootFn are swappable in tests.
+	// dynamicTrampImageCheckFn, validateHostBPFFSPathFn, and
+	// openGraceOwnerInRootFn are swappable in tests.
 	dynamicTrampImageCheckFn = kernelHasDynamicTrampImage
+	validateHostBPFFSPathFn  = ValidateHostBPFFSPath
 	openGraceOwnerInRootFn   = openGraceOwnerInRoot
 )
 
@@ -469,10 +478,16 @@ func HasActiveWork() bool {
 // Init attempts to mount it so native hosts always use real host bpffs.
 //
 // Where no usable host bpffs mount is reachable (for example a customer's own
-// manifest or an older chart lacking /run/keploy/host-bpffs), Init never aborts
-// recording: it enters honest unprotected mode, logs UnprotectedWarnMessage
-// once, sets UnprotectedTrampolinesActive()=true, updates metrics, and returns
-// nil.
+// manifest or an older chart lacking /run/keploy/host-bpffs), or grace setup
+// fails even after retrying transient system errors, Init never aborts
+// recording: it enters honest unprotected mode, logs a cause-specific warning
+// once (UnprotectedWarnMessage, UnprotectedMountCheckErrWarnMessage,
+// UnprotectedInitErrWarnMessage, or UnprotectedOptOutWarnMessage), sets
+// UnprotectedTrampolinesActive()=true, updates metrics, and returns nil. On
+// static-trampoline kernels (5.10.0–5.10.27 and 5.11.0–5.11.10),
+// PinBeforeAttach still refuses tracing attaches with ErrAnchorUnpinned in
+// Init-entered unprotected mode unless KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1
+// was explicitly set.
 //
 // Serialized and idempotent when already armed. Refuses to reopen the attach
 // gate once GracefulShutdown has started (returns ErrShuttingDown).
@@ -501,14 +516,13 @@ func Init(ctx context.Context, logger *zap.Logger, mode Mode) error {
 		return nil
 	}
 
-	owner, mountValidated, err := openGraceOwner(logger, mode)
+	owner, warnMsg, err := openGraceOwner(logger, mode)
 	if err != nil {
 		explicitUnprotectedOptOut.Store(false)
-		msg := UnprotectedWarnMessage
-		if mountValidated {
-			msg = UnprotectedInitErrWarnMessage
+		if warnMsg == "" {
+			warnMsg = UnprotectedWarnMessage
 		}
-		enterUnprotectedMode(logger, mode, msg, err)
+		enterUnprotectedMode(logger, mode, warnMsg, err)
 		return nil
 	}
 
@@ -832,14 +846,14 @@ func ensureNativeBPFFS() {
 func resolveHostBPFFSMount(mode Mode) (string, error) {
 	inContainer := mode != ModeNative || runningInContainerFn()
 	if override := strings.TrimSpace(os.Getenv(EnvHostBPFFS)); override != "" {
-		if err := ValidateHostBPFFSPath(override, inContainer); err != nil {
+		if err := validateHostBPFFSPathFn(override, inContainer); err != nil {
 			return "", fmt.Errorf("%s=%s: %w", EnvHostBPFFS, override, err)
 		}
 		return override, nil
 	}
 
 	if mode != ModeNative {
-		if err := ValidateHostBPFFSPath(DefaultHostBPFFSPath, true); err != nil {
+		if err := validateHostBPFFSPathFn(DefaultHostBPFFSPath, true); err != nil {
 			return "", fmt.Errorf("host bpffs mount %s unavailable: %w", DefaultHostBPFFSPath, err)
 		}
 		return DefaultHostBPFFSPath, nil
@@ -847,26 +861,50 @@ func resolveHostBPFFSMount(mode Mode) (string, error) {
 
 	// Native mode (including native CLI inside a CI container):
 	// prefer /run/keploy/host-bpffs if mounted.
-	if err := ValidateHostBPFFSPath(DefaultHostBPFFSPath, inContainer); err == nil {
+	if err := validateHostBPFFSPathFn(DefaultHostBPFFSPath, inContainer); err == nil {
 		return DefaultHostBPFFSPath, nil
 	}
 	if inContainer {
 		// Inside a container without /run/keploy/host-bpffs: NEVER self-mount a
 		// private bpffs. Only accept /sys/fs/bpf if it is already an explicit
 		// writable host-shared bpffs mount in mountinfo.
-		if err := ValidateHostBPFFSPath(DefaultNativeBPFFSPath, true); err != nil {
+		if err := validateHostBPFFSPathFn(DefaultNativeBPFFSPath, true); err != nil {
 			return "", fmt.Errorf("host bpffs mount unavailable in container: %w", err)
 		}
-		if ok, merr := hasHostSharedBPFFS("/proc/self/mountinfo", DefaultNativeBPFFSPath); merr != nil || !ok {
+		ok, merr := hasHostSharedBPFFS("/proc/self/mountinfo", DefaultNativeBPFFSPath)
+		if merr != nil {
+			return "", fmt.Errorf("check host-shared bpffs mountinfo for %s: %w", DefaultNativeBPFFSPath, merr)
+		}
+		if !ok {
 			return "", fmt.Errorf("%s inside container is not a host-shared bpffs mount", DefaultNativeBPFFSPath)
 		}
 		return DefaultNativeBPFFSPath, nil
 	}
 	ensureNativeBPFFS()
-	if err := ValidateHostBPFFSPath(DefaultNativeBPFFSPath, false); err != nil {
+	if err := validateHostBPFFSPathFn(DefaultNativeBPFFSPath, false); err != nil {
 		return "", fmt.Errorf("host bpffs mount %s unavailable: %w", DefaultNativeBPFFSPath, err)
 	}
 	return DefaultNativeBPFFSPath, nil
+}
+
+// isMountCheckSysErr reports whether err came from an operational syscall
+// failure while checking the host bpffs mount (such as ENOMEM, EINTR, EAGAIN,
+// or EIO) rather than a missing, unmounted, non-bpffs, read-only, or
+// non-host-shared mount configuration.
+func isMountCheckSysErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	switch errno {
+	case unix.ENOENT, unix.ENOTDIR, unix.EACCES, unix.EPERM, unix.ELOOP, unix.ENAMETOOLONG:
+		return false
+	default:
+		return true
+	}
 }
 
 // hasHostSharedBPFFS reports whether target in /proc/self/mountinfo is a bpffs
@@ -1262,10 +1300,18 @@ func sanitizeTag(s string) string {
 	return b.String()
 }
 
-func openGraceOwner(logger *zap.Logger, mode Mode) (*graceOwner, bool, error) {
+func openGraceOwner(logger *zap.Logger, mode Mode) (*graceOwner, string, error) {
 	mountPath, err := resolveHostBPFFSMount(mode)
+	if err != nil && isMountCheckSysErr(err) {
+		// Operational syscall failure during mount validation (e.g. transient
+		// statfs/stat ENOMEM): retry once before degrading.
+		mountPath, err = resolveHostBPFFSMount(mode)
+	}
 	if err != nil {
-		return nil, false, err
+		if isMountCheckSysErr(err) {
+			return nil, UnprotectedMountCheckErrWarnMessage, err
+		}
+		return nil, UnprotectedWarnMessage, err
 	}
 	root := filepath.Join(mountPath, GraceRootSubdir)
 	owner, err := openGraceOwnerInRootFn(root, logger)
@@ -1275,9 +1321,9 @@ func openGraceOwner(logger *zap.Logger, mode Mode) (*graceOwner, bool, error) {
 		owner, err = openGraceOwnerInRootFn(root, logger)
 	}
 	if err != nil {
-		return nil, true, err
+		return nil, UnprotectedInitErrWarnMessage, err
 	}
-	return owner, true, nil
+	return owner, "", nil
 }
 
 func openGraceOwnerInRoot(root string, logger *zap.Logger) (*graceOwner, error) {

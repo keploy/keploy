@@ -2868,9 +2868,10 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 		checkAttachAndSleeper(t, "unprot_initerr")
 	})
 
-	// 3. Real failslab fail-nth sweep over Init(ModeNative) on /sys/fs/bpf:
-	//    every fault either recovers to armed host-bpffs (via retry) OR enters
-	//    unprotected mode where static kernels still refuse fexit with ErrAnchorUnpinned.
+	// 3. Real failslab single-fault sweep over Init(ModeNative) on /sys/fs/bpf:
+	//    every single transient fault (including mount-check statfs/stat and
+	//    grace-dir statfs) recovers via openGraceOwner's retry and ends Armed,
+	//    never falling into unprotected mode with a misleading mount WARN.
 	t.Run("real_failslab_init_sweep", func(t *testing.T) {
 		resetStateForTest(t)
 		t.Setenv(EnvHostBPFFS, "")
@@ -2881,9 +2882,6 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
 			_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
 		}()
-
-		sweepProg := makeCountingFexitProg(t, "sweep_init", fn, nil)
-		defer func() { _ = sweepProg.Close() }()
 
 		type res struct {
 			errMsg string
@@ -2919,18 +2917,118 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 				o := activeOwner
 				stateMu.Unlock()
 				unprot := UnprotectedTrampolinesActive()
-				if unprot && staticKernel {
-					l, aerr := AttachTracing(sweepProg, "sweep_init", fn, "p")
-					if l != nil {
-						_ = l.Close()
+				if unprot || o == nil {
+					cancel()
+					ch <- res{errMsg: fmt.Sprintf("single failslab fault fail-nth=%d left Init unprotected (armed=%v unprot=%v logs=%+v)", n, o != nil, unprot, logs.All())}
+					return
+				}
+				cancel()
+				if o.reaper != nil {
+					o.reaper.stopAndWait(o.reaperCancel)
+				}
+				stateMu.Lock()
+				activeOwner = nil
+				stateMu.Unlock()
+				_ = unix.Close(o.lockFD)
+				_ = os.RemoveAll(o.dir)
+				unprotectedTrampolines.Store(false)
+				explicitUnprotectedOptOut.Store(false)
+				unprotectedWarned.Store(false)
+				stateMu.Lock()
+				unprotectedLogger = nil
+				unprotectedWarnedFuncs = map[string]bool{}
+				stateMu.Unlock()
+				if lf != "0" {
+					break
+				}
+			}
+			ch <- res{}
+		}()
+		r := <-ch
+		if r.errMsg != "" {
+			t.Fatal(r.errMsg)
+		}
+	})
+
+	// 4. Held failslab fault across openGraceOwnerInRoot retry: re-arm fail-nth
+	//    on each call to openGraceOwnerInRoot so a real kernel fault holds across
+	//    both attempts, putting Init into unprotected mode with
+	//    UnprotectedInitErrWarnMessage while static kernels still refuse fexit.
+	t.Run("held_failslab_grace_statfs", func(t *testing.T) {
+		resetStateForTest(t)
+		t.Setenv(EnvHostBPFFS, "")
+		for _, kv := range [][2]string{{"task-filter", "N"}, {"ignore-gfp-wait", "N"}, {"probability", "0"}, {"times", "-1"}, {"verbose", "0"}} {
+			_ = os.WriteFile(filepath.Join(failslabDir, kv[0]), []byte(kv[1]), 0o644)
+		}
+		defer func() {
+			_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+			_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+		}()
+
+		sweepProg := makeCountingFexitProg(t, "held_init", fn, nil)
+		defer func() { _ = sweepProg.Close() }()
+
+		type res struct {
+			hitUnprot int
+			errMsg    string
+		}
+		ch := make(chan res, 1)
+		go func() {
+			runtime.LockOSThread()
+			nfd, oerr := unix.Open(fmt.Sprintf("/proc/self/task/%d/fail-nth", unix.Gettid()), unix.O_RDWR, 0)
+			if oerr != nil {
+				ch <- res{errMsg: "open fail-nth: " + oerr.Error()}
+				return
+			}
+			defer func() { _ = unix.Close(nfd) }()
+			arm := func(n int) { _, _ = unix.Pwrite(nfd, []byte(strconv.Itoa(n)), 0) }
+			left := func() string {
+				b := make([]byte, 16)
+				k, _ := unix.Pread(nfd, b, 0)
+				if k < 0 {
+					k = 0
+				}
+				return strings.TrimSpace(string(b[:k]))
+			}
+			var r res
+			for n := 1; n <= 80; n++ {
+				targetN := n
+				openGraceOwnerInRootFn = func(root string, logger *zap.Logger) (*graceOwner, error) {
+					arm(targetN)
+					owner, oerr := openGraceOwnerInRoot(root, logger)
+					arm(0)
+					return owner, oerr
+				}
+				core, logs := observer.New(zap.WarnLevel)
+				ctx, cancel := context.WithCancel(context.Background())
+				_ = Init(ctx, zap.New(core), ModeNative)
+				arm(0)
+				stateMu.Lock()
+				o := activeOwner
+				stateMu.Unlock()
+				if UnprotectedTrampolinesActive() {
+					r.hitUnprot++
+					if logs.Len() < 1 || logs.All()[0].Message != UnprotectedInitErrWarnMessage {
 						cancel()
-						ch <- res{errMsg: fmt.Sprintf("fail-nth=%d: static kernel attached unanchored fexit in unprotected mode (logs=%+v)", n, logs.All())}
+						r.errMsg = fmt.Sprintf("held fail-nth=%d WARN = %+v, want %q", n, logs.All(), UnprotectedInitErrWarnMessage)
+						ch <- r
 						return
 					}
-					if !errors.Is(aerr, ErrAnchorUnpinned) {
-						cancel()
-						ch <- res{errMsg: fmt.Sprintf("fail-nth=%d: static kernel err=%v, want ErrAnchorUnpinned", n, aerr)}
-						return
+					if staticKernel {
+						l, aerr := AttachTracing(sweepProg, "held_init", fn, "p")
+						if l != nil {
+							_ = l.Close()
+							cancel()
+							r.errMsg = fmt.Sprintf("held fail-nth=%d: static kernel attached unanchored fexit in unprotected mode", n)
+							ch <- r
+							return
+						}
+						if !errors.Is(aerr, ErrAnchorUnpinned) {
+							cancel()
+							r.errMsg = fmt.Sprintf("held fail-nth=%d: static kernel err=%v, want ErrAnchorUnpinned", n, aerr)
+							ch <- r
+							return
+						}
 					}
 				}
 				cancel()
@@ -2951,15 +3049,18 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 				unprotectedLogger = nil
 				unprotectedWarnedFuncs = map[string]bool{}
 				stateMu.Unlock()
-				if o != nil && lf != "0" {
+				if o != nil && left() != "0" && n > 35 {
 					break
 				}
 			}
-			ch <- res{}
+			ch <- r
 		}()
 		r := <-ch
 		if r.errMsg != "" {
 			t.Fatal(r.errMsg)
+		}
+		if r.hitUnprot == 0 {
+			t.Fatal("held failslab sweep never triggered unprotected mode across openGraceOwnerInRoot")
 		}
 	})
 }
