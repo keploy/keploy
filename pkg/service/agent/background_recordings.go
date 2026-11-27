@@ -55,7 +55,7 @@ func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, residen
 	if len(params.BackgroundMocks) > 0 {
 		recs, err = backgroundRecordingsOf(params.BackgroundMocks, params.StartupMocks, resident, disks...)
 	} else if params.DeriveBackgroundFromWindows && len(params.RecordedWindows) > 0 && !params.ExactStaging {
-		recs, err = derivedBackgroundRecordingsOf(params.RecordedWindows, resident, disks...)
+		recs, err = derivedBackgroundRecordingsWith(params.RecordedWindows, params.FirstRecordedTestStart, a.logger, resident, disks...)
 	}
 	if err != nil {
 		a.logger.Warn("could not read the test set's background recordings; every call that misses stays its test's miss",
@@ -80,6 +80,10 @@ func (a *Agent) seedBackgroundRecordings(params models.MockFilterParams, residen
 // Derived recordings are returned with Startup=false because
 // DeriveWindowMappings places all outside-window recordings in Worker.
 func derivedBackgroundRecordingsOf(windows []models.TestWindow, resident [][]*models.Mock, disks ...*proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
+	return derivedBackgroundRecordingsWith(windows, time.Time{}, nil, resident, disks...)
+}
+
+func derivedBackgroundRecordingsWith(windows []models.TestWindow, recordedFirstStart time.Time, logger *zap.Logger, resident [][]*models.Mock, disks ...*proxyPkg.DiskMocks) ([]models.BackgroundRecording, error) {
 	if len(windows) == 0 {
 		return nil, nil
 	}
@@ -111,7 +115,8 @@ func derivedBackgroundRecordingsOf(windows []models.TestWindow, resident [][]*mo
 			return true
 		}
 		seenName[nh] = struct{}{}
-		if !classifier.IsWorker(mk) {
+		kind, _ := classifier.ClassifyForBackground(mk, recordedFirstStart)
+		if kind == models.WindowBgNone {
 			return true
 		}
 		collector.add(mk, from)
@@ -119,6 +124,13 @@ func derivedBackgroundRecordingsOf(windows []models.TestWindow, resident [][]*mo
 	})
 	if err != nil {
 		return nil, err
+	}
+	if st := collector.col.Stats(); st.DroppedByCap > 0 && logger != nil {
+		logger.Info("agent derived background collector reached capacity cap; dropped oldest shapes by recency while preserving active pollers",
+			zap.Int("kept", st.Kept),
+			zap.Int("distinctShapes", st.DistinctShapes),
+			zap.Int("droppedByCap", st.DroppedByCap),
+			zap.Int("droppedShapes", st.DroppedShapes))
 	}
 	return collector.recordings(), nil
 }
@@ -450,246 +462,63 @@ func hashName(s string) nameHash {
 	return nameHash{a: a, b: b}
 }
 
-// bgNode is one retained derived background recording inside
-// derivedBgCollector's intrusive lists (global head/tail list + per-shape
-// FIFO bucket).
-type bgNode struct {
-	rec   models.BackgroundRecording
-	shape string
-	bytes int64
-	head  bool
-
-	prev, next   *bgNode
-	sPrev, sNext *bgNode
-}
-
-type bgList struct {
-	head, tail *bgNode
-	count      int
-}
-
-func (l *bgList) pushBack(n *bgNode) {
-	n.prev = l.tail
-	n.next = nil
-	if l.tail != nil {
-		l.tail.next = n
-	} else {
-		l.head = n
-	}
-	l.tail = n
-	l.count++
-}
-
-func (l *bgList) remove(n *bgNode) {
-	if n.prev != nil {
-		n.prev.next = n.next
-	} else {
-		l.head = n.next
-	}
-	if n.next != nil {
-		n.next.prev = n.prev
-	} else {
-		l.tail = n.prev
-	}
-	n.prev, n.next = nil, nil
-	l.count--
-}
-
-type bgShapeBucket struct {
-	head, tail *bgNode
-	count      int
-}
-
-func (b *bgShapeBucket) pushBack(n *bgNode) {
-	n.sPrev = b.tail
-	n.sNext = nil
-	if b.tail != nil {
-		b.tail.sNext = n
-	} else {
-		b.head = n
-	}
-	b.tail = n
-	b.count++
-}
-
-func (b *bgShapeBucket) remove(n *bgNode) {
-	if n.sPrev != nil {
-		n.sPrev.sNext = n.sNext
-	} else {
-		b.head = n.sNext
-	}
-	if n.sNext != nil {
-		n.sNext.sPrev = n.sPrev
-	} else {
-		b.tail = n.sPrev
-	}
-	n.sPrev, n.sNext = nil, nil
-	b.count--
-}
-
-// derivedBgCollector maintains a strictly bounded set of derived background
-// recordings while streaming mocks in recorded timestamp order:
-//   - deduplicates recurring background traffic by canonical request shape,
-//     retaining at most maxPerShape latest samples per shape;
-//   - protects a small leading boot/startup prefix (up to headReserve entries
-//     and headReserveBytes, clamped to at most 1/4 of the global caps so the
-//     recency tail always keeps >= 75% of the budget);
-//   - enforces global maxEntries and maxBytes ceilings by evicting the oldest
-//     non-head recordings so background polls active around late test windows
-//     always survive high-cardinality earlier traffic.
+// derivedBgCollector wraps the shared models.DerivedBgCollector for the
+// agent's Pass 1 in-RAM derived background recording pass, stripping response
+// payloads and estimating decoded byte sizes before admission.
 type derivedBgCollector struct {
-	maxEntries       int
-	maxBytes         int64
-	maxPerShape      int
-	headReserve      int
-	headReserveBytes int64
-
-	headList   bgList
-	tailList   bgList
-	headBytes  int64
-	totalBytes int64
-	headSealed bool
-	byShape    map[string]*bgShapeBucket
+	col *models.DerivedBgCollector
 }
 
 func newDerivedBgCollector(maxEntries int, maxBytes int64, maxPerShape int, headReserve int, headReserveBytes int64) *derivedBgCollector {
-	if maxEntries < 1 {
-		maxEntries = 1
-	}
-	if maxBytes < 1 {
-		maxBytes = 1
-	}
-	if maxPerShape < 1 {
-		maxPerShape = 1
-	}
-	if capHead := maxEntries / 4; headReserve > capHead {
-		headReserve = capHead
-	}
-	if capHeadBytes := maxBytes / 4; headReserveBytes > capHeadBytes {
-		headReserveBytes = capHeadBytes
+	minPerShape := 0
+	if maxPerShape >= learn.MinEpochReads+1 {
+		minPerShape = learn.MinEpochReads + 1
 	}
 	return &derivedBgCollector{
-		maxEntries:       maxEntries,
-		maxBytes:         maxBytes,
-		maxPerShape:      maxPerShape,
-		headReserve:      headReserve,
-		headReserveBytes: headReserveBytes,
-		byShape:          make(map[string]*bgShapeBucket),
+		col: models.NewDerivedBgCollector(models.DerivedBgCollectorConfig{
+			MaxEntries:       maxEntries,
+			MaxBytes:         maxBytes,
+			MaxPerShape:      maxPerShape,
+			MinPerShape:      minPerShape,
+			HeadReserve:      headReserve,
+			HeadReserveBytes: headReserveBytes,
+		}),
 	}
 }
 
 func (c *derivedBgCollector) totalCount() int {
-	return c.headList.count + c.tailList.count
+	return c.col.TotalCount()
 }
 
-func (c *derivedBgCollector) evict(n *bgNode) {
-	if n == nil {
-		return
-	}
-	if n.head {
-		c.headList.remove(n)
-		c.headBytes -= n.bytes
-	} else {
-		c.tailList.remove(n)
-	}
-	c.totalBytes -= n.bytes
-	if b := c.byShape[n.shape]; b != nil {
-		b.remove(n)
-		if b.count == 0 {
-			delete(c.byShape, n.shape)
-		}
-	}
+func (c *derivedBgCollector) totalBytes() int64 {
+	return c.col.TotalBytes()
+}
+
+func (c *derivedBgCollector) headCount() int {
+	return c.col.HeadCount()
+}
+
+func (c *derivedBgCollector) tailCount() int {
+	return c.col.TailCount()
+}
+
+func (c *derivedBgCollector) shapeCount() int {
+	return c.col.ShapeCount()
 }
 
 func (c *derivedBgCollector) add(mk *models.Mock, from time.Time) {
 	dm := stripDerivedResponse(mk)
 	size := estimateDerivedMockBytes(dm)
-	if size > c.maxBytes {
-		return
-	}
-	shape := models.BackgroundShapeKey(dm)
-
-	// Determine whether a same-shape eviction would occur, and pre-check
-	// admissibility BEFORE mutating byShape, headList, or tailList so an
-	// oversized outlier can never evict a protected head entry or drain
-	// tailList only to be dropped itself.
-	var sameShapeEvict *bgNode
-	if b := c.byShape[shape]; b != nil && b.count >= c.maxPerShape {
-		sameShapeEvict = b.head
-	}
-
-	projHeadCount := c.headList.count
-	projHeadBytes := c.headBytes
-	projTotalCount := c.totalCount()
-	projTotalBytes := c.totalBytes
-	if sameShapeEvict != nil {
-		projTotalCount--
-		projTotalBytes -= sameShapeEvict.bytes
-		if sameShapeEvict.head {
-			projHeadCount--
-			projHeadBytes -= sameShapeEvict.bytes
-		}
-	}
-
-	admitHead := !c.headSealed &&
-		projHeadCount < c.headReserve &&
-		projHeadBytes+size <= c.headReserveBytes &&
-		projTotalCount < c.maxEntries &&
-		projTotalBytes+size <= c.maxBytes
-
-	if !admitHead {
-		if projHeadCount >= c.maxEntries || projHeadBytes+size > c.maxBytes {
-			return
-		}
-	}
-
-	if sameShapeEvict != nil {
-		c.evict(sameShapeEvict)
-	}
-
-	node := &bgNode{
-		rec:   models.BackgroundRecording{Mock: dm, From: from},
-		shape: shape,
-		bytes: size,
-	}
-
-	if admitHead {
-		node.head = true
-		c.headList.pushBack(node)
-		c.headBytes += size
-	} else {
-		c.headSealed = true
-		for (c.totalCount() >= c.maxEntries || c.totalBytes+size > c.maxBytes) && c.tailList.head != nil {
-			c.evict(c.tailList.head)
-		}
-		c.tailList.pushBack(node)
-	}
-
-	c.totalBytes += size
-	b := c.byShape[shape]
-	if b == nil {
-		b = &bgShapeBucket{}
-		c.byShape[shape] = b
-	}
-	b.pushBack(node)
+	c.col.Add(models.DerivedBgItem{
+		Recording: models.BackgroundRecording{Mock: dm, From: from},
+		Shape:     models.BackgroundShapeKey(dm),
+		At:        dm.Spec.ReqTimestampMock,
+		Bytes:     size,
+	})
 }
 
 func (c *derivedBgCollector) recordings() []models.BackgroundRecording {
-	n := c.totalCount()
-	if n == 0 {
-		return nil
-	}
-	out := make([]models.BackgroundRecording, 0, n)
-	for cur := c.headList.head; cur != nil; cur = cur.next {
-		out = append(out, cur.rec)
-	}
-	for cur := c.tailList.head; cur != nil; cur = cur.next {
-		out = append(out, cur.rec)
-	}
-	slices.SortStableFunc(out, func(a, b models.BackgroundRecording) int {
-		return a.Mock.Spec.ReqTimestampMock.Compare(b.Mock.Spec.ReqTimestampMock)
-	})
-	return out
+	return c.col.Recordings()
 }
 
 // stripDerivedResponse returns a shallow copy of mk with response payloads and

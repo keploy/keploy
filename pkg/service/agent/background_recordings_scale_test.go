@@ -491,11 +491,11 @@ func TestDerivedBgCollector_ByteCeilingPerShapeAndNoResidentMutation(t *testing.
 	if col2.totalCount() > 12 {
 		t.Fatalf("totalCount=%d exceeded maxEntries=12", col2.totalCount())
 	}
-	if col2.totalBytes > 12<<10 {
-		t.Fatalf("totalBytes=%d exceeded maxBytes=%d", col2.totalBytes, 12<<10)
+	if col2.totalBytes() > 12<<10 {
+		t.Fatalf("totalBytes=%d exceeded maxBytes=%d", col2.totalBytes(), 12<<10)
 	}
-	if len(col2.byShape) > col2.totalCount() {
-		t.Fatalf("byShape leaked empty buckets: len(byShape)=%d > totalCount=%d", len(col2.byShape), col2.totalCount())
+	if col2.shapeCount() > col2.totalCount() {
+		t.Fatalf("byShape leaked empty buckets: shapeCount=%d > totalCount=%d", col2.shapeCount(), col2.totalCount())
 	}
 	final := col2.recordings()
 	names := make(map[string]bool, len(final))
@@ -525,9 +525,9 @@ func TestDerivedBgCollector_ByteCeilingPerShapeAndNoResidentMutation(t *testing.
 	col3.add(mkHTTP("tail-1", "/tail/1", pad512, "r", 10), base.Add(9*time.Second))
 	col3.add(mkHTTP("tail-2", "/tail/2", pad512, "r", 11), base.Add(10*time.Second))
 
-	wantHeadCount := col3.headList.count
-	wantTailCount := col3.tailList.count
-	wantTotalBytes := col3.totalBytes
+	wantHeadCount := col3.headCount()
+	wantTailCount := col3.tailCount()
+	wantTotalBytes := col3.totalBytes()
 	if wantHeadCount != 3 || wantTailCount != 2 {
 		t.Fatalf("precondition failed: headCount=%d tailCount=%d; want 3, 2", wantHeadCount, wantTailCount)
 	}
@@ -540,9 +540,9 @@ func TestDerivedBgCollector_ByteCeilingPerShapeAndNoResidentMutation(t *testing.
 	// 3b. Same-shape outlier matching a full maxPerShape=2 bucket in headList.
 	col3.add(mkHTTP("outlier-dup", "/boot/dup", outlierBody, "r", 21), base.Add(20*time.Second))
 
-	if col3.headList.count != wantHeadCount || col3.tailList.count != wantTailCount || col3.totalBytes != wantTotalBytes {
+	if col3.headCount() != wantHeadCount || col3.tailCount() != wantTailCount || col3.totalBytes() != wantTotalBytes {
 		t.Fatalf("rejected outlier mutated collector: head=%d (want %d), tail=%d (want %d), bytes=%d (want %d)",
-			col3.headList.count, wantHeadCount, col3.tailList.count, wantTailCount, col3.totalBytes, wantTotalBytes)
+			col3.headCount(), wantHeadCount, col3.tailCount(), wantTailCount, col3.totalBytes(), wantTotalBytes)
 	}
 	got3 := col3.recordings()
 	got3Names := make(map[string]bool, len(got3))

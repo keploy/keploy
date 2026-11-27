@@ -277,6 +277,115 @@ func (c *WindowClassifier) IsWorker(m *Mock) bool {
 	return true
 }
 
+// WindowBackgroundKind classifies a mock for window-derived background
+// collection (both Pass 1 in-RAM derivation and mappings.yaml persistence).
+type WindowBackgroundKind uint8
+
+const (
+	// WindowBgNone means the mock must NOT be promoted to background: either
+	// it fell inside a recorded test window, was in-flight into one, or fell in
+	// an unwindowed region where removed test cases may have lived.
+	WindowBgNone WindowBackgroundKind = iota
+	// WindowBgStartup means the mock was recorded strictly before the earliest
+	// recorded test start (taking recordedFirstStart into account).
+	WindowBgStartup
+	// WindowBgOutsideWindow means the mock was recorded strictly outside every
+	// recorded test window (and between held windows when earlier tests are
+	// known missing).
+	WindowBgOutsideWindow
+	// WindowBgIdleInWindow means the mock is a parser-declared idle answer
+	// (rule D4, models.IsIdleAnswer) recorded during a test window (or during a
+	// removed-test gap), so callers must NOT label it "outside every recorded
+	// test window".
+	WindowBgIdleInWindow
+)
+
+// ClassifyForBackground classifies m against c's held test windows and the
+// TestDB's earliest recorded test start (recordedFirstStart, zero when unknown
+// or unchanged).
+//
+// Fail-closed rule when earlier tests were removed (recordedFirstStart < first
+// held window start):
+//   - mocks strictly before recordedFirstStart -> WindowBgStartup
+//   - non-idle mocks in [recordedFirstStart, firstHeldStart) or after the last
+//     held window -> WindowBgNone (never promoted; removed test windows may
+//     have owned them)
+//   - non-idle mocks strictly between two held windows and outside all held
+//     windows -> WindowBgOutsideWindow
+//   - parser-declared idle answers inside a held window (or removed-test gap)
+//     -> WindowBgIdleInWindow (with the overlapping window name when known).
+func (c *WindowClassifier) ClassifyForBackground(m *Mock, recordedFirstStart time.Time) (WindowBackgroundKind, string) {
+	if c == nil || m == nil || len(c.ws) == 0 {
+		return WindowBgNone, ""
+	}
+	w := NewWindowedMock(m)
+	if !w.TestMock || w.At.IsZero() {
+		return WindowBgNone, ""
+	}
+	at := w.placed()
+	next := sort.Search(len(c.ws), func(i int) bool { return c.ws[i].Start.After(at) })
+	inWindow := false
+	inWindowName := ""
+	if next > 0 && !c.sched.maxEnd[next-1].Before(at) {
+		inWindow = true
+		for i := next - 1; i >= 0; i-- {
+			if !c.ws[i].End.Before(at) {
+				inWindowName = c.ws[i].TestCase
+				break
+			}
+			if c.sched.maxEnd[i].Before(at) {
+				break
+			}
+		}
+	}
+	if !inWindow && w.InFlight && next < len(c.ws) && c.sched.InFlightInto(w.At, w.Res, c.ws[next].Start) {
+		inWindow = true
+		inWindowName = c.ws[next].TestCase
+	}
+
+	heldFirst := c.ws[0].Start
+	heldLastEnd := c.sched.maxEnd[len(c.ws)-1]
+	earlierMissing := !recordedFirstStart.IsZero() && recordedFirstStart.Before(heldFirst)
+	effectiveFirst := heldFirst
+	if earlierMissing {
+		effectiveFirst = recordedFirstStart
+	}
+
+	if w.Idle {
+		if inWindow {
+			return WindowBgIdleInWindow, inWindowName
+		}
+		if earlierMissing && !at.Before(recordedFirstStart) && at.Before(heldFirst) {
+			return WindowBgIdleInWindow, ""
+		}
+		if earlierMissing && at.After(heldLastEnd) {
+			return WindowBgIdleInWindow, ""
+		}
+		if m.Spec.ReqTimestampMock.Before(effectiveFirst) && at.Before(effectiveFirst) {
+			return WindowBgStartup, ""
+		}
+		return WindowBgOutsideWindow, ""
+	}
+
+	if inWindow {
+		return WindowBgNone, ""
+	}
+	if m.Spec.ReqTimestampMock.Before(effectiveFirst) && at.Before(effectiveFirst) {
+		return WindowBgStartup, ""
+	}
+	// Fail closed (B2): never promote anything recorded at or after
+	// effectiveFirst unless it lies strictly between two windows the run
+	// actually holds. When earlier tests were removed, [recordedFirst,
+	// heldFirst) may hold removed tests' own calls; and after the last held
+	// window (at >= heldLastEnd), continuous recordings may hold later rounds'
+	// unwindowed traffic that must remain prunable and never promoted to
+	// worker:.
+	if at.Before(heldFirst) || !at.Before(heldLastEnd) {
+		return WindowBgNone, ""
+	}
+	return WindowBgOutsideWindow, ""
+}
+
 // DeriveWindowMappingsWith is DeriveWindowMappings with opts.
 func DeriveWindowMappingsWith(windows []TestWindow, mocks []WindowedMock, opts DeriveOptions) WindowMappings {
 	ws := make([]TestWindow, 0, len(windows))
