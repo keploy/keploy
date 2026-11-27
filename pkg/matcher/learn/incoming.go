@@ -306,6 +306,15 @@ func arrivedBefore(earlier []Earlier, rec, live time.Time) []Earlier {
 	return out
 }
 
+// withoutClients is served without any incoming client test requests
+// (Earlier.incoming), returning served unchanged when none are present.
+func withoutClients(served []Earlier) []Earlier {
+	if !slices.ContainsFunc(served, func(e Earlier) bool { return e.incoming }) {
+		return served
+	}
+	return slices.DeleteFunc(slices.Clone(served), func(e Earlier) bool { return e.incoming })
+}
+
 // ofOwnCall is earlier without each client test's request (Earlier.incoming)
 // where in's call is no call of its test's own list: one keploy record
 // marked trailing a test (Input.Trails: a worker: recording, which no test
@@ -320,7 +329,7 @@ func ofOwnCall(in Input, earlier []Earlier) []Earlier {
 	if s := in.ScopeOf(in.Mock); in.Trails.Test == "" && (s == ScopeUnknown || s == ScopeTest(in.Test)) {
 		return earlier
 	}
-	return slices.DeleteFunc(slices.Clone(earlier), func(e Earlier) bool { return e.incoming })
+	return withoutClients(earlier)
 }
 
 // comingRequest is a client test's request whose body is still coming
@@ -410,5 +419,5 @@ func readOverClients(served []Earlier, w *Window, pairs []driftedInstant, zone *
 			return served
 		}
 	}
-	return slices.DeleteFunc(slices.Clone(served), func(e Earlier) bool { return e.incoming })
+	return withoutClients(served)
 }

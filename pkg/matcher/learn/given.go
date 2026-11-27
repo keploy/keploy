@@ -576,8 +576,18 @@ func unreadRequestWhy(why string) string {
 // one rule and a moment F saw by another (one truncated, one rounded) does
 // not explain F's: the application cuts by one rule.
 func (dc *DriftCache) requestHolds(lost, live []moment, served []Earlier) (where string, asRecorded bool) {
-	if len(lost) == 0 {
+	mock, path, asRecorded := dc.requestHoldsPlace(lost, live, served)
+	if mock == "" {
 		return "", false
+	}
+	return mock + " at " + path, asRecorded
+}
+
+// requestHoldsPlace is requestHolds returning the mock/test-case name and leaf
+// path separately so callers formatting a place do not have to split on " at ".
+func (dc *DriftCache) requestHoldsPlace(lost, live []moment, served []Earlier) (mock, path string, asRecorded bool) {
+	if len(lost) == 0 {
+		return "", "", false
 	}
 	for _, e := range served {
 		if !e.Given {
@@ -603,13 +613,13 @@ func (dc *DriftCache) requestHolds(lost, live []moment, served []Earlier) (where
 			for _, h := range held.list {
 				for _, m := range lost {
 					if cuts(h, m, func(c cutRule) bool { return !explained[c] }) {
-						return e.Mock + " at " + s.Leaf.Path, s.Live == s.Leaf.Value
+						return e.Mock, s.Leaf.Path, s.Live == s.Leaf.Value
 					}
 				}
 			}
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // requestHoldsWhy is why a drifted value is refused whose recorded moment

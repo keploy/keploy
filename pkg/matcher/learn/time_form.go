@@ -169,7 +169,10 @@ func (dc *decider) timeDefault(path string, at variables.Address, n int, c chang
 		off.Word = c.word
 	}
 	rule := "a time, checked by its form alone (" + off.Forms() + ", keploy.yml's times setting at its default); the clock checks would refuse it " + string(d.Refusal.Kind) + ": " + d.Refusal.Why
-	nd := dc.learned(path, at, n, c.r, c.l, OutcomeClock, rule, nil)
+	if len(c.clientAside) > 0 && !strings.Contains(rule, "keploy.yml's rule "+c.clientRule) {
+		rule += "; set aside " + strings.Join(c.clientAside, ", ") + " under keploy.yml's rule " + c.clientRule
+	}
+	nd := dc.learned(path, at, n, c.r, c.l, OutcomeClock, rule, c.clientAside)
 	off.Why = nd.Line
 	nd.Clock = &off
 	return nd

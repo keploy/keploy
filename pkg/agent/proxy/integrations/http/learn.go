@@ -489,8 +489,14 @@ func declaredClocksOf(learned []learn.Learned, sources func(mock string) []model
 		return learned
 	}
 	for i, l := range learned {
-		if s, ok := src(l.Recorded.Path); ok && (timeForm || len(learn.Echoes(drifts, l.Recorded, answered)) == 0) {
+		s, ok := src(l.Recorded.Path)
+		if !ok {
+			continue
+		}
+		if timeForm || len(learn.Echoes(drifts, l.Recorded, answered)) == 0 {
 			learned[i] = learn.DeclaredClockLearned(l, s, w, timeForm)
+		} else {
+			learned[i] = learn.DeclaredClockStrictEchoRefusal(l, s, w)
 		}
 	}
 	return learned
@@ -1964,11 +1970,19 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				w = oc.Window(input.arrived)
 			}
 			// A client test's request that reached the application before
-			// the call in both runs is a place of it (learn.ClassifyArrived),
-			// where its test case binds a value the call carries whole.
+			// the call in both runs is a place of it (learn.ClassifyArrivedSources),
+			// where its test case binds a value the call carries whole. Where a
+			// declared clock rule holds both runs at a body field and its check
+			// is one the replay compares (plain read or offset-comparing window),
+			// incoming client requests are dropped before classifying that field
+			// so in-scope DB and earlier answers stay eligible, matching Decide.
 			answer := classifiedAnswer(answered)
-			learned := learn.ClassifyArrived(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order))
 			timeForm := integrations.TimeFormOf(mockDb)
+			var bodySources func(path string) (learn.Source, bool)
+			if n.sources != nil {
+				bodySources = learn.DeclaredBodySources(n.sources(m.Name))
+			}
+			learned := learn.ClassifyArrivedSources(tracker.DriftsOf(ctx), drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, input.arrived, earlier, raw, answer, w, givenEarlier(m, set, served, given, earlier, order), bodySources, timeForm)
 			// A time the offset rule refused that learning read as the
 			// clock since its test began stays refused under mock.times:
 			// strict (learn.OffsetReadUnder).
@@ -2835,6 +2849,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				}
 				v := p.vars[name]
 				v.Use = appendNew(v.Use, place)
+				if v.Why == "" && l.Why != "" {
+					v.Why = l.Why
+				}
 				p.vars[name] = v
 				continue
 			}
@@ -2843,7 +2860,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			echoed[r.Value] = name
-			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
+			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true, Why: l.Why}
 			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
 
 		default:
