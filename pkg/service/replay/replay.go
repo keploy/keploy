@@ -3011,6 +3011,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			mocksThatHaveMappings[n] = true
 			mocksWeNeed[n] = true
 		}
+		// Background recordings (mappings.yaml worker: and startup:) are also
+		// needed across every test (including subset runs) so the agent can
+		// classify background misses against them.
+		for _, n := range r.backgroundMockNames(ctx, testSetID) {
+			mocksThatHaveMappings[n] = true
+			mocksWeNeed[n] = true
+		}
 
 		if isMappingEnabled && len(expectedTestMockMappings) > 0 {
 			// Populate the Registry
@@ -8147,6 +8154,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if shouldWriteMappings {
+		// When creating a NEW mappings.yaml (never when one already exists, so
+		// operator edits/removals stay authoritative), persist bounded, legible
+		// window-derived startup: (before first test) and worker: (between/after
+		// test windows) entries so Pass 2 and later cloud replays keep the
+		// outside-window background recordings Pass 1 derived in RAM.
+		if !provenswitch.On() {
+			if exists, existsErr := mappingExists(); existsErr == nil && !exists {
+				r.populateWindowDerivedBackground(runTestSetCtx, testSetID, testCases, mappingDoc, actualTestMockMappings)
+			}
+		}
 		// Only a set that holds connection failures can have mapping entries
 		// for them to keep: every other set is written as before, with no
 		// second read of its mapping file.
@@ -8209,7 +8226,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Info("Successfully saved test-mock mappings",
 				zap.String("testSetID", testSetID),
 				zap.Int("numTests", len(mappingDoc.TestCases)),
-				zap.Int("startupMocks", len(mappingDoc.Startup)))
+				zap.Int("startupMocks", len(mappingDoc.Startup)),
+				zap.Int("workerMocks", len(mappingDoc.Worker)))
 		}
 	}
 

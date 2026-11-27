@@ -3,10 +3,7 @@ package agent
 import (
 	"container/heap"
 	"iter"
-	"net/url"
 	"slices"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -610,7 +607,7 @@ func (c *derivedBgCollector) add(mk *models.Mock, from time.Time) {
 	if size > c.maxBytes {
 		return
 	}
-	shape := bgShapeKey(dm)
+	shape := models.BackgroundShapeKey(dm)
 
 	// Determine whether a same-shape eviction would occur, and pre-check
 	// admissibility BEFORE mutating byShape, headList, or tailList so an
@@ -781,156 +778,4 @@ func estimateDerivedMockBytes(m *models.Mock) int64 {
 		n = m.StoredSize()
 	}
 	return n
-}
-
-// bgShapeKey computes a canonical request-shape key so repeated invocations of
-// the same background operation (including ones whose query/body values vary
-// with bare epoch timestamps) collapse into one per-shape bucket while distinct
-// endpoints/operations stay separate.
-func bgShapeKey(m *models.Mock) string {
-	if m == nil {
-		return ""
-	}
-	dest := m.Spec.Metadata["destAddr"]
-	switch m.Kind {
-	case models.HTTP:
-		if r := m.Spec.HTTPReq; r != nil {
-			uHost, pathShape := urlShape(r.URL)
-			host := headerCaseInsensitive(r.Header, "Host")
-			if host == "" {
-				host = uHost
-			}
-			if host == "" {
-				host = dest
-			}
-			amz := headerCaseInsensitive(r.Header, "X-Amz-Target")
-			return string(m.Kind) + "\x00" + string(r.Method) + "\x00" + host + "\x00" + pathShape + "\x00" + amz
-		}
-	case models.HTTP2:
-		if r := m.Spec.HTTP2Req; r != nil {
-			uHost, pathShape := urlShape(r.URL)
-			auth := r.Authority
-			if auth == "" {
-				auth = uHost
-			}
-			if auth == "" {
-				auth = dest
-			}
-			return string(m.Kind) + "\x00" + string(r.Method) + "\x00" + auth + "\x00" + pathShape
-		}
-	case models.GRPC_EXPORT:
-		if r := m.Spec.GRPCReq; r != nil {
-			auth := r.Headers.PseudoHeaders[":authority"]
-			if auth == "" {
-				auth = dest
-			}
-			return string(m.Kind) + "\x00" + auth + "\x00" + r.Headers.PseudoHeaders[":path"]
-		}
-	case models.Mongo:
-		return string(m.Kind) + "\x00" + dest + "\x00" + mongoRequestShape(m.Spec.MongoRequests)
-	}
-	if stmt := models.StatementKey(m); stmt != "" {
-		return string(m.Kind) + "\x00" + dest + "\x00" + stmt
-	}
-	if keys := models.RequestKeys(m); len(keys) > 0 {
-		return string(m.Kind) + "\x00" + dest + "\x00" + keys[0]
-	}
-	return string(m.Kind) + "\x00" + dest + "\x00" + m.Spec.Metadata["operation"]
-}
-
-// urlShape returns the URL host (if present) and a normalized path plus sorted
-// unique query parameter names (dropping parameter values so varying epoch
-// timestamps or cursors share one shape).
-func urlShape(raw string) (host, shape string) {
-	if raw == "" {
-		return "", ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		path, _, _ := strings.Cut(raw, "?")
-		return "", path
-	}
-	host = u.Host
-	if u.RawQuery == "" {
-		return host, u.Path
-	}
-	parts := strings.Split(u.RawQuery, "&")
-	keys := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		k, _, _ := strings.Cut(p, "=")
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	keys = slices.Compact(keys)
-	return host, u.Path + "?" + strings.Join(keys, "&")
-}
-
-func headerCaseInsensitive(h map[string]string, name string) string {
-	if v, ok := h[name]; ok {
-		return v
-	}
-	for k, v := range h {
-		if strings.EqualFold(k, name) {
-			return v
-		}
-	}
-	return ""
-}
-
-// mongoRequestShape extracts a compact command/collection signature from the
-// first Mongo request so repeated polls on the same collection (e.g.
-// findAndModify ptw_endpoints) share one shape regardless of varying query
-// timestamps.
-func mongoRequestShape(reqs []models.MongoRequest) string {
-	if len(reqs) == 0 {
-		return ""
-	}
-	switch msg := reqs[0].Message.(type) {
-	case *models.MongoOpMessage:
-		if len(msg.Sections) == 0 {
-			return ""
-		}
-		return mongoSectionCommand(msg.Sections[0])
-	case *models.MongoOpQuery:
-		return "query:" + msg.FullCollectionName
-	case *models.MongoOpUpdate:
-		return "update:" + msg.FullCollectionName
-	case *models.MongoOpInsert:
-		return "insert:" + msg.FullCollectionName
-	case *models.MongoOpDelete:
-		return "delete:" + msg.FullCollectionName
-	case *models.MongoOpGetMore:
-		return "getmore:" + msg.FullCollectionName
-	}
-	return ""
-}
-
-// mongoSectionCommand extracts the leading `"cmd":"target"` or `"cmd":val`
-// pair from a serialized OP_MSG section string.
-func mongoSectionCommand(section string) string {
-	s := section
-	if idx := strings.Index(s, "msg:"); idx >= 0 {
-		s = s[idx+4:]
-	}
-	start := strings.IndexByte(s, '{')
-	if start < 0 {
-		if len(s) > 64 {
-			return s[:64]
-		}
-		return s
-	}
-	s = strings.TrimSpace(s[start+1:])
-	// Read the first key:value pair up to the first ',' or '}'.
-	end := strings.IndexAny(s, ",}")
-	if end >= 0 {
-		s = s[:end]
-	}
-	s = strings.TrimSpace(s)
-	if len(s) > 96 {
-		s = s[:96]
-	}
-	return s
 }
