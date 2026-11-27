@@ -135,6 +135,12 @@ type payloadOnDisk struct {
 	// method, path, and fingerprint headers only) needed to run
 	// AnsweredByPassThrough after Spec.HTTPReq is dropped.
 	httpPassThrough *httpPassThroughMeta
+	// bgShape and specificBgShape are BackgroundShapeKey's and
+	// SpecificBackgroundShapeKey's, computed while the payload is still in
+	// memory so index reads (IndexTestSetMocks) keep the exact same request
+	// shapes as whole mocks.
+	bgShape         string
+	specificBgShape string
 }
 
 // onDiskPredicates is every registry whose predicates read a mock's payload;
@@ -169,6 +175,8 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 	d.authored = m.Spec.Authored != nil
 	d.replaces = m.Spec.Authored.replaces()
 	d.httpPassThrough = extractHTTPPassThrough(m)
+	d.bgShape = strings.Clone(BackgroundShapeKey(m))
+	d.specificBgShape = strings.Clone(SpecificBackgroundShapeKey(m))
 	if f := m.Spec.Fault; f != nil {
 		kept := *f
 		kept.Observed = strings.Clone(f.Observed)
@@ -347,7 +355,7 @@ func (m *Mock) IndexEntryBytes() int64 {
 	}
 	d := m.onDisk
 	// d.at.Name is m.Name's string, not a copy.
-	n += str(d.summary) + str(d.target) + str(d.fingerprint)
+	n += str(d.summary) + str(d.target) + str(d.fingerprint) + str(d.bgShape) + str(d.specificBgShape)
 	if f := d.fault; f != nil {
 		n += int(unsafe.Sizeof(*f)) + str(f.Observed)
 	}

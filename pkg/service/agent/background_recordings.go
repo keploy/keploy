@@ -16,14 +16,17 @@ import (
 )
 
 // Bounds for derived background recordings (when mappings.yaml is absent and
-// DeriveBackgroundFromWindows is set). In a long continuous recording with
-// late test windows, tens or hundreds of thousands of outside-window mocks
-// may live in DiskMocks; retaining them all decoded in MockManager.background
-// defeats DiskMocks and OOM-kills the replay sidecar.
+// DeriveBackgroundFromWindows is set). Uses the exact same per-tier entry caps
+// as the replayer's windowBgTracker (256 startup + 256 worker = 512 total, 8
+// per shape, 64 startup head reserve) plus an OOM safety byte ceiling so
+// standalone agent derivation matches persisted mappings.yaml.
 var (
 	// derivedBgMaxEntries caps total derived background recordings retained
-	// in RAM across all kinds.
+	// in RAM across both startup and worker tiers.
 	derivedBgMaxEntries = 512
+	// derivedBgMaxPerTier caps entries per tier (startup and worker), matching
+	// the replayer's windowBgTracker.
+	derivedBgMaxPerTier = 256
 	// derivedBgMaxBytes caps total estimated decoded RAM retained for derived
 	// background recordings across all kinds.
 	derivedBgMaxBytes int64 = 8 << 20 // 8 MiB
@@ -87,15 +90,31 @@ func derivedBackgroundRecordingsWith(windows []models.TestWindow, recordedFirstS
 	if len(windows) == 0 {
 		return nil, nil
 	}
-	classifier := models.NewWindowClassifier(windows)
+	classifier := models.NewWindowClassifierForBackground(windows, models.BackgroundWindowOptions{
+		RecordedWindows:    windows,
+		RecordedFirstStart: recordedFirstStart,
+		RecordedStartKnown: !recordedFirstStart.IsZero(),
+	})
 	tracker := newPrevCallTracker()
 	seenName := make(map[nameHash]struct{})
-	collector := newDerivedBgCollector(
-		derivedBgMaxEntries,
-		derivedBgMaxBytes,
+	tierMaxEntries := derivedBgMaxPerTier
+	if half := derivedBgMaxEntries / 2; half > 0 && half < tierMaxEntries {
+		tierMaxEntries = half
+	}
+	tierMaxBytes := derivedBgMaxBytes / 2
+	startupCol := newDerivedBgCollector(
+		tierMaxEntries,
+		tierMaxBytes,
 		derivedBgMaxPerShape,
 		derivedBgHeadReserve,
 		derivedBgHeadReserveBytes,
+	)
+	workerCol := newDerivedBgCollector(
+		tierMaxEntries,
+		tierMaxBytes,
+		derivedBgMaxPerShape,
+		0,
+		0,
 	)
 
 	err := streamRecordedMerged(resident, disks, func(mk *models.Mock) bool {
@@ -110,29 +129,62 @@ func derivedBackgroundRecordingsWith(windows []models.TestWindow, recordedFirstS
 		if mk.Name == "" {
 			return true
 		}
+		kind, _ := classifier.ClassifyForBackground(mk, recordedFirstStart)
+		if kind == models.WindowBgNone {
+			return true
+		}
 		nh := hashName(mk.Name)
 		if _, dup := seenName[nh]; dup {
 			return true
 		}
 		seenName[nh] = struct{}{}
-		kind, _ := classifier.ClassifyForBackground(mk, recordedFirstStart)
-		if kind == models.WindowBgNone {
-			return true
+		if kind == models.WindowBgStartup {
+			startupCol.add(mk, from)
+		} else {
+			workerCol.add(mk, from)
 		}
-		collector.add(mk, from)
 		return true
 	})
 	if err != nil {
 		return nil, err
 	}
-	if st := collector.col.Stats(); st.DroppedByCap > 0 && logger != nil {
-		logger.Info("agent derived background collector reached capacity cap; dropped oldest shapes by recency while preserving active pollers",
-			zap.Int("kept", st.Kept),
-			zap.Int("distinctShapes", st.DistinctShapes),
-			zap.Int("droppedByCap", st.DroppedByCap),
-			zap.Int("droppedShapes", st.DroppedShapes))
+	logDrop := func(tier string, st models.DerivedBgStats) {
+		if st.DroppedByCap > 0 && logger != nil {
+			logger.Info("agent derived background collector reached capacity cap; dropped least-recently-seen sparse shapes first, then oldest shapes by recency",
+				zap.String("tier", tier),
+				zap.Int("kept", st.Kept),
+				zap.Int("distinctShapes", st.DistinctShapes),
+				zap.Int("droppedByCap", st.DroppedByCap),
+				zap.Int("droppedShapes", st.DroppedShapes))
+		}
 	}
-	return collector.recordings(), nil
+	logDrop("startup", startupCol.col.Stats())
+	logDrop("worker", workerCol.col.Stats())
+
+	sRecs := startupCol.recordings()
+	wRecs := workerCol.recordings()
+	if len(sRecs) == 0 {
+		return wRecs, nil
+	}
+	if len(wRecs) == 0 {
+		return sRecs, nil
+	}
+	out := make([]models.BackgroundRecording, 0, len(sRecs)+len(wRecs))
+	out = append(out, sRecs...)
+	out = append(out, wRecs...)
+	slices.SortStableFunc(out, func(a, b models.BackgroundRecording) int {
+		if cmp := a.Mock.Spec.ReqTimestampMock.Compare(b.Mock.Spec.ReqTimestampMock); cmp != 0 {
+			return cmp
+		}
+		if a.Mock.Name < b.Mock.Name {
+			return -1
+		}
+		if a.Mock.Name > b.Mock.Name {
+			return 1
+		}
+		return 0
+	})
+	return out, nil
 }
 
 // bgCallTime is what bounds a background recording's recorded span, of one

@@ -682,6 +682,11 @@ type Replayer struct {
 	// markNoVerdict. A stop that takes the set to USER_ABORT skips the rules
 	// that leave it not judged, and Start's exit code reads these.
 	noVerdictSets map[string][]string
+	// deletedTestWindows remembers recorded test windows removed mid-run by
+	// --must-pass so reruns still classify against the whole recorded schedule
+	// and never promote a deleted failing test's own calls as background.
+	deletedWinMu       sync.Mutex
+	deletedTestWindows map[string][]models.TestWindow
 
 	logger          *zap.Logger
 	testDB          TestDB
@@ -1808,6 +1813,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			}
 
 			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
+			r.rememberDeletedTestWindows(ctx, testSet, failedTcIDs)
 
 			if err := r.testDB.DeleteTests(ctx, testSet, failedTcIDs); err != nil {
 				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
@@ -2910,12 +2916,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// mocks are loaded (loadTestSetMocks), or below, before the tests run,
 	// when they are not loaded here.
 	var mockLookup map[string]mockDisplayInfo
+	var mappingExists func() (bool, error)
+	if r.mappingDB != nil {
+		mappingExists = sync.OnceValues(func() (bool, error) { return r.mappingDB.Exists(ctx, testSetID) })
+	}
 	// Observe outside-window startup/worker candidates during RunTestSet's
-	// already-existing single mock pass so creating a new mappings.yaml causes
-	// zero extra decodes of mocks.yaml.
+	// already-existing single mock pass so deriving once in the replayer causes
+	// zero extra decodes of mocks.yaml and zero memory overhead when the set's
+	// mappings.yaml is already stamped, non-empty, or user-edited.
 	var windowBg *windowBgTracker
+	var windowBgExisting *models.Mapping
 	if !provenswitch.On() && r.mappingDB != nil {
-		windowBg = newWindowBgTracker(testCases, r.recordedFirstTestStart(runTestSetCtx, testSetID), r.logger, testSetID)
+		if allowBg, _, existingMap := r.windowBgEligibility(runTestSetCtx, testSetID, mappingExists); allowBg {
+			windowBgExisting = existingMap
+			windowBg = newWindowBgTracker(testCases, r.backgroundWindowOptions(runTestSetCtx, testSetID, testCases), r.logger, testSetID)
+		}
 	}
 	addKinds := func(mocks []*models.Mock) {
 		windowBg.observeSlice(mocks)
@@ -3122,6 +3137,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// from post-plan ownership (r.exact.worker and trusted r.exact.pool
 		// startup mocks), never excusing a test-owned mock in r.exact.owned.
 		backgroundExcluded = r.backgroundExcludedMockNames(ctx, testSetID, isMappingEnabled, fromWindows, startupMockNames)
+		if !r.exactServing() && isMappingEnabled {
+			backgroundExcluded = r.expandBackgroundExclusions(ctx, testSetID, mappingExists, windowBg, expectedTestMockMappings, backgroundExcluded, filtered, unfiltered)
+		}
 		for _, n := range backgroundExcluded {
 			reusableMockNames[n] = true
 		}
@@ -3351,7 +3369,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, perTestRegion, useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, perTestRegion, useMappingBased, r.recordedSetShapeWith(ctx, testSetID, testCases, windowBg, windowBgExisting, expectedTestMockMappings), nil)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -3540,7 +3558,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, perTestRegion, useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, perTestRegion, useMappingBased, r.recordedSetShapeWith(ctx, testSetID, testCases, windowBg, windowBgExisting, expectedTestMockMappings), nil)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -4067,8 +4085,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Not built with the mocks above: they were not loaded here. A base
 		// path leaves it unread: with nothing mocked, the report has no mock
 		// to describe.
-		windowBg.markPass()
-		mockLookup = r.readMockLookupWith(runTestSetCtx, testSetID, windowBg.observe)
+		var lookupErr error
+		mockLookup, lookupErr = r.readMockLookupWith(runTestSetCtx, testSetID, windowBg.observe)
+		if lookupErr == nil {
+			windowBg.markPass()
+		} else {
+			windowBg.reset()
+		}
 	}
 	r.wholeSetIdx = newWholeSetMockIndex(mockLookup, expectedTestMockMappings, r.exact.ownersOf(), testCases)
 	r.unexercisedMocksByTest = map[string][]string{}
@@ -7767,10 +7790,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		r.logger.Warn("skipping mock pruning: this run's consumed-mock set is not trustworthy enough to delete against, so recorded mocks are preserved", fields...)
 	}
-	var mappingExists func() (bool, error)
-	if r.mappingDB != nil {
-		mappingExists = sync.OnceValues(func() (bool, error) { return r.mappingDB.Exists(ctx, testSetID) })
-	}
+	// Keep window-derived startup/worker background recordings BEFORE
+	// RemoveUnusedMocks prunes mocks.yaml ONLY when this run is eligible to
+	// persist them (create or heal mappings.yaml), and gate the heal below on
+	// the exact same condition so a heal can never write a mock name the same
+	// run's prune deleted.
+	willPersistBg := r.config.Test.UpdateTestMapping || (len(noAnswerTests) == 0 && !internalErr && resultsComplete && !appUnreachable)
 	if prune {
 		// Keep the set's background recordings (worker:, startup:), consumed or
 		// not: no test owns one, so no test's consumption keeps it, and the next
@@ -7780,28 +7805,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				passingTotalConsumedMocks[name] = models.MockState{Name: name}
 			}
 		}
-		// Keep window-derived startup/worker background recordings BEFORE
-		// RemoveUnusedMocks prunes mocks.yaml on a run that will create or
-		// heal mappings.yaml, so between-window pollers past the startup
-		// cutoff are preserved for both mappings.yaml and later passes. Do not
-		// hold orphan mocks when mappings.yaml creation is held (e.g. a test
-		// got no answer under default UpdateTestMapping=false).
-		willPersistBg := r.config.Test.UpdateTestMapping || (len(noAnswerTests) == 0 && !internalErr && resultsComplete && !appUnreachable)
 		if !provenswitch.On() && r.mappingDB != nil && windowBg != nil && willPersistBg {
 			if allowBg, _, existingMap := r.windowBgEligibility(runTestSetCtx, testSetID, mappingExists); allowBg {
 				if !windowBg.sawPass {
 					if err := r.eachSetMock(runTestSetCtx, testSetID, true, func(m *models.Mock, _ bool) {
 						windowBg.observe(m)
 					}); err != nil {
+						windowBg.reset()
 						r.logger.Warn("failed to stream mocks before pruning while deriving window background keep-set",
 							zap.String("testSetID", testSetID), zap.Error(err))
 					} else {
 						windowBg.markPass()
 					}
 				}
-				for _, name := range windowBg.keepNames(actualTestMockMappings, existingMap) {
-					if _, exists := passingTotalConsumedMocks[name]; !exists {
-						passingTotalConsumedMocks[name] = models.MockState{Name: name}
+				if windowBg.sawPass {
+					for _, name := range windowBg.keepNames(actualTestMockMappings, existingMap) {
+						if _, exists := passingTotalConsumedMocks[name]; !exists {
+							passingTotalConsumedMocks[name] = models.MockState{Name: name}
+						}
 					}
 				}
 			}
@@ -8191,7 +8212,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				r.backfillStartupSection(ctx, testSetID, mappingDoc)
 			}
 		}
-		if !provenswitch.On() {
+		if !provenswitch.On() && willPersistBg {
 			if allowBg, healing, existingMap := r.windowBgEligibility(runTestSetCtx, testSetID, mappingExists); allowBg && healing {
 				r.healKeployTestMappingWorker(ctx, testSetID, existingMap, actualTestMockMappings, windowBg, testCases)
 			}
@@ -8199,25 +8220,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if shouldWriteMappings {
-		// When creating a NEW mappings.yaml or healing a keploy-written one
-		// (Source == "keploy test") whose worker: list is empty, persist
-		// bounded, legible window-derived startup: (before earliest recorded
-		// test) and worker: (between/after test windows or idle answers)
-		// entries so Pass 2 and later cloud replays keep the outside-window
-		// background recordings Pass 1 derived in RAM. User-edited files and
-		// files with non-empty worker: are never touched.
-		if !provenswitch.On() {
+		// When creating a NEW mappings.yaml or healing an unstamped
+		// keploy-written one (Source == "keploy test") whose worker: list is
+		// empty, persist bounded, legible window-derived startup: (before
+		// earliest recorded test) and worker: (between adjacent recorded test
+		// windows or idle answers) entries and stamp BackgroundDerived = true
+		// so later user edits removing worker: entries are preserved.
+		var derivedStartupCount, derivedWorkerCount int
+		var healedOnWrite bool
+		if !provenswitch.On() && willPersistBg {
 			if allowBg, healing, existingMap := r.windowBgEligibility(runTestSetCtx, testSetID, mappingExists); allowBg {
 				if windowBg != nil && windowBg.sawPass {
-					windowBg.apply(mappingDoc, actualTestMockMappings, existingMap)
+					derivedStartupCount, derivedWorkerCount = windowBg.apply(mappingDoc, actualTestMockMappings, existingMap)
 				} else {
-					_ = r.populateWindowDerivedBackground(runTestSetCtx, testSetID, testCases, mappingDoc, actualTestMockMappings, existingMap)
+					beforeS, beforeW := len(mappingDoc.Startup), len(mappingDoc.Worker)
+					if err := r.populateWindowDerivedBackground(runTestSetCtx, testSetID, testCases, mappingDoc, actualTestMockMappings, existingMap); err == nil {
+						derivedStartupCount = len(mappingDoc.Startup) - beforeS
+						derivedWorkerCount = len(mappingDoc.Worker) - beforeW
+					}
 				}
-				if healing && len(mappingDoc.Worker) > 0 {
-					r.logger.Info("Healed keploy-written mappings.yaml with window-derived background worker entries",
-						zap.String("testSetID", testSetID),
-						zap.Int("workerMocks", len(mappingDoc.Worker)))
-				}
+				healedOnWrite = healing && derivedWorkerCount > 0
 			}
 		}
 		// Only a set that holds connection failures can have mapping entries
@@ -8283,7 +8305,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.String("testSetID", testSetID),
 				zap.Int("numTests", len(mappingDoc.TestCases)),
 				zap.Int("startupMocks", len(mappingDoc.Startup)),
-				zap.Int("workerMocks", len(mappingDoc.Worker)))
+				zap.Int("workerMocks", len(mappingDoc.Worker)),
+				zap.Int("derivedStartupMocks", derivedStartupCount),
+				zap.Int("derivedWorkerMocks", derivedWorkerCount))
+			if healedOnWrite {
+				r.logger.Info("Healed unstamped keploy-written mappings.yaml (source: keploy test, empty worker:) with window-derived background entries and stamped background_derived: true so user removals of worker: entries are preserved",
+					zap.String("testSetID", testSetID),
+					zap.Int("derivedWorkerMocks", derivedWorkerCount),
+					zap.Int("derivedStartupMocks", derivedStartupCount))
+			}
 		}
 	}
 
@@ -8588,19 +8618,15 @@ type skippedDocs struct {
 	windowed []models.WindowedMock
 }
 
-// readMockLookup reads the report's mock lookup for a test set whose mocks
+// readMockLookupWith reads the report's mock lookup for a test set whose mocks
 // RunTestSet does not load: its per-test and session mocks, in one read when
-// the store can, else in one read per pool (eachSetMock). A read that fails
-// leaves its pool out of the lookup. A name in both pools keeps the session
-// mock's entry, as newMockLookup does.
-func (r *Replayer) readMockLookup(ctx context.Context, testSetID string) map[string]mockDisplayInfo {
-	return r.readMockLookupWith(ctx, testSetID, nil)
-}
-
-func (r *Replayer) readMockLookupWith(ctx context.Context, testSetID string, observe func(*models.Mock)) map[string]mockDisplayInfo {
+// the store can, else in one read per pool (eachSetMock), optionally calling
+// observe on each mock. Returns any read error so callers do not treat a
+// partial pass as complete for background derivation.
+func (r *Replayer) readMockLookupWith(ctx context.Context, testSetID string, observe func(*models.Mock)) (map[string]mockDisplayInfo, error) {
 	lookup := map[string]mockDisplayInfo{}
 	if r.mockDB == nil {
-		return lookup
+		return lookup, nil
 	}
 	err := r.eachSetMock(ctx, testSetID, false, func(m *models.Mock, _ bool) {
 		addMockDisplayInfo(lookup, []*models.Mock{m})
@@ -8609,10 +8635,11 @@ func (r *Replayer) readMockLookupWith(ctx context.Context, testSetID string, obs
 		}
 	})
 	if err != nil {
-		r.logger.Debug("failed to read mocks for the report's mock lookup; the report will not describe them",
+		r.logger.Warn("failed to read mocks for the report's mock lookup; the report will not describe them and window-derived background pass was skipped",
 			zap.String("testSetID", testSetID), zap.Error(err))
+		return lookup, err
 	}
-	return lookup
+	return lookup, nil
 }
 
 // newMockLookup builds the report's mock lookup from a test set's per-test and
@@ -8732,6 +8759,50 @@ func (r *Replayer) recordedFirstTestStart(ctx context.Context, testSetID string)
 	return recorded
 }
 
+func (r *Replayer) rememberDeletedTestWindows(ctx context.Context, testSetID string, deletedIDs []string) {
+	if r == nil || r.testDB == nil || len(deletedIDs) == 0 {
+		return
+	}
+	tcs, err := r.testDB.GetTestCases(ctx, testSetID)
+	if err != nil || len(tcs) == 0 {
+		return
+	}
+	want := make(map[string]bool, len(deletedIDs))
+	for _, id := range deletedIDs {
+		want[id] = true
+	}
+	var wins []models.TestWindow
+	for _, tc := range tcs {
+		if tc == nil || !want[tc.Name] {
+			continue
+		}
+		if w := models.RecordedWindow(tc); !w.Start.IsZero() {
+			wins = append(wins, w)
+		}
+	}
+	if len(wins) == 0 {
+		return
+	}
+	r.deletedWinMu.Lock()
+	if r.deletedTestWindows == nil {
+		r.deletedTestWindows = make(map[string][]models.TestWindow)
+	}
+	r.deletedTestWindows[testSetID] = append(r.deletedTestWindows[testSetID], wins...)
+	r.deletedWinMu.Unlock()
+}
+
+func (r *Replayer) deletedWindowsFor(testSetID string) []models.TestWindow {
+	if r == nil {
+		return nil
+	}
+	r.deletedWinMu.Lock()
+	defer r.deletedWinMu.Unlock()
+	if len(r.deletedTestWindows[testSetID]) == 0 {
+		return nil
+	}
+	return append([]models.TestWindow(nil), r.deletedTestWindows[testSetID]...)
+}
+
 // recordedSetShape is the shape a staging call sends for testSetID: that of its
 // test cases, with the first test moved back to the earliest test the set ever
 // recorded when the TestDB keeps it (RecordedStartReader). The agent stages
@@ -8739,11 +8810,34 @@ func (r *Replayer) recordedFirstTestStart(ctx context.Context, testSetID string)
 // test of the run reads the same startup mocks, so a late first test would
 // hand them most of the recording.
 func (r *Replayer) recordedSetShape(ctx context.Context, testSetID string, testCases []*models.TestCase) recordedSetShape {
+	return r.recordedSetShapeWith(ctx, testSetID, testCases, nil, nil, nil)
+}
+
+func (r *Replayer) recordedSetShapeWith(ctx context.Context, testSetID string, testCases []*models.TestCase, windowBg *windowBgTracker, existingMap *models.Mapping, expected map[string][]models.MockEntry) recordedSetShape {
 	shape := recordedSetShapeOf(testCases)
 	shape.background, shape.startup, shape.deriveBackground = r.backgroundMocksOf(ctx, testSetID)
 	shape.sessionCalls = models.DeclaredSessionCallsToHand()
 	if recorded := r.recordedFirstTestStart(ctx, testSetID); !recorded.IsZero() && (shape.firstTestStart.IsZero() || recorded.Before(shape.firstTestStart)) {
 		shape.firstTestStart = recorded
+	}
+	if !provenswitch.On() && shape.deriveBackground && windowBg != nil && windowBg.sawPass {
+		// Derive ONCE in the replayer and hand that exact set to the agent via
+		// BackgroundMocks so Pass 1 in RAM and the persisted mappings.yaml
+		// always agree (same collector, same caps, same test-owned exclusions).
+		derived := windowBg.keepNamesExcludingExpected(expected, existingMap)
+		if len(derived) > 0 {
+			seen := make(map[string]bool, len(shape.background)+len(derived))
+			for _, n := range shape.background {
+				seen[n] = true
+			}
+			for _, n := range derived {
+				if !seen[n] {
+					seen[n] = true
+					shape.background = append(shape.background, n)
+				}
+			}
+		}
+		shape.deriveBackground = false
 	}
 	return shape
 }
@@ -8871,7 +8965,7 @@ func (r *Replayer) backgroundMocksOf(ctx context.Context, testSetID string) (all
 		if m != nil {
 			fileWorker, startupEntries = m.Worker, m.Startup
 			worker = models.WithoutWorkerRuleEntries(m.Worker)
-			if !provenswitch.On() && r.exact == nil && isHealableKeployTestMapping(m) {
+			if !provenswitch.On() && r.exact == nil && r.isHealableKeployTestMappingDoc(ctx, testSetID, m) {
 				derive = true
 			}
 		} else if r.exact == nil {

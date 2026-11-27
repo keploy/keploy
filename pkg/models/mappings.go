@@ -353,6 +353,12 @@ type Mapping struct {
 	// only keploy record wrote, in one keploy test wrote before it said so,
 	// and in one a cloud store handed back (which keeps no source).
 	Source string `json:"source,omitempty" yaml:"source,omitempty" bson:"source,omitempty"`
+	// BackgroundDerived marks that keploy has already run window-based
+	// background derivation for this mappings.yaml (at creation or on a
+	// one-time heal). Once true, keploy never re-derives or re-heals an empty
+	// worker: list so user edits that remove every worker: entry stay intact.
+	// Omitted when false so existing files round-trip byte-identically.
+	BackgroundDerived bool `json:"backgroundDerived,omitempty" yaml:"background_derived,omitempty" bson:"background_derived,omitempty"`
 	// Groups are, under the proven switch, the concurrency groups the
 	// entries name (MockEntry.Group): the sets of tests whose requests were
 	// open together while a mock was recorded. Omitted for a set recorded

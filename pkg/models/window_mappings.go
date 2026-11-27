@@ -238,6 +238,32 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 	return DeriveWindowMappingsWith(windows, mocks, DeriveOptions{})
 }
 
+// BackgroundWindowOptions supplies recorded-schedule facts so
+// WindowClassifier.ClassifyForBackground fails closed whenever earlier or
+// middle test windows may have been removed.
+type BackgroundWindowOptions struct {
+	// RecordedWindows, when non-empty, is the COMPLETE schedule of every test
+	// window ever recorded for this set (including removed, deduped, sealed, or
+	// previously-replayed cases). When provided, any call inside, in-flight
+	// into, or edge-owned by any recorded window is never promoted, and a gap
+	// between two held windows is promoted only when those two windows are
+	// adjacent in RecordedWindows with no removed test between them.
+	RecordedWindows []TestWindow
+	// RecordedFirstStart is the earliest test start the TestDB remembers
+	// (RecordedStartReader). Ignored when RecordedStartUnreadable is true.
+	RecordedFirstStart time.Time
+	// RecordedStartKnown is true when the TestDB authoritatively reported
+	// RecordedFirstStart (nil error and non-zero time).
+	RecordedStartKnown bool
+	// RecordedStartUnreadable is true when RecordedStartReader returned an
+	// error, forcing the prefix before the first held window to fail closed.
+	RecordedStartUnreadable bool
+	// ScheduleIncomplete is true when the TestDB could not supply the full
+	// recorded schedule (e.g. RecordedWindowsReader errored), forcing all
+	// window-derived classification to fail closed.
+	ScheduleIncomplete bool
+}
+
 // WindowClassifier classifies individual mocks as worker-scope (outside every
 // recorded test window, or idle answers) using the exact same rules as
 // DeriveWindowMappings, in O(log W) time and O(W) memory where W is the number
@@ -245,12 +271,172 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 type WindowClassifier struct {
 	ws    []TestWindow
 	sched *WindowSchedule
+
+	// Precomputed fail-closed background schedule state (populated by
+	// NewWindowClassifierForBackground; lazy/defaulted by NewWindowClassifier).
+	hasBgOpts       bool
+	bgDisabled      bool
+	allSched        *WindowSchedule
+	allHeld         []bool
+	hasFullSchedule bool
+	prefixSafe      bool
+	effectiveFirst  time.Time
+	earlierMissing  bool
+	// sequentialGapSafe[i] (for 1 <= i < len(ws)) reports whether held window
+	// ws[i] is provably adjacent to ws[0..i-1] with no removed test in between
+	// (when no full RecordedWindows schedule was supplied).
+	sequentialGapSafe []bool
+	// sequentialPrefixSafe reports whether ws[0] is provably the first
+	// sequential test recorded (e.g. "test-1" / "tc-1").
+	sequentialPrefixSafe bool
 }
 
 // NewWindowClassifier prepares a streaming worker-scope classifier for windows.
 func NewWindowClassifier(windows []TestWindow) *WindowClassifier {
 	sched := NewWindowSchedule(windows)
-	return &WindowClassifier{ws: sched.windows, sched: sched}
+	c := &WindowClassifier{ws: sched.windows, sched: sched, allSched: sched}
+	c.initSequentialAdjacency()
+	return c
+}
+
+// NewWindowClassifierForBackground prepares a streaming classifier with
+// fail-closed recorded-schedule rules for window-derived background collection.
+func NewWindowClassifierForBackground(held []TestWindow, opts BackgroundWindowOptions) *WindowClassifier {
+	sched := NewWindowSchedule(held)
+	c := &WindowClassifier{
+		ws:        sched.windows,
+		sched:     sched,
+		allSched:  sched,
+		hasBgOpts: true,
+	}
+	c.initSequentialAdjacency()
+	if len(c.ws) == 0 || opts.ScheduleIncomplete {
+		c.bgDisabled = true
+		return c
+	}
+
+	heldFirst := c.ws[0].Start
+	if len(opts.RecordedWindows) > 0 {
+		c.hasFullSchedule = true
+		type winKey struct {
+			name       string
+			start, end int64
+		}
+		keyOf := func(w TestWindow) winKey {
+			end := w.End
+			if end.IsZero() || end.Before(w.Start) {
+				end = w.Start
+			}
+			return winKey{name: w.TestCase, start: w.Start.UnixNano(), end: end.UnixNano()}
+		}
+		heldKeys := make(map[winKey]bool, len(c.ws))
+		for _, w := range c.ws {
+			heldKeys[keyOf(w)] = true
+		}
+		merged := make([]TestWindow, 0, len(opts.RecordedWindows)+len(c.ws))
+		seen := make(map[winKey]bool, len(opts.RecordedWindows)+len(c.ws))
+		for _, w := range opts.RecordedWindows {
+			if w.Start.IsZero() {
+				continue
+			}
+			k := keyOf(w)
+			if !seen[k] {
+				seen[k] = true
+				merged = append(merged, w)
+			}
+		}
+		for _, w := range c.ws {
+			k := keyOf(w)
+			if !seen[k] {
+				seen[k] = true
+				merged = append(merged, w)
+			}
+		}
+		c.allSched = NewWindowSchedule(merged)
+		c.allHeld = make([]bool, len(c.allSched.windows))
+		for i, w := range c.allSched.windows {
+			c.allHeld[i] = heldKeys[keyOf(w)]
+		}
+		if !opts.RecordedStartUnreadable && len(c.allSched.windows) > 0 {
+			allFirst := c.allSched.windows[0].Start
+			c.effectiveFirst = allFirst
+			if opts.RecordedStartKnown && !opts.RecordedFirstStart.IsZero() && opts.RecordedFirstStart.Before(c.effectiveFirst) {
+				c.effectiveFirst = opts.RecordedFirstStart
+			}
+			c.earlierMissing = c.effectiveFirst.Before(heldFirst)
+			c.prefixSafe = true
+		}
+		return c
+	}
+
+	// No full RecordedWindows supplied: use RecordedStartReader if known, or
+	// sequential 1-based test ID proof; otherwise fail closed.
+	if opts.RecordedStartUnreadable {
+		c.prefixSafe = false
+		return c
+	}
+	if opts.RecordedStartKnown && !opts.RecordedFirstStart.IsZero() {
+		c.earlierMissing = opts.RecordedFirstStart.Before(heldFirst)
+		c.effectiveFirst = heldFirst
+		if c.earlierMissing {
+			c.effectiveFirst = opts.RecordedFirstStart
+		}
+		c.prefixSafe = true
+		return c
+	}
+	if c.sequentialPrefixSafe {
+		c.effectiveFirst = heldFirst
+		c.prefixSafe = true
+	}
+	return c
+}
+
+// parseSequentialTestID parses a 1-based Keploy sequential recorded test name
+// of the form "test-<N>" (pkg/platform/yaml/testdb NamingSequential) where
+// N >= 1 and has no leading zeros. Descriptive slug names such as
+// "get-cluster-list-1" use per-slug counters rather than a global recording
+// order, so they return (0, false) and fail closed unless the TestDB supplies
+// the complete recorded schedule via RecordedWindows.
+func parseSequentialTestID(name string) (num int, ok bool) {
+	suffix, found := strings.CutPrefix(name, "test-")
+	if !found || suffix == "" || (len(suffix) > 1 && suffix[0] == '0') {
+		return 0, false
+	}
+	n, err := strconv.Atoi(suffix)
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
+}
+
+func (c *WindowClassifier) initSequentialAdjacency() {
+	n := len(c.ws)
+	if n == 0 {
+		return
+	}
+	seq0, ok0 := parseSequentialTestID(c.ws[0].TestCase)
+	if ok0 && seq0 == 1 {
+		c.sequentialPrefixSafe = true
+	}
+	if n < 2 {
+		return
+	}
+	c.sequentialGapSafe = make([]bool, n)
+	allSeqSoFar := ok0
+	maxSeq := seq0
+	for i := 1; i < n; i++ {
+		seq, ok := parseSequentialTestID(c.ws[i].TestCase)
+		if !ok || !allSeqSoFar {
+			allSeqSoFar = false
+			continue
+		}
+		if seq == maxSeq+1 {
+			c.sequentialGapSafe[i] = true
+		}
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
 }
 
 // IsWorker reports whether DeriveWindowMappings(windows, ...) would place m in
@@ -294,75 +480,129 @@ const (
 	// known missing).
 	WindowBgOutsideWindow
 	// WindowBgIdleInWindow means the mock is a parser-declared idle answer
-	// (rule D4, models.IsIdleAnswer) recorded during a test window (or during a
-	// removed-test gap), so callers must NOT label it "outside every recorded
+	// (models.IsIdleAnswer) recorded during a test window (or during an
+	// unwindowed gap), so callers must NOT label it "outside every recorded
 	// test window".
 	WindowBgIdleInWindow
 )
 
-// ClassifyForBackground classifies m against c's held test windows and the
+// ClassifyForBackground classifies m against c's held (and, when supplied via
+// NewWindowClassifierForBackground, complete recorded) test windows and the
 // TestDB's earliest recorded test start (recordedFirstStart, zero when unknown
 // or unchanged).
 //
-// Fail-closed rule when earlier tests were removed (recordedFirstStart < first
-// held window start):
-//   - mocks strictly before recordedFirstStart -> WindowBgStartup
-//   - non-idle mocks in [recordedFirstStart, firstHeldStart) or after the last
-//     held window -> WindowBgNone (never promoted; removed test windows may
-//     have owned them)
-//   - non-idle mocks strictly between two held windows and outside all held
-//     windows -> WindowBgOutsideWindow
-//   - parser-declared idle answers inside a held window (or removed-test gap)
-//     -> WindowBgIdleInWindow (with the overlapping window name when known).
+// Fail-closed rules:
+//   - any non-idle call inside a window, in-flight into one, or owned by the
+//     100us edge rule (WindowSchedule.EdgeDecision: EdgeOwned / EdgeLeftInFlight)
+//     -> WindowBgNone
+//   - prefix (< heldFirst): promoted to WindowBgStartup ONLY strictly before
+//     effectiveFirst when the recorded start is provably known (from the full
+//     recorded schedule, an authoritative RecordedStartReader, or a 1-based
+//     first sequential test like "test-1"). When unknown or unreadable -> fail
+//     closed (WindowBgNone)
+//   - gap between two held windows: promoted to WindowBgOutsideWindow ONLY when
+//     the bounding windows are provably adjacent in the recording (both held
+//     and adjacent in the full recorded schedule, or consecutive sequential IDs
+//     such as test-1 -> test-2). Any missing middle test or unprovable gap ->
+//     fail closed (WindowBgNone)
+//   - tail (>= heldLastEnd): always WindowBgNone
+//   - parser-declared idle answers (IsIdleAnswer) inside a window, removed-test
+//     gap, or tail -> WindowBgIdleInWindow (never falsely labeled "outside
+//     every recorded test window").
 func (c *WindowClassifier) ClassifyForBackground(m *Mock, recordedFirstStart time.Time) (WindowBackgroundKind, string) {
-	if c == nil || m == nil || len(c.ws) == 0 {
+	if c == nil || m == nil || len(c.ws) == 0 || c.bgDisabled {
 		return WindowBgNone, ""
 	}
 	w := NewWindowedMock(m)
 	if !w.TestMock || w.At.IsZero() {
 		return WindowBgNone, ""
 	}
+	allSched := c.allSched
+	if allSched == nil {
+		allSched = c.sched
+	}
+	allWS := allSched.windows
 	at := w.placed()
-	next := sort.Search(len(c.ws), func(i int) bool { return c.ws[i].Start.After(at) })
+	allNext := sort.Search(len(allWS), func(i int) bool { return allWS[i].Start.After(at) })
 	inWindow := false
 	inWindowName := ""
-	if next > 0 && !c.sched.maxEnd[next-1].Before(at) {
+	if allNext > 0 && !allSched.maxEnd[allNext-1].Before(at) {
 		inWindow = true
-		for i := next - 1; i >= 0; i-- {
-			if !c.ws[i].End.Before(at) {
-				inWindowName = c.ws[i].TestCase
+		for i := allNext - 1; i >= 0; i-- {
+			if !allWS[i].End.Before(at) {
+				inWindowName = allWS[i].TestCase
 				break
 			}
-			if c.sched.maxEnd[i].Before(at) {
+			if allSched.maxEnd[i].Before(at) {
 				break
 			}
 		}
 	}
-	if !inWindow && w.InFlight && next < len(c.ws) && c.sched.InFlightInto(w.At, w.Res, c.ws[next].Start) {
-		inWindow = true
-		inWindowName = c.ws[next].TestCase
+	if !inWindow && allNext < len(allWS) {
+		if (w.InFlight && allSched.InFlightInto(w.At, w.Res, allWS[allNext].Start)) ||
+			(!w.Res.IsZero() && !w.Res.Before(allWS[allNext].Start)) {
+			inWindow = true
+			inWindowName = allWS[allNext].TestCase
+		}
+	}
+	if !inWindow {
+		if edgeIdx, edgeOut := allSched.EdgeDecision(m); edgeOut == EdgeOwned || edgeOut == EdgeLeftInFlight {
+			inWindow = true
+			if edgeIdx >= 0 && edgeIdx < len(allWS) {
+				inWindowName = allWS[edgeIdx].TestCase
+			}
+		}
 	}
 
 	heldFirst := c.ws[0].Start
 	heldLastEnd := c.sched.maxEnd[len(c.ws)-1]
-	earlierMissing := !recordedFirstStart.IsZero() && recordedFirstStart.Before(heldFirst)
-	effectiveFirst := heldFirst
-	if earlierMissing {
-		effectiveFirst = recordedFirstStart
+
+	var prefixSafe, earlierMissing bool
+	var effectiveFirst time.Time
+	if c.hasBgOpts {
+		prefixSafe = c.prefixSafe
+		earlierMissing = c.earlierMissing
+		effectiveFirst = c.effectiveFirst
+	} else {
+		if !recordedFirstStart.IsZero() {
+			earlierMissing = recordedFirstStart.Before(heldFirst)
+			effectiveFirst = heldFirst
+			if earlierMissing {
+				effectiveFirst = recordedFirstStart
+			}
+			prefixSafe = true
+		} else if c.sequentialPrefixSafe {
+			effectiveFirst = heldFirst
+			prefixSafe = true
+		}
+	}
+
+	gapSafe := false
+	if !inWindow && !at.Before(heldFirst) && at.Before(heldLastEnd) {
+		if c.hasFullSchedule {
+			if allNext > 0 && allNext < len(allWS) && c.allHeld[allNext-1] && c.allHeld[allNext] {
+				gapSafe = true
+			}
+		} else {
+			heldNext := sort.Search(len(c.ws), func(i int) bool { return c.ws[i].Start.After(at) })
+			if heldNext > 0 && heldNext < len(c.ws) && c.sequentialGapSafe[heldNext] {
+				gapSafe = true
+			}
+		}
 	}
 
 	if w.Idle {
 		if inWindow {
 			return WindowBgIdleInWindow, inWindowName
 		}
-		if earlierMissing && !at.Before(recordedFirstStart) && at.Before(heldFirst) {
-			return WindowBgIdleInWindow, ""
-		}
-		if earlierMissing && at.After(heldLastEnd) {
-			return WindowBgIdleInWindow, ""
-		}
-		if m.Spec.ReqTimestampMock.Before(effectiveFirst) && at.Before(effectiveFirst) {
+		if prefixSafe && m.Spec.ReqTimestampMock.Before(effectiveFirst) && at.Before(effectiveFirst) {
 			return WindowBgStartup, ""
+		}
+		if earlierMissing && !at.Before(effectiveFirst) && at.Before(heldFirst) {
+			return WindowBgIdleInWindow, ""
+		}
+		if at.Before(heldFirst) || !at.Before(heldLastEnd) || !gapSafe {
+			return WindowBgIdleInWindow, ""
 		}
 		return WindowBgOutsideWindow, ""
 	}
@@ -370,17 +610,10 @@ func (c *WindowClassifier) ClassifyForBackground(m *Mock, recordedFirstStart tim
 	if inWindow {
 		return WindowBgNone, ""
 	}
-	if m.Spec.ReqTimestampMock.Before(effectiveFirst) && at.Before(effectiveFirst) {
+	if prefixSafe && m.Spec.ReqTimestampMock.Before(effectiveFirst) && at.Before(effectiveFirst) {
 		return WindowBgStartup, ""
 	}
-	// Fail closed (B2): never promote anything recorded at or after
-	// effectiveFirst unless it lies strictly between two windows the run
-	// actually holds. When earlier tests were removed, [recordedFirst,
-	// heldFirst) may hold removed tests' own calls; and after the last held
-	// window (at >= heldLastEnd), continuous recordings may hold later rounds'
-	// unwindowed traffic that must remain prunable and never promoted to
-	// worker:.
-	if at.Before(heldFirst) || !at.Before(heldLastEnd) {
+	if at.Before(heldFirst) || !at.Before(heldLastEnd) || !gapSafe {
 		return WindowBgNone, ""
 	}
 	return WindowBgOutsideWindow, ""

@@ -1,6 +1,7 @@
 package mapdb
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -163,6 +164,9 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	if mapping.Source != "" {
 		newMapping.Source = mapping.Source
 	}
+	// Preserve or set the one-time window-derived background stamp so a later
+	// write never clears it and undoes a user's removal of worker: entries.
+	newMapping.BackgroundDerived = existingConfig.BackgroundDerived || mapping.BackgroundDerived
 	// What keploy record recorded the set with (models.Mapping.RecordedWith):
 	// the set's, as the worker scope is, so replace-or-keep, whatever the
 	// switch. keploy test's whole-file write names none, and keeps it.
@@ -1181,6 +1185,175 @@ func (db *MappingDb) GetSource(ctx context.Context, testSetID string) (string, e
 func (db *MappingDb) GetMapping(ctx context.Context, testSetID string) (*models.Mapping, error) {
 	m, _, _, err := db.decodeMapping(ctx, testSetID)
 	return m, err
+}
+
+// SourceLineCommented reports whether the `source:` line in testSetID's
+// mappings.yaml carries a trailing YAML comment (e.g.
+// `source: keploy test # ops: hand-curated`), signaling a user-annotated file
+// that window-derived healing must leave alone.
+func (db *MappingDb) SourceLineCommented(ctx context.Context, testSetID string) (bool, error) {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	fileData, detected, err := yaml.ReadRecordingFileAny(ctx, db.logger, db.path, mappingPath, fileName, db.Format)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if detected != yaml.FormatYAML {
+		return false, nil
+	}
+	var doc yamlLib.Node
+	if err := yamlLib.Unmarshal(fileData, &doc); err != nil {
+		return false, err
+	}
+	root := docRoot(&doc)
+	if root == nil || root.Kind != yamlLib.MappingNode {
+		return false, nil
+	}
+	return sourceNodeHasLineComment(root), nil
+}
+
+func sourceNodeHasLineComment(root *yamlLib.Node) bool {
+	if root == nil || root.Kind != yamlLib.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "source" {
+			return root.Content[i].LineComment != "" || root.Content[i+1].LineComment != ""
+		}
+	}
+	return false
+}
+
+// HealWindowBackground performs an in-place heal on an unstamped pre-PR
+// `source: keploy test` mappings.yaml whose `worker:` list is empty, adding
+// `background_derived: true`, `worker:` (when non-empty), and `startup:` (only
+// when missing on disk and non-empty) without reordering existing keys or
+// tests:, dropping comments, or rewriting `mocks:` to `mock_entries:`.
+// Returns (true, nil) if the file was healed and written.
+func (db *MappingDb) HealWindowBackground(ctx context.Context, testSetID string, worker, startup []models.MockEntry, derivedStartupReason string) (bool, error) {
+	if len(worker) == 0 {
+		return false, nil
+	}
+	release, err := db.holdSet(ctx, testSetID)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil || !exists {
+		return false, err
+	}
+	old, err := yaml.ReadRecordingFileF(ctx, db.logger, db.path, mappingPath, fileName, effFormat)
+	if err != nil {
+		return false, err
+	}
+	var existing models.Mapping
+	var oldDoc yamlLib.Node
+	if effFormat == yaml.FormatYAML {
+		if err := yamlLib.Unmarshal(old, &oldDoc); err != nil {
+			return false, err
+		}
+		if err := oldDoc.Decode(&existing); err != nil {
+			return false, err
+		}
+	} else {
+		dec, err := DecodeMappingF(old, db.logger, effFormat)
+		if err != nil {
+			return false, err
+		}
+		existing = *dec
+	}
+	if existing.Source != models.MappingSourceKeployTest || len(existing.Worker) > 0 || existing.BackgroundDerived {
+		return false, nil
+	}
+	if derivedStartupReason != "" {
+		for _, e := range existing.Startup {
+			if e.Reason == derivedStartupReason {
+				return false, nil
+			}
+		}
+	}
+
+	if effFormat == yaml.FormatYAML {
+		root := docRoot(&oldDoc)
+		if root == nil || root.Kind != yamlLib.MappingNode {
+			return false, nil
+		}
+		if sourceNodeHasLineComment(root) {
+			return false, nil
+		}
+		appendNodeField := func(key string, val any) error {
+			raw, err := yamlLib.Marshal(val)
+			if err != nil {
+				return err
+			}
+			var valDoc yamlLib.Node
+			if err := yamlLib.Unmarshal(raw, &valDoc); err != nil {
+				return err
+			}
+			if len(valDoc.Content) == 0 {
+				return nil
+			}
+			root.Content = append(root.Content,
+				&yamlLib.Node{Kind: yamlLib.ScalarNode, Tag: "!!str", Value: key},
+				valDoc.Content[0],
+			)
+			return nil
+		}
+		if err := appendNodeField("background_derived", true); err != nil {
+			return false, err
+		}
+		if len(existing.Startup) == 0 && len(startup) > 0 {
+			if err := appendNodeField("startup", startup); err != nil {
+				return false, err
+			}
+		}
+		if err := appendNodeField("worker", worker); err != nil {
+			return false, err
+		}
+		var buf bytes.Buffer
+		enc := yamlLib.NewEncoder(&buf)
+		enc.SetIndent(2)
+		if err := enc.Encode(&oldDoc); err != nil {
+			_ = enc.Close()
+			return false, err
+		}
+		if err := enc.Close(); err != nil {
+			return false, err
+		}
+		db.live.forget()
+		if err := db.writeOut(ctx, mappingPath, fileName, effFormat, encoded{data: buf.Bytes()}); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	existing.BackgroundDerived = true
+	existing.Worker = worker
+	if len(existing.Startup) == 0 && len(startup) > 0 {
+		existing.Startup = startup
+	}
+	out, err := db.encodeOverOut(&existing, effFormat, old, nil, headerNever, testSetID)
+	if err != nil {
+		return false, err
+	}
+	db.live.forget()
+	if err := db.writeOut(ctx, mappingPath, fileName, effFormat, out); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GetCases lists the test cases each flow recorded, keyed by flow.

@@ -159,6 +159,10 @@ var mapWriters = []mapWriter{
 		_, err := db.ApplyShares(ctx, lockedSetID, models.SetShares{State: models.SharesComplete, Pins: map[string]string{"s-1": "a"}})
 		return err
 	}, wrote: func(m *models.Mapping) bool { return hasTestMock("a", "s-1")(m) && len(m.Shared) == 0 }},
+	{name: "HealWindowBackground", write: func(ctx context.Context, db *MappingDb) error {
+		_, err := db.HealWindowBackground(ctx, lockedSetID, []models.MockEntry{{Name: "w-heal", Kind: "Http"}}, nil, "")
+		return err
+	}, wrote: func(m *models.Mapping) bool { return listed(m.Worker, "w-heal") && m.BackgroundDerived }},
 }
 
 var lockedSource = models.DeclaredSource{Rule: "id@44aa55bb", Kind: models.DeclaredSourceMinted, Field: "body.docs.msgs.0._id", Minted: &models.MintedForm{MinLen: 36, MaxLen: 36}}
@@ -169,7 +173,11 @@ func seedSet(t *testing.T, dir string) {
 	t.Helper()
 	ctx := context.Background()
 	db := New(zap.NewNop(), dir, "mappings")
-	if err := db.UpsertBatch(ctx, lockedSetID, map[string][]models.MockEntry{"a": {{Name: "m-a", Kind: "Http"}}}); err != nil {
+	if err := db.Insert(ctx, &models.Mapping{
+		TestSetID: lockedSetID,
+		Source:    models.MappingSourceKeployTest,
+		TestCases: []models.MappedTestCase{{ID: "a", Mocks: []models.MockEntry{{Name: "m-a", Kind: "Http"}}}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.UpsertConcurrency(ctx, lockedSetID, []models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}}}, []models.MockEntry{{Name: "s-1", Kind: "Http", Group: "g1"}}); err != nil {
@@ -335,7 +343,7 @@ func TestAWriteWaitingForTheSetsLockStopsWhenItsContextEnds(t *testing.T) {
 // Every MappingDb method is a read or one of the writes above, so a write
 // added to MappingDb fails here until it takes the set's lock and has its row.
 func TestEveryWriteOfASetsMappingFileIsInTheLockRows(t *testing.T) {
-	reads := map[string]bool{"Exists": true, "GetSource": true, "GetMapping": true, "GetCases": true, "GetStartup": true, "Get": true}
+	reads := map[string]bool{"Exists": true, "GetSource": true, "GetMapping": true, "GetCases": true, "GetStartup": true, "Get": true, "SourceLineCommented": true}
 	rows := map[string]bool{"Delete": true}
 	for _, w := range mapWriters {
 		rows[w.name] = true

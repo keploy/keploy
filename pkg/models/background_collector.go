@@ -91,6 +91,12 @@ func (l *bgCollectorList) remove(n *bgCollectorNode) {
 	l.count--
 }
 
+const (
+	bgLRUTierNone uint8 = iota
+	bgLRUTierUnderMin
+	bgLRUTierAtMin
+)
+
 type bgCollectorShapeBucket struct {
 	shape     string
 	head      *bgCollectorNode
@@ -98,8 +104,9 @@ type bgCollectorShapeBucket struct {
 	count     int
 	tailCount int
 
-	// Intrusive LRU pointers inside DerivedBgCollector.tailShapes.
+	// Intrusive LRU pointers inside DerivedBgCollector.underMinLRU or atMinLRU.
 	inTailLRU bool
+	lruTier   uint8
 	lruPrev   *bgCollectorShapeBucket
 	lruNext   *bgCollectorShapeBucket
 }
@@ -206,13 +213,14 @@ type DerivedBgCollector struct {
 	headReserve      int
 	headReserveBytes int64
 
-	headList   bgCollectorList
-	tailList   bgCollectorList
-	tailShapes bgShapeLRU
-	headBytes  int64
-	totalBytes int64
-	headSealed bool
-	byShape    map[string]*bgCollectorShapeBucket
+	headList    bgCollectorList
+	tailList    bgCollectorList
+	underMinLRU bgShapeLRU
+	atMinLRU    bgShapeLRU
+	headBytes   int64
+	totalBytes  int64
+	headSealed  bool
+	byShape     map[string]*bgCollectorShapeBucket
 
 	droppedByCap    int
 	droppedShapes   int
@@ -296,6 +304,46 @@ func (c *DerivedBgCollector) Stats() DerivedBgStats {
 	}
 }
 
+func (c *DerivedBgCollector) removeFromTailLRU(b *bgCollectorShapeBucket) {
+	if b == nil || !b.inTailLRU {
+		return
+	}
+	switch b.lruTier {
+	case bgLRUTierUnderMin:
+		c.underMinLRU.remove(b)
+	case bgLRUTierAtMin:
+		c.atMinLRU.remove(b)
+	}
+	b.lruTier = bgLRUTierNone
+}
+
+func (c *DerivedBgCollector) placeInTailLRU(b *bgCollectorShapeBucket, touch bool) {
+	if b == nil {
+		return
+	}
+	if b.tailCount == 0 {
+		c.removeFromTailLRU(b)
+		return
+	}
+	target := bgLRUTierAtMin
+	if c.minPerShape > 1 && b.count < c.minPerShape {
+		target = bgLRUTierUnderMin
+	}
+	if b.lruTier == target && !touch {
+		return
+	}
+	if b.lruTier != bgLRUTierNone && b.lruTier != target {
+		c.removeFromTailLRU(b)
+	}
+	switch target {
+	case bgLRUTierUnderMin:
+		c.underMinLRU.moveToBack(b)
+	case bgLRUTierAtMin:
+		c.atMinLRU.moveToBack(b)
+	}
+	b.lruTier = target
+}
+
 func (c *DerivedBgCollector) evictNode(n *bgCollectorNode) {
 	if n == nil {
 		return
@@ -309,32 +357,49 @@ func (c *DerivedBgCollector) evictNode(n *bgCollectorNode) {
 	c.totalBytes -= n.item.Bytes
 	if b := c.byShape[n.item.Shape]; b != nil {
 		b.remove(n)
-		if b.tailCount == 0 {
-			c.tailShapes.remove(b)
-		}
 		if b.count == 0 {
+			c.removeFromTailLRU(b)
 			delete(c.byShape, n.item.Shape)
+		} else {
+			c.placeInTailLRU(b, false)
 		}
 	}
 }
 
-// evictOneTailByRecency evicts from the least-recently-seen non-head shape.
-// When minPerShape > 0 and that shape holds <= minPerShape samples, the whole
-// shape's non-head samples are evicted together so no shape is crippled below
+// evictOneTailByRecency evicts from the least-recently-seen non-head shape,
+// preferring sparse shapes (< minPerShape, such as one-off ID walks) before
+// multi-sample active pollers (>= minPerShape), and skipping excludeShape when
+// another victim exists so a shape being populated never evicts its own prior
+// samples while building up to minPerShape. When minPerShape > 0 and the victim
+// shape holds <= minPerShape samples (counting any head-reserve samples too),
+// the entire shape is evicted together so no shape is left crippled below
 // minPerShape.
-func (c *DerivedBgCollector) evictOneTailByRecency() bool {
-	b := c.tailShapes.head
+func (c *DerivedBgCollector) evictOneTailByRecency(excludeShape string) bool {
+	pick := func(l *bgShapeLRU) *bgCollectorShapeBucket {
+		for cur := l.head; cur != nil; cur = cur.lruNext {
+			if cur.shape != excludeShape {
+				return cur
+			}
+		}
+		return nil
+	}
+	b := pick(&c.underMinLRU)
+	if b == nil {
+		b = pick(&c.atMinLRU)
+	}
+	if b == nil {
+		b = c.underMinLRU.head
+	}
+	if b == nil {
+		b = c.atMinLRU.head
+	}
 	if b == nil {
 		return false
 	}
 	if c.minPerShape > 0 && b.count <= c.minPerShape {
 		evicted := 0
-		for {
-			n := b.firstNonHead()
-			if n == nil {
-				break
-			}
-			c.evictNode(n)
+		for b.head != nil {
+			c.evictNode(b.head)
 			evicted++
 		}
 		if evicted > 0 {
@@ -342,12 +407,12 @@ func (c *DerivedBgCollector) evictOneTailByRecency() bool {
 			c.droppedShapes++
 			return true
 		}
-		c.tailShapes.remove(b)
+		c.removeFromTailLRU(b)
 		return false
 	}
 	n := b.firstNonHead()
 	if n == nil {
-		c.tailShapes.remove(b)
+		c.removeFromTailLRU(b)
 		return false
 	}
 	wasLast := b.count == 1
@@ -422,7 +487,7 @@ func (c *DerivedBgCollector) Add(item DerivedBgItem) {
 	} else {
 		c.headSealed = true
 		for (c.TotalCount() >= c.maxEntries || (c.maxBytes > 0 && c.totalBytes+size > c.maxBytes)) && c.tailList.head != nil {
-			if !c.evictOneTailByRecency() {
+			if !c.evictOneTailByRecency(shape) {
 				break
 			}
 		}
@@ -437,7 +502,9 @@ func (c *DerivedBgCollector) Add(item DerivedBgItem) {
 	}
 	b.pushBack(node)
 	if !node.head {
-		c.tailShapes.moveToBack(b)
+		c.placeInTailLRU(b, true)
+	} else if b.tailCount > 0 {
+		c.placeInTailLRU(b, false)
 	}
 }
 

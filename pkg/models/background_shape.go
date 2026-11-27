@@ -15,6 +15,9 @@ func BackgroundShapeKey(m *Mock) string {
 	if m == nil {
 		return ""
 	}
+	if m.onDisk != nil {
+		return m.onDisk.bgShape
+	}
 	dest := m.Spec.Metadata["destAddr"]
 	switch m.Kind {
 	case HTTP:
@@ -61,6 +64,60 @@ func BackgroundShapeKey(m *Mock) string {
 		return string(m.Kind) + "\x00" + dest + "\x00" + keys[0]
 	}
 	return string(m.Kind) + "\x00" + dest + "\x00" + m.Spec.Metadata["operation"]
+}
+
+// SpecificBackgroundShapeKey returns BackgroundShapeKey(m) only when m carries
+// a concrete request identity (non-empty HTTP/HTTP2 method + path/target,
+// non-empty gRPC path, non-empty Mongo command/collection, or non-empty
+// statement/request key/operation). Stub or unparsed mocks with no request
+// payload return "" so two unrelated mocks with empty request details never
+// match each other by shape.
+func SpecificBackgroundShapeKey(m *Mock) string {
+	if m == nil {
+		return ""
+	}
+	if m.onDisk != nil {
+		return m.onDisk.specificBgShape
+	}
+	switch m.Kind {
+	case HTTP:
+		r := m.Spec.HTTPReq
+		if r == nil || r.Method == "" {
+			return ""
+		}
+		_, pathShape := bgURLShape(r.URL)
+		amz := bgHeaderCaseInsensitive(r.Header, "X-Amz-Target")
+		if pathShape == "" && amz == "" {
+			return ""
+		}
+		return BackgroundShapeKey(m)
+	case HTTP2:
+		r := m.Spec.HTTP2Req
+		if r == nil || r.Method == "" {
+			return ""
+		}
+		_, pathShape := bgURLShape(r.URL)
+		amz := bgHeaderCaseInsensitive(r.Headers, "X-Amz-Target")
+		if pathShape == "" && amz == "" {
+			return ""
+		}
+		return BackgroundShapeKey(m)
+	case GRPC_EXPORT:
+		r := m.Spec.GRPCReq
+		if r == nil || r.Headers.PseudoHeaders[":path"] == "" {
+			return ""
+		}
+		return BackgroundShapeKey(m)
+	case Mongo:
+		if bgMongoRequestShape(m.Spec.MongoRequests) == "" {
+			return ""
+		}
+		return BackgroundShapeKey(m)
+	}
+	if StatementKey(m) == "" && len(RequestKeys(m)) == 0 && m.Spec.Metadata["operation"] == "" {
+		return ""
+	}
+	return BackgroundShapeKey(m)
 }
 
 func bgURLShape(raw string) (host, shape string) {

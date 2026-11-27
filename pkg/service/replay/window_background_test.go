@@ -328,10 +328,10 @@ func TestPopulateWindowDerivedBackground_MockOfRemovedTestWindowIsNotPromoted(t 
 	}
 }
 
-// S1 (R2): a parser-declared idle answer recorded INSIDE a test window must
-// NEVER be given the false "outside every recorded test window" reason; it gets
-// its own rule-D4 reason naming the window.
-func TestPopulateWindowDerivedBackground_InWindowIdleAnswerGetsRuleD4Reason(t *testing.T) {
+// A parser-declared idle answer recorded INSIDE a test window must NEVER be
+// given the false "outside every recorded test window" reason; it gets a clear
+// idle-answer reason naming the window, with no internal codewords.
+func TestPopulateWindowDerivedBackground_InWindowIdleAnswerGetsIdleReason(t *testing.T) {
 	unregister := models.RegisterIdleAnswer(models.HTTP2, func(m *models.Mock) bool { return m.Name == "idle-in-window" })
 	t.Cleanup(unregister)
 
@@ -355,8 +355,11 @@ func TestPopulateWindowDerivedBackground_InWindowIdleAnswerGetsRuleD4Reason(t *t
 	if strings.Contains(reason, "outside every recorded test window") {
 		t.Fatalf("in-window idle answer got false outside-window reason: %q", reason)
 	}
-	if !strings.Contains(reason, "rule D4") || !strings.Contains(reason, "test-1") {
-		t.Fatalf("in-window idle answer reason = %q, want rule D4 + test-1", reason)
+	if strings.Contains(reason, "rule D4") {
+		t.Fatalf("in-window idle answer reason leaked internal codeword: %q", reason)
+	}
+	if !strings.Contains(reason, "idle answer") || !strings.Contains(reason, "test-1") {
+		t.Fatalf("in-window idle answer reason = %q, want idle answer + test-1", reason)
 	}
 }
 
@@ -827,4 +830,343 @@ func TestWindowBgCollector_BoundsPerShapeAndSeparatesHTTP2AmzTargets(t *testing.
 	if delCount != 2 {
 		t.Fatalf("DeleteMessage entries = %d, want 2 (distinct X-Amz-Target must not share ReceiveMessage bucket)", delCount)
 	}
+}
+
+func makePerTestHTTPMockWithReq(name, method, rawURL, host string, reqAt, resAt time.Time) *models.Mock {
+	return &models.Mock{
+		Name: name,
+		Kind: models.HTTP,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{
+				"type":                     "http",
+				"destAddr":                 host,
+				models.MetadataLifetimeKey: models.MetadataLifetimePerTest,
+			},
+			ReqTimestampMock: reqAt,
+			ResTimestampMock: resAt,
+			HTTPReq: &models.HTTPReq{
+				Method: models.Method(method),
+				URL:    rawURL,
+				Header: map[string]string{"Host": host},
+			},
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+			IsFiltered:      true,
+		},
+	}
+}
+
+func makePerTestMongoOpMock(name, opCmd string, reqAt, resAt time.Time) *models.Mock {
+	return &models.Mock{
+		Name: name,
+		Kind: models.Mongo,
+		Spec: models.MockSpec{
+			Metadata: map[string]string{
+				"type":                     "read",
+				"destAddr":                 "mongo:27017",
+				models.MetadataLifetimeKey: models.MetadataLifetimePerTest,
+			},
+			ReqTimestampMock: reqAt,
+			ResTimestampMock: resAt,
+			MongoRequests: []models.MongoRequest{{
+				Message: &models.MongoOpMessage{
+					Sections: []string{"{ SectionSingle msg: { " + opCmd + " } }"},
+				},
+			}},
+		},
+		TestModeInfo: models.TestModeInfo{
+			Lifetime:        models.LifetimePerTest,
+			LifetimeDerived: true,
+			IsFiltered:      true,
+		},
+	}
+}
+
+func TestSpecificBackgroundShapeKey(t *testing.T) {
+	at := attrAt(1000)
+	// Empty/stub mocks MUST return "" so unrelated mocks with no request
+	// payload never collide by shape.
+	if got := models.SpecificBackgroundShapeKey(perTestMongoMock("stub-mongo")); got != "" {
+		t.Fatalf("stub mongo SpecificBackgroundShapeKey = %q, want empty", got)
+	}
+	if got := models.SpecificBackgroundShapeKey(&models.Mock{Name: "stub-http", Kind: models.HTTP}); got != "" {
+		t.Fatalf("stub http SpecificBackgroundShapeKey = %q, want empty", got)
+	}
+	if got := models.SpecificBackgroundShapeKey(&models.Mock{Name: "empty-http", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET"}}}); got != "" {
+		t.Fatalf("empty-path http SpecificBackgroundShapeKey = %q, want empty", got)
+	}
+
+	// Concrete HTTP, HTTP2, and Mongo mocks return stable non-empty keys.
+	h1 := makePerTestHTTPMockWithReq("m1", "GET", "http://openbao:8200/v1/sys/health", "openbao:8200", at, at.Add(time.Millisecond))
+	h2 := makePerTestHTTPMockWithReq("m2", "GET", "http://openbao:8200/v1/sys/health", "openbao:8200", at.Add(time.Second), at.Add(time.Second+time.Millisecond))
+	if k1, k2 := models.SpecificBackgroundShapeKey(h1), models.SpecificBackgroundShapeKey(h2); k1 == "" || k1 != k2 {
+		t.Fatalf("matching HTTP shapes diverged or empty: %q vs %q", k1, k2)
+	}
+	m1 := makePerTestMongoOpMock("m-ptw-1", `findAndModify: "ptw_endpoints", query: { _id: "a" }`, at, at.Add(time.Millisecond))
+	m2 := makePerTestMongoOpMock("m-ptw-2", `findAndModify: "ptw_endpoints", query: { _id: "b" }`, at.Add(time.Second), at.Add(time.Second+time.Millisecond))
+	mOther := makePerTestMongoOpMock("m-users", `find: "users", filter: { _id: "u1" }`, at, at.Add(time.Millisecond))
+	if k1, k2, ko := models.SpecificBackgroundShapeKey(m1), models.SpecificBackgroundShapeKey(m2), models.SpecificBackgroundShapeKey(mOther); k1 == "" || k1 != k2 || k1 == ko {
+		t.Fatalf("Mongo specific shapes wrong: k1=%q k2=%q other=%q", k1, k2, ko)
+	}
+}
+
+// TestUnconsumedInWindowBackgroundShapeNeverDemotesToObsolete pins #5442 R4:
+//   - An unconsumed in-window recorded mock whose SpecificBackgroundShapeKey
+//     matches a known background shape (startup:, worker:, or eligible windowBg)
+//     must never demote a test to OBSOLETE (or fail --assert-dependencies).
+//   - Window-derived background names from eligible windowBg are added to
+//     reusableMockNames on the very first healing pass.
+//   - Genuine per-test mocks (distinct shape), empty/stub mocks, and user-edited
+//     empty mappings stay strictly fail-closed.
+//   - Under KEPLOY_PROVEN=1, post-plan exact ownership remains authoritative.
+func TestUnconsumedInWindowBackgroundShapeNeverDemotesToObsolete(t *testing.T) {
+	ownUsers := func(name string) *models.Mock {
+		return makePerTestMongoOpMock(name, `find: "users", filter: { _id: "u1" }`, attrAt(1010), attrAt(1015))
+	}
+	ownApps := func(name string) *models.Mock {
+		return makePerTestMongoOpMock(name, `find: "apps", filter: { _id: "a1" }`, attrAt(1012), attrAt(1016))
+	}
+	healthMock := func(name string, at time.Time) *models.Mock {
+		return makePerTestHTTPMockWithReq(name, "GET", "http://openbao:8200/v1/sys/health", "openbao:8200", at, at.Add(time.Millisecond))
+	}
+	ptwMock := func(name string, at time.Time) *models.Mock {
+		return makePerTestMongoOpMock(name, `findAndModify: "ptw_endpoints", query: { _id: "x" }`, at, at.Add(time.Millisecond))
+	}
+
+	ownConsumed := []models.MockState{{
+		Name:     "mock-own-1",
+		Kind:     models.Mongo,
+		Type:     "read",
+		Lifetime: models.LifetimePerTest,
+	}}
+
+	t.Run("switch off: in-window HTTP mock matching startup shape never demotes response diff to OBSOLETE", func(t *testing.T) {
+		setSwitch(t, false)
+		h := newPartialRunHarness(t, 1, 0)
+		pinWindows(h)
+		h.mocks.filtered = []*models.Mock{
+			healthMock("startup-seed-88", attrAt(100)),
+			ownUsers("mock-own-1"),
+			healthMock("mock-801", attrAt(1020)),
+		}
+		entries := []models.MockEntry{
+			{Name: "mock-own-1", Kind: string(models.Mongo)},
+			{Name: "mock-801", Kind: string(models.HTTP)},
+		}
+		h.mappings.onDisk = map[string][]models.MockEntry{"test-1": entries}
+		h.replayer.mappingDB = &shMappingDB{
+			prMappingDB: &prMappingDB{exists: true, onDisk: h.mappings.onDisk},
+			mapping: &models.Mapping{
+				TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: entries}},
+				Startup:   []models.MockEntry{{Name: "startup-seed-88", Kind: string(models.HTTP)}},
+			},
+		}
+		h.replayer.hookImpl = prHooks{
+			wrongBody: map[string]bool{"test-1": true},
+			consumed:  ownConsumed,
+		}
+
+		st := h.run(t)
+		got := resultOf(t, h, "test-1")
+		if st != models.TestSetStatusFailed || got.Status != models.TestStatusFailed {
+			t.Fatalf("set=%s test=%s; want FAILED (NOT OBSOLETE) when only unconsumed in-window mock matches startup background shape", st, got.Status)
+		}
+		if got.FailureInfo.MockMismatch != nil || got.FailureInfo.MappingStale != "" {
+			t.Fatalf("unexpected OBSOLETE info: stale=%q mismatch=%+v", got.FailureInfo.MappingStale, got.FailureInfo.MockMismatch)
+		}
+	})
+
+	t.Run("switch off: in-window Mongo mock matching worker shape passes under assert-dependencies", func(t *testing.T) {
+		setSwitch(t, false)
+		h := newPartialRunHarness(t, 1, 0)
+		pinWindows(h)
+		h.replayer.config.Test.AssertDependencies = true
+		h.mocks.filtered = []*models.Mock{
+			ptwMock("worker-ptw-1", attrAt(500)),
+			ownUsers("mock-own-1"),
+			ptwMock("mock-640", attrAt(1020)),
+		}
+		entries := []models.MockEntry{
+			{Name: "mock-own-1", Kind: string(models.Mongo)},
+			{Name: "mock-640", Kind: string(models.Mongo)},
+		}
+		h.mappings.onDisk = map[string][]models.MockEntry{"test-1": entries}
+		h.replayer.mappingDB = &shMappingDB{
+			prMappingDB: &prMappingDB{exists: true, onDisk: h.mappings.onDisk},
+			mapping: &models.Mapping{
+				TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: entries}},
+				Worker:    []models.MockEntry{{Name: "worker-ptw-1", Kind: string(models.Mongo)}},
+			},
+		}
+		h.replayer.hookImpl = prHooks{consumed: ownConsumed}
+
+		st := h.run(t)
+		got := resultOf(t, h, "test-1")
+		if st != models.TestSetStatusPassed || got.Status != models.TestStatusPassed {
+			t.Fatalf("set=%s test=%s; want PASSED when only unconsumed in-window mock matches worker background shape", st, got.Status)
+		}
+	})
+
+	t.Run("switch off: healable keploy-test empty worker uses windowBg names and shapes on first pass", func(t *testing.T) {
+		setSwitch(t, false)
+		h := newPartialRunHarness(t, 2, 0)
+		pinWindows(h)
+		// Outside-window background mock bg-ptw-1 recorded between test-1 and test-2;
+		// in-window mock-640 recorded inside test-1 with the same ptw_endpoints shape.
+		h.mocks.filtered = []*models.Mock{
+			ownUsers("mock-own-1"),
+			ptwMock("mock-640", attrAt(1020)),
+			ptwMock("bg-ptw-1", attrAt(1500)),
+			ownUsers("mock-own-2"),
+		}
+		t1Entries := []models.MockEntry{
+			{Name: "mock-own-1", Kind: string(models.Mongo)},
+			{Name: "mock-640", Kind: string(models.Mongo)},
+		}
+		t2Entries := []models.MockEntry{
+			{Name: "mock-own-2", Kind: string(models.Mongo)},
+		}
+		h.mappings.onDisk = map[string][]models.MockEntry{"test-1": t1Entries, "test-2": t2Entries}
+		// Existing keploy-written mappings.yaml with empty worker: list (Bug #2 shape).
+		h.replayer.mappingDB = &shMappingDB{
+			prMappingDB: &prMappingDB{exists: true, onDisk: h.mappings.onDisk},
+			mapping: &models.Mapping{
+				Source: models.MappingSourceKeployTest,
+				TestCases: []models.MappedTestCase{
+					{ID: "test-1", Mocks: t1Entries},
+					{ID: "test-2", Mocks: t2Entries},
+				},
+				Worker: nil,
+			},
+		}
+		h.replayer.hookImpl = prHooks{
+			wrongBody: map[string]bool{"test-1": true},
+			consumedFor: consumedByWindow(h, map[string][]models.MockState{
+				"test-1": ownConsumed,
+				"test-2": {{Name: "mock-own-2", Kind: models.Mongo, Type: "read", Lifetime: models.LifetimePerTest}},
+			}),
+		}
+
+		st := h.run(t)
+		got := resultOf(t, h, "test-1")
+		if st != models.TestSetStatusFailed || got.Status != models.TestStatusFailed {
+			t.Fatalf("set=%s test=%s; want FAILED (NOT OBSOLETE) on first healing pass via windowBg shape exclusion", st, got.Status)
+		}
+		if got.FailureInfo.MockMismatch != nil {
+			t.Fatalf("unexpected MockMismatch on windowBg-healed test: %+v", got.FailureInfo.MockMismatch)
+		}
+	})
+
+	t.Run("negative: switch off genuine per-test mock with distinct shape stays OBSOLETE", func(t *testing.T) {
+		setSwitch(t, false)
+		h := newPartialRunHarness(t, 1, 0)
+		pinWindows(h)
+		h.mocks.filtered = []*models.Mock{
+			healthMock("startup-seed-88", attrAt(100)),
+			ownUsers("mock-own-1"),
+			ownApps("mock-own-2"),
+		}
+		entries := []models.MockEntry{
+			{Name: "mock-own-1", Kind: string(models.Mongo)},
+			{Name: "mock-own-2", Kind: string(models.Mongo)},
+		}
+		h.mappings.onDisk = map[string][]models.MockEntry{"test-1": entries}
+		h.replayer.mappingDB = &shMappingDB{
+			prMappingDB: &prMappingDB{exists: true, onDisk: h.mappings.onDisk},
+			mapping: &models.Mapping{
+				TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: entries}},
+				Startup:   []models.MockEntry{{Name: "startup-seed-88", Kind: string(models.HTTP)}},
+			},
+		}
+		h.replayer.hookImpl = prHooks{
+			wrongBody: map[string]bool{"test-1": true},
+			consumed:  ownConsumed,
+		}
+
+		_ = h.run(t)
+		got := resultOf(t, h, "test-1")
+		if got.Status != models.TestStatusObsolete {
+			t.Fatalf("status = %s, want OBSOLETE for genuine unconsumed per-test mock", got.Status)
+		}
+	})
+
+	t.Run("negative: switch off user-edited empty worker mapping fails closed (does not invoke windowBg)", func(t *testing.T) {
+		setSwitch(t, false)
+		h := newPartialRunHarness(t, 2, 0)
+		pinWindows(h)
+		h.mocks.filtered = []*models.Mock{
+			ownUsers("mock-own-1"),
+			ptwMock("mock-640", attrAt(1020)),
+			ptwMock("bg-ptw-1", attrAt(1500)),
+			ownUsers("mock-own-2"),
+		}
+		t1Entries := []models.MockEntry{
+			{Name: "mock-own-1", Kind: string(models.Mongo)},
+			{Name: "mock-640", Kind: string(models.Mongo)},
+		}
+		t2Entries := []models.MockEntry{{Name: "mock-own-2", Kind: string(models.Mongo)}}
+		h.mappings.onDisk = map[string][]models.MockEntry{"test-1": t1Entries, "test-2": t2Entries}
+		// User-edited mapping (Source == "") with intentionally empty Worker/Startup.
+		h.replayer.mappingDB = &shMappingDB{
+			prMappingDB: &prMappingDB{exists: true, onDisk: h.mappings.onDisk},
+			mapping: &models.Mapping{
+				Source: "",
+				TestCases: []models.MappedTestCase{
+					{ID: "test-1", Mocks: t1Entries},
+					{ID: "test-2", Mocks: t2Entries},
+				},
+			},
+		}
+		h.replayer.hookImpl = prHooks{
+			wrongBody: map[string]bool{"test-1": true},
+			consumedFor: consumedByWindow(h, map[string][]models.MockState{
+				"test-1": ownConsumed,
+				"test-2": {{Name: "mock-own-2", Kind: models.Mongo, Type: "read", Lifetime: models.LifetimePerTest}},
+			}),
+		}
+
+		_ = h.run(t)
+		got := resultOf(t, h, "test-1")
+		if got.Status != models.TestStatusObsolete {
+			t.Fatalf("status = %s, want OBSOLETE when user-edited mapping has empty worker/startup", got.Status)
+		}
+	})
+
+	t.Run("switch on: KEPLOY_PROVEN=1 keeps exact test ownership authoritative and never demotes to OBSOLETE", func(t *testing.T) {
+		setSwitch(t, true)
+		h := newPartialRunHarness(t, 1, 0)
+		pinWindows(h)
+		h.mocks.filtered = []*models.Mock{
+			healthMock("startup-seed-88", attrAt(100)),
+			ownUsers("mock-own-1"),
+			healthMock("mock-801", attrAt(1020)),
+		}
+		entries := []models.MockEntry{
+			{Name: "mock-own-1", Kind: string(models.Mongo)},
+			{Name: "mock-801", Kind: string(models.HTTP)},
+		}
+		h.mappings.onDisk = map[string][]models.MockEntry{"test-1": entries}
+		h.replayer.mappingDB = &shMappingDB{
+			prMappingDB: &prMappingDB{exists: true, onDisk: h.mappings.onDisk},
+			mapping: &models.Mapping{
+				TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: entries}},
+				Startup:   []models.MockEntry{{Name: "startup-seed-88", Kind: string(models.HTTP)}},
+			},
+		}
+		h.replayer.hookImpl = prHooks{
+			wrongBody: map[string]bool{"test-1": true},
+			consumed:  ownConsumed,
+		}
+
+		st := h.run(t)
+		got := resultOf(t, h, "test-1")
+		if st != models.TestSetStatusFailed || got.Status != models.TestStatusFailed {
+			t.Fatalf("KEPLOY_PROVEN=1: set=%s test=%s; want FAILED (never OBSOLETE)", st, got.Status)
+		}
+		if len(got.FailureInfo.UnconsumedMocks) != 1 || got.FailureInfo.UnconsumedMocks[0].Name != "mock-801" {
+			t.Fatalf("KEPLOY_PROVEN=1: exact test-owned mock must stay enforced in UnconsumedMocks, got %+v", got.FailureInfo.UnconsumedMocks)
+		}
+	})
 }

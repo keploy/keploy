@@ -127,6 +127,15 @@ type RecordedStartReader interface {
 	RecordedFirstTestStart(ctx context.Context, testSetID string) (time.Time, error)
 }
 
+// RecordedWindowsReader is an optional TestDB capability: returns every test
+// window the test set ever recorded (including removed, deduplicated, sealed,
+// or previously-replayed cases). When implemented, window-derived background
+// classification uses the full recorded schedule so a removed test's own calls
+// are never promoted to background.
+type RecordedWindowsReader interface {
+	RecordedTestWindows(ctx context.Context, testSetID string) ([]models.TestWindow, error)
+}
+
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) ([]*models.Mock, error)
