@@ -1075,3 +1075,111 @@ func TestStatusCodeInReadsEveryShape(t *testing.T) {
 		})
 	}
 }
+
+func TestAssertionMatch_JsonEqual(t *testing.T) {
+	tests := []struct {
+		name        string
+		recorded    models.HTTPResp
+		actualBody  string
+		wantPass    bool
+		wantLogSnip string
+	}{
+		{
+			name:       "identical JSON objects",
+			recorded:   models.HTTPResp{StatusCode: 200, Body: `{"a":1,"b":"ok"}`},
+			actualBody: `{"a":1,"b":"ok"}`,
+			wantPass:   true,
+		},
+		{
+			name:       "different key ordering",
+			recorded:   models.HTTPResp{StatusCode: 200, Body: `{"a":1,"b":2}`},
+			actualBody: `{"b":2,"a":1}`,
+			wantPass:   true,
+		},
+		{
+			name:       "different whitespace and nested objects",
+			recorded:   models.HTTPResp{StatusCode: 200, Body: `{"outer":{"x":1,"y":[10,20]},"ok":true}`},
+			actualBody: "{\n  \"ok\": true,\n  \"outer\": {\n    \"y\": [10, 20],\n    \"x\": 1\n  }\n}",
+			wantPass:   true,
+		},
+		{
+			name:       "identical arrays with whitespace differences",
+			recorded:   models.HTTPResp{StatusCode: 200, Body: `[{"id":1,"name":"a"}]`},
+			actualBody: `[ { "name": "a", "id": 1 } ]`,
+			wantPass:   true,
+		},
+		{
+			name:       "numeric equivalence 1 vs 1.0 and negative numbers",
+			recorded:   models.HTTPResp{StatusCode: 200, Body: `{"n":1,"neg":-5}`},
+			actualBody: `{"n":1.0,"neg":-5.0}`,
+			wantPass:   true,
+		},
+		{
+			name:        "distinguishes >2^53 integers",
+			recorded:    models.HTTPResp{StatusCode: 200, Body: `{"id":9007199254740993}`},
+			actualBody:  `{"id":9007199254740992}`,
+			wantPass:    false,
+			wantLogSnip: "json_equal assertion failed",
+		},
+		{
+			name:        "large integer mismatch fails",
+			recorded:    models.HTTPResp{StatusCode: 200, Body: `{"id":9223372036854775807}`},
+			actualBody:  `{"id":9223372036854775806}`,
+			wantPass:    false,
+			wantLogSnip: "json_equal assertion failed",
+		},
+		{
+			name:        "identical plain-text strings fail",
+			recorded:    models.HTTPResp{StatusCode: 200, Body: "ok"},
+			actualBody:  "ok",
+			wantPass:    false,
+			wantLogSnip: "json_equal assertion failed",
+		},
+		{
+			name:        "empty bodies fail",
+			recorded:    models.HTTPResp{StatusCode: 200, Body: ""},
+			actualBody:  "",
+			wantPass:    false,
+			wantLogSnip: "json_equal assertion failed",
+		},
+		{
+			name:        "malformed JSON fails",
+			recorded:    models.HTTPResp{StatusCode: 200, Body: `{"a":`},
+			actualBody:  `{"a":`,
+			wantPass:    false,
+			wantLogSnip: "json_equal assertion failed",
+		},
+		{
+			name:        "valid JSON with trailing garbage fails",
+			recorded:    models.HTTPResp{StatusCode: 200, Body: `{"a":1}`},
+			actualBody:  `{"a":1} trailing`,
+			wantPass:    false,
+			wantLogSnip: "json_equal assertion failed",
+		},
+		{
+			name:        "BodySkipped fails closed even with valid JSON actual",
+			recorded:    models.HTTPResp{StatusCode: 200, BodySkipped: true, BodySize: 2 << 20},
+			actualBody:  `{"a":1}`,
+			wantPass:    false,
+			wantLogSnip: "json_equal assertion cannot be judged",
+		},
+	}
+
+	for _, c := range tests {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{
+				Name:       "test-json-equal",
+				HTTPResp:   c.recorded,
+				Assertions: map[models.AssertionType]interface{}{models.JsonEqual: true},
+			}
+			core, logs := observer.New(zap.ErrorLevel)
+			pass, _ := AssertionMatch(tc, &models.HTTPResp{StatusCode: 200, Body: c.actualBody}, zap.New(core))
+			require.Equal(t, c.wantPass, pass)
+			if c.wantLogSnip != "" {
+				require.Equal(t, 1, logs.FilterMessageSnippet(c.wantLogSnip).Len(), "%v", logs.All())
+			} else {
+				require.Zero(t, logs.Len(), "%v", logs.All())
+			}
+		})
+	}
+}

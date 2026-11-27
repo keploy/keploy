@@ -333,18 +333,12 @@ func resolveGrpcAssertionStatus(resp *models.GrpcResp) (int, bool) {
 }
 
 func grpcBodiesEqual(expected, actual string) bool {
+	// Preserve existing gRPC behavior where identical payloads (including empty
+	// NoMessages bodies or non-JSON protoscope text) pass json_equal directly.
 	if expected == actual {
 		return true
 	}
-	if !json.Valid([]byte(expected)) || !json.Valid([]byte(actual)) {
-		return false
-	}
-	expVal, expOK := decodeJSONValue(expected)
-	actVal, actOK := decodeJSONValue(actual)
-	if !expOK || !actOK {
-		return false
-	}
-	return matcher.JSONValueEqual(actVal, expVal)
+	return matcher.JSONBodiesEqual(expected, actual)
 }
 
 func decodeJSONValue(raw string) (interface{}, bool) {
