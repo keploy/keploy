@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"sort"
 	"strconv"
@@ -472,7 +473,9 @@ func (r *Replayer) compareGRPCWithSchemas(tc *models.TestCase, actual *models.Gr
 		}))
 	}
 	pass, res := r.compareGRPCResp(compared, actual, testSetID, emitFailureLogs, failedElsewhere, extra...)
-	r.showGrpcBodiesDecoded(res, view, tc.GrpcResp.AllMessages(), actual.AllMessages())
+	// Assertions replace the comparison: their GrpcData row is their verdict,
+	// not a comparison of the messages.
+	r.showGrpcBodiesDecoded(res, view, tc.GrpcResp.AllMessages(), actual.AllMessages(), !grpcMatcher.AssertionsReplaceComparison(compared))
 	return pass, res
 }
 
@@ -684,31 +687,41 @@ func (g *grpcSchemas) walk(s *protoschema.Schema, method string, md protoreflect
 }
 
 // showGrpcBodiesDecoded says, in Result.GrpcDecode, which schema reads each
-// side of a failed gRPC test, and shows the first differing message of each
-// side with field names (MessageIndex: which message of a stream). The
-// verdict and BodyResult -- the recorded protoscope the comparison read, which
-// reports and noise learners consume -- are not touched. Both sides are
-// decoded or neither is: a recorded side with no schema leaves both as
+// side of a gRPC test, passed or failed, and shows one message of each side
+// with field names: the first that differs, else (a passed test, one that
+// failed on its status, headers or message count, or one whose assertions
+// replaced the comparison) the first (MessageIndex: which message of a
+// stream). bodiesCompared is false when assertions replaced the comparison.
+// The verdict and BodyResult -- the recorded protoscope the comparison read,
+// which reports and noise learners consume -- are not touched. Both sides
+// are decoded or neither is: a recorded side with no schema leaves both as
 // recorded, with the reason. The console's diff, printed by the comparison,
 // shows the recorded form.
-func (r *Replayer) showGrpcBodiesDecoded(res *models.Result, view *grpcProtoView, expMsgs, actMsgs []models.GrpcLengthPrefixedMessage) {
+func (r *Replayer) showGrpcBodiesDecoded(res *models.Result, view *grpcProtoView, expMsgs, actMsgs []models.GrpcLengthPrefixedMessage, bodiesCompared bool) {
 	if res == nil || view == nil {
 		return
 	}
 	row := -1
-	idx := 0
-	for i := range res.BodyResult {
-		if res.BodyResult[i].Type != models.GrpcData {
-			continue
+	if bodiesCompared {
+		idx := 0
+		for i := range res.BodyResult {
+			if res.BodyResult[i].Type != models.GrpcData {
+				continue
+			}
+			if !res.BodyResult[i].Normal {
+				row = idx
+				break
+			}
+			idx++
 		}
-		if !res.BodyResult[i].Normal {
-			row = idx
-			break
-		}
-		idx++
 	}
-	if row < 0 {
-		return
+	differs := row >= 0
+	if !differs {
+		if len(expMsgs) == 0 || len(actMsgs) == 0 {
+			// No message on a side: no body to show.
+			return
+		}
+		row = 0
 	}
 	info := &models.GrpcDecodeInfo{Note: view.note, MessageIndex: row}
 	res.GrpcDecode = info
@@ -720,10 +733,6 @@ func (r *Replayer) showGrpcBodiesDecoded(res *models.Result, view *grpcProtoView
 		if view.actual == nil && (info.Note == "" || view.actualNote != "" && view.actualNote != view.note) {
 			info.Note = joinNotes(info.Note, newResponseNote(view.actualNote))
 		}
-		return
-	}
-	if row >= len(expMsgs) || row >= len(actMsgs) {
-		info.Note = "the streams carry a different number of messages, so the differing message is shown as recorded"
 		return
 	}
 	exp, expErr := decodeResponse(view.expected, view.method, expMsgs[row].DecodedData)
@@ -742,8 +751,11 @@ func (r *Replayer) showGrpcBodiesDecoded(res *models.Result, view *grpcProtoView
 		info.OpaqueFields, info.OpaqueFieldsComplete = slices.Clone(walked.opaque), walked.complete
 	}
 	info.ExpectedUnknownFields, info.ActualUnknownFields = exp.UnknownFields, act.UnknownFields
-	if sameJSON(exp.JSON, act.JSON) {
+	if differs && sameJSON(exp.JSON, act.JSON) {
 		info.Note = encodingOnlyNote
+	}
+	if !differs && len(expMsgs) != len(actMsgs) {
+		info.Note = fmt.Sprintf("the streams carry a different number of messages (%d recorded, %d now); the first of each is shown", len(expMsgs), len(actMsgs))
 	}
 }
 

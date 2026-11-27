@@ -147,6 +147,10 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Local variables to track overall match status
 	differences := make(map[string]grpcDiff)
 
+	// The HeadersResult row of each header difference key, so noise that
+	// excuses a header marks its row matched; headers are graded after noise.
+	headerRows := map[string]int{}
+
 	// Only compare :status in pseudo headers
 	if expectedStatus, ok := expectedResp.Headers.PseudoHeaders[":status"]; ok {
 		actualStatus, exists := actualResp.Headers.PseudoHeaders[":status"]
@@ -185,6 +189,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			}
 		}
 
+		headerRows["headers.pseudo_headers.:status"] = len(result.HeadersResult)
 		result.HeadersResult = append(result.HeadersResult, headerResult)
 	}
 
@@ -210,8 +215,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				missing:  true,
 			}
 			headerResult.Normal = false
-			currentRisk = models.High
-			currentCategories = append(currentCategories, models.HeaderChanged)
 		} else {
 			headerResult.Actual.Value = []string{actualContentType}
 
@@ -239,10 +242,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					Actual:   actualContentType,
 					Message:  "content-type header value mismatch",
 				}
-				currentRisk = models.High
-				currentCategories = append(currentCategories, models.HeaderChanged)
 			}
 		}
+		headerRows["headers.ordinary_headers.content-type"] = len(result.HeadersResult)
 		result.HeadersResult = append(result.HeadersResult, headerResult)
 	}
 
@@ -280,6 +282,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// and calling that a match means a server returning 3 of 5 recorded
 	// messages passes — strictly worse than not supporting streams, because
 	// the user now believes streams are covered.
+	// The BodyResult row of each body difference key, so noise that excuses
+	// a key marks its row matched.
+	bodyRows := map[string]int{}
 	if len(expMsgs) != len(actMsgs) {
 		differences["body.message_count"] = grpcDiff{
 			Expected: fmt.Sprintf("%d", len(expMsgs)),
@@ -287,14 +292,14 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			Message:  "gRPC message count mismatch",
 			number:   true,
 		}
+		bodyRows["body.message_count"] = len(result.BodyResult)
 		result.BodyResult = append(result.BodyResult, models.BodyResult{
 			Normal:   false,
 			Type:     models.GrpcLength,
 			Expected: fmt.Sprintf("%d message(s)", len(expMsgs)),
 			Actual:   fmt.Sprintf("%d message(s)", len(actMsgs)),
 		})
-		currentRisk = models.High
-		currentCategories = append(currentCategories, models.SchemaBroken)
+		// Graded below, once noise has had its say.
 	}
 
 	// Keys stay UNPREFIXED while both sides carry a single message, which is
@@ -309,36 +314,21 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		compareCount = len(actMsgs)
 	}
 
-	// Carried out for the failure assessment below: the FIRST message that
-	// differs, which is the one the user needs to look at.
-	decodedDataNormal := true
+	// Carried out for the failure assessment below: the FIRST message whose
+	// difference noise leaves standing, which is the one the user needs to
+	// look at (chosen after noise).
 	expectedDecodedData := ""
 	actualDecodedData := ""
 	var jsonComparisonResult matcher.JSONComparisonResult
-	// reorderedOnly: every message that differs differs only in a repeated
-	// field's order, and the stream has as many messages as recorded. One
-	// message with a real change makes the body a real change, whichever
-	// message differed first.
-	reorderedOnly := len(expMsgs) == len(actMsgs)
 
+	cmps := make([]msgComparison, 0, compareCount)
 	for msgIdx := 0; msgIdx < compareCount; msgIdx++ {
 		cmp := compareGrpcMessage(msgIdx, indexed, expMsgs[msgIdx], actMsgs[msgIdx],
 			differences, result, bodyNoise, ignoreOrdering, mo.unordered, mo.warnOnce, logger)
-		if !cmp.decodedNormal && !cmp.reorderedOnly {
-			reorderedOnly = false
+		for k, i := range cmp.rows {
+			bodyRows[k] = i
 		}
-		if !cmp.decodedNormal && decodedDataNormal {
-			// first mismatch wins
-			decodedDataNormal = false
-			expectedDecodedData = cmp.expected
-			actualDecodedData = cmp.actual
-			jsonComparisonResult = cmp.json
-		}
-	}
-	if decodedDataNormal && compareCount > 0 {
-		// Nothing differed; surface message 0 for the report's benefit.
-		expectedDecodedData = expMsgs[0].DecodedData
-		actualDecodedData = actMsgs[0].DecodedData
+		cmps = append(cmps, cmp)
 	}
 
 	// Apply noise configuration to ignore specified differences. An entry
@@ -350,6 +340,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	var (
 		patternWhys           []string
 		keptHeader, keptField bool // a header, a body field a pattern kept
+		keptPaths             = map[string]bool{}
 	)
 	for path, diff := range differences {
 		field, pats, found := grpcNoiseEntry(path, bodyNoise, headerNoise)
@@ -358,6 +349,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 		if why := grpcPatternWhy(field, pats, diff); why != "" {
 			patternWhys = append(patternWhys, why)
+			keptPaths[path] = true
 			if strings.HasPrefix(path, "headers.") {
 				keptHeader = true
 			} else {
@@ -366,8 +358,88 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			continue
 		}
 		delete(differences, path)
+		// Excused: its row reads as matched, as an excused HTTP body's does,
+		// so a reader of the rows never takes it for the difference that failed.
+		if i, ok := bodyRows[path]; ok {
+			result.BodyResult[i].Normal = true
+		}
+		if i, ok := headerRows[path]; ok {
+			result.HeadersResult[i].Normal = true
+		}
 	}
 	sort.Strings(patternWhys)
+
+	// A content-type noise left standing is a changed header: the body may
+	// no longer be the protobuf the call returns.
+	if _, kept := differences["headers.ordinary_headers.content-type"]; kept {
+		currentRisk = models.High
+		currentCategories = append(currentCategories, models.HeaderChanged)
+	}
+
+	// A message whose data noise excused excuses its length too: the length
+	// follows the data, as it is forgiven when the data are identical. Never
+	// a length the user's own pattern kept: that is theirs to say.
+	for _, c := range cmps {
+		if _, kept := differences[c.dataKey]; kept || c.decodedNormal || keptPaths[c.lengthKey] {
+			continue
+		}
+		if _, ok := differences[c.lengthKey]; ok {
+			delete(differences, c.lengthKey)
+			if i, ok := bodyRows[c.lengthKey]; ok {
+				result.BodyResult[i].Normal = true
+			}
+		}
+	}
+
+	// Only a body difference noise left standing is graded: a message count
+	// or a message it excused is no part of the failure. The message graded
+	// is the first whose difference stands.
+	_, countKept := differences["body.message_count"]
+	if countKept {
+		currentRisk = models.High
+		currentCategories = append(currentCategories, models.SchemaBroken)
+	}
+	// A compression flag that differs, the user's pattern aside (graded with
+	// the patterns below): graded once the body is, as a pattern-kept one.
+	compressionStands := false
+	for path := range differences {
+		if strings.HasPrefix(path, "body.") && strings.HasSuffix(path, "compression_flag") && !keptPaths[path] {
+			compressionStands = true
+			break
+		}
+	}
+	// The HTTP/2 :status (a proxy's answer, not the service's grpc-status)
+	// that differs, the user's pattern aside (graded with the patterns below):
+	// a changed header, never a failure with no grade.
+	if _, kept := differences["headers.pseudo_headers.:status"]; kept && !keptPaths["headers.pseudo_headers.:status"] {
+		currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+		currentCategories = append(currentCategories, models.HeaderChanged)
+	}
+	// reorderedOnly: every message whose difference stands differs only in a
+	// repeated field's order, and the stream has as many messages as
+	// recorded (or noise excused the count). One message with a real change
+	// makes the body a real change, whichever message differed first.
+	decodedDataNormal := true
+	reorderedOnly := !countKept
+	for _, c := range cmps {
+		if _, kept := differences[c.dataKey]; !kept {
+			continue
+		}
+		if !c.reorderedOnly {
+			reorderedOnly = false
+		}
+		if decodedDataNormal {
+			decodedDataNormal = false
+			expectedDecodedData = c.expected
+			actualDecodedData = c.actual
+			jsonComparisonResult = c.json
+		}
+	}
+	if decodedDataNormal && compareCount > 0 {
+		// Nothing differed; surface message 0 for the report's benefit.
+		expectedDecodedData = expMsgs[0].DecodedData
+		actualDecodedData = actMsgs[0].DecodedData
+	}
 
 	// Compare grpc-status trailer — this is the canonical gRPC status code.
 	// HTTP/2 :status (always 200 for gRPC) is transport framing and must not
@@ -523,6 +595,17 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 		if json.Valid([]byte(assessExp)) && json.Valid([]byte(assessAct)) {
 			if assess, err := matcher.ComputeFailureAssessmentJSON(assessExp, assessAct, bodyNoise, ignoreOrdering); err == nil && assess != nil {
+				if assess.Risk == models.None {
+					// The same fields and values, read with the schema, yet the
+					// bytes the comparison read differ: an encoding difference
+					// (field order in a list, packed or unpacked, a default
+					// written explicitly). It fails the test, so it is graded.
+					assess.Risk = models.Medium
+					if len(assess.Category) == 0 {
+						assess.Category = []models.FailureCategory{models.SchemaUnchanged}
+					}
+					assess.Reasons = append(assess.Reasons, encodingOnlyReason)
+				}
 				currentRisk = matcher.MaxRisk(currentRisk, assess.Risk)
 				currentCategories = append(currentCategories, assess.Category...)
 				bodyAssessment = assess
@@ -551,6 +634,13 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 	}
 
+	// A compression flag that stands, nothing else grading the body, is a
+	// changed value under an unchanged schema.
+	if compressionStands && len(currentCategories) == 0 {
+		currentRisk = matcher.MaxRisk(currentRisk, models.Medium)
+		currentCategories = append(currentCategories, models.SchemaUnchanged)
+	}
+
 	// A field a pattern kept is a changed value, graded at least Medium as
 	// the HTTP matcher grades a header or a body value a pattern keeps, so
 	// the failure and its reason reach the report (replay keeps a failed
@@ -576,6 +666,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			uniqueCategories = append(uniqueCategories, cat)
 		}
 	}
+	uniqueCategories = worstSchemaCategory(uniqueCategories)
 
 	// Why a field a pattern-guarded entry names is compared is kept with the
 	// result, so the report says it, not only the console.
@@ -769,6 +860,11 @@ type msgComparison struct {
 	// reorderedOnly: the decoded data differs only in the order of a
 	// repeated field's elements (protoscope, with order kept).
 	reorderedOnly bool
+	// rows: the BodyResult row of each of this message's difference keys,
+	// so noise that excuses a key marks its row matched.
+	rows map[string]int // dataKey and lengthKey: this message's decoded_data and message_length
+	// difference keys.
+	dataKey, lengthKey string
 }
 
 // isAllDigits reports whether s is a non-empty run of ASCII digits, i.e. a
@@ -818,6 +914,8 @@ func compareGrpcMessage(
 		return fmt.Sprintf("body.%d.%s", msgIdx, field)
 	}
 
+	rows := map[string]int{}
+
 	// Compare compression flag
 	compressionFlagNormal := expMsg.CompressionFlag == actMsg.CompressionFlag
 	if !compressionFlagNormal {
@@ -828,6 +926,7 @@ func compareGrpcMessage(
 			number:   true,
 		}
 	}
+	rows[key("compression_flag")] = len(result.BodyResult)
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   compressionFlagNormal,
 		Type:     models.GrpcCompression,
@@ -846,6 +945,7 @@ func compareGrpcMessage(
 		}
 	}
 	lengthResultIdx := len(result.BodyResult)
+	rows[key("message_length")] = lengthResultIdx
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   messageLengthNormal,
 		Type:     models.GrpcLength,
@@ -934,6 +1034,7 @@ func compareGrpcMessage(
 			held:     &[2]string{expMsg.DecodedData, actMsg.DecodedData},
 		}
 	}
+	rows[key("decoded_data")] = len(result.BodyResult)
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   decodedDataNormal,
 		Type:     models.GrpcData,
@@ -960,8 +1061,50 @@ func compareGrpcMessage(
 		actual:        actualDecodedData,
 		json:          jsonComparisonResult,
 		reorderedOnly: decodedMessage == reorderedRepeatedMessage,
+		rows:          rows,
+		dataKey:       key("decoded_data"),
+		lengthKey:     key("message_length"),
 	}
 }
+
+// schemaScale orders the schema categories from least to most severe: a
+// response's schema is unchanged, added to, or broken -- one of them.
+var schemaScale = []models.FailureCategory{models.SchemaUnchanged, models.SchemaAdded, models.SchemaBroken}
+
+// worstSchemaCategory keeps the most severe schema category of cats and
+// every other category as it is: a stream short of a message (broken)
+// whose first standing message only changed a value (unchanged) is a broken
+// schema, never both.
+func worstSchemaCategory(cats []models.FailureCategory) []models.FailureCategory {
+	worst := -1
+	for _, c := range cats {
+		for i, sc := range schemaScale {
+			if c == sc && i > worst {
+				worst = i
+			}
+		}
+	}
+	if worst < 0 {
+		return cats
+	}
+	out := cats[:0:0]
+	for _, c := range cats {
+		keep := true
+		for i, sc := range schemaScale {
+			if c == sc && i != worst {
+				keep = false
+			}
+		}
+		if keep {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// encodingOnlyReason: the bodies, read with the schema, carry the same
+// fields and values; the comparison of the recorded bytes saw them differ.
+const encodingOnlyReason = "the decoded fields are equal: the bodies differ only in how they are encoded"
 
 // useIndexedKeys reports whether difference keys should carry a message
 // index.

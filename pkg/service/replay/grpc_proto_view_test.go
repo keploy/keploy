@@ -378,6 +378,176 @@ func TestAStreamShowsTheMessageThatDiffers(t *testing.T) {
 	}
 }
 
+// A passed gRPC test's bodies are shown with field names too, as a failed
+// one's: the first message, with no note.
+func TestAPassedGrpcTestShowsBodiesWithFieldNames(t *testing.T) {
+	r := protoReplayer(t)
+	body := "1: {\"o-1\"}\n3: {\"Shipped\"}"
+	pass, res := compareWithProtos(r, ordersCase(body, nil), ordersResp(body))
+	if !pass {
+		t.Fatal("the same body failed")
+	}
+	d := res.GrpcDecode
+	if d == nil {
+		t.Fatal("a passed test has no decoded view")
+	}
+	var exp, act map[string]any
+	if json.Unmarshal([]byte(d.ExpectedJSON), &exp) != nil || json.Unmarshal([]byte(d.ActualJSON), &act) != nil ||
+		exp["status"] != "Shipped" || act["status"] != "Shipped" {
+		t.Fatalf("decoded bodies not shown: %+v", d)
+	}
+	if d.MessageIndex != 0 || d.Note != "" || d.Expected != "local" || d.Actual != "local" {
+		t.Fatalf("decoded view: %+v", d)
+	}
+}
+
+// A passed stream shows its first message.
+func TestAPassedStreamShowsItsFirstMessage(t *testing.T) {
+	r := protoReplayer(t)
+	rec := ordersCase("1: {\"first\"}", nil)
+	rec.GrpcResp.AdditionalMessages = []models.GrpcLengthPrefixedMessage{{DecodedData: "1: {\"second\"}"}}
+	act := ordersResp("1: {\"first\"}")
+	act.AdditionalMessages = []models.GrpcLengthPrefixedMessage{{DecodedData: "1: {\"second\"}"}}
+	pass, res := compareWithProtos(r, rec, act)
+	if !pass {
+		t.Fatal("the same stream failed")
+	}
+	d := res.GrpcDecode
+	if d == nil || d.MessageIndex != 0 || !strings.Contains(d.ExpectedJSON, "first") || !strings.Contains(d.ActualJSON, "first") || d.Note != "" {
+		t.Fatalf("decoded view: %+v", d)
+	}
+}
+
+// A test that failed on its status alone shows its bodies with field names,
+// never saying they differ only in encoding: they do not differ.
+func TestAGrpcTestFailedOnItsStatusAloneShowsBodiesWithFieldNames(t *testing.T) {
+	r := protoReplayer(t)
+	body := "1: {\"o-1\"}\n3: {\"Shipped\"}"
+	act := ordersResp(body)
+	act.Trailers.OrdinaryHeaders = map[string]string{"grpc-status": "5", "grpc-message": "not found"}
+	pass, res := compareWithProtos(r, ordersCase(body, nil), act)
+	if pass {
+		t.Fatal("the status changed; the test passed")
+	}
+	d := res.GrpcDecode
+	if d == nil || d.MessageIndex != 0 || !strings.Contains(d.ActualJSON, "Shipped") || d.Note == encodingOnlyNote {
+		t.Fatalf("decoded view: %+v", d)
+	}
+}
+
+// A passed test whose recorded release has no upload says so, as a failed one.
+func TestAPassedTestOfAReleaseWithNoSchemaSaysSo(t *testing.T) {
+	r := protoReplayer(t)
+	r.config.Test.ProtoDir = ""
+	r.SetGrpcSchemaSource(&fakeSchemas{recorded: map[string]*protoschema.Schema{}})
+	body := "1: {\"o-1\"}"
+	pass, res := compareWithProtos(r, ordersCase(body, nil), ordersResp(body))
+	if !pass {
+		t.Fatal("the same body failed")
+	}
+	if d := res.GrpcDecode; d == nil || !strings.Contains(d.Note, "not uploaded for release app:v1") || d.ExpectedJSON != "" || d.ActualJSON != "" {
+		t.Fatalf("decoded view: %+v", d)
+	}
+}
+
+// A passed test whose assertions replaced the comparison, with no message
+// on either side, has no body to show: their row is a verdict, not a message.
+func TestAPassedAssertionTestWithNoMessageShowsNoBodies(t *testing.T) {
+	r := protoReplayer(t)
+	tc := ordersCase("", nil)
+	tc.GrpcResp.Body = models.GrpcLengthPrefixedMessage{}
+	tc.GrpcResp.NoMessages = true
+	tc.Assertions = map[models.AssertionType]interface{}{models.StatusCode: 0}
+	act := ordersResp("")
+	act.Body = models.GrpcLengthPrefixedMessage{}
+	act.NoMessages = true
+	pass, res := compareWithProtos(r, tc, act)
+	if !pass {
+		t.Fatalf("the status assertion holds; the test failed: %+v", res)
+	}
+	if res.GrpcDecode != nil {
+		t.Fatalf("decoded view of no body: %+v", res.GrpcDecode)
+	}
+}
+
+// Assertions replace the comparison: their failing verdict never reads as a
+// difference in the messages, which are the same.
+func TestAFailedAssertionTestNeverSaysItsSameBodiesDifferInEncoding(t *testing.T) {
+	r := protoReplayer(t)
+	body := "1: {\"o-1\"}\n3: {\"Shipped\"}"
+	tc := ordersCase(body, nil)
+	tc.Assertions = map[models.AssertionType]interface{}{models.HeaderExists: []string{"x-missing"}}
+	pass, res := compareWithProtos(r, tc, ordersResp(body))
+	if pass {
+		t.Fatal("the header is missing; the test passed")
+	}
+	d := res.GrpcDecode
+	if d == nil || d.MessageIndex != 0 || !strings.Contains(d.ActualJSON, "Shipped") || d.Note == encodingOnlyNote {
+		t.Fatalf("decoded view: %+v", d)
+	}
+}
+
+// A stream that lost a message shows its first and says the counts differ.
+func TestAStreamOfADifferentLengthSaysSo(t *testing.T) {
+	r := protoReplayer(t)
+	rec := ordersCase("1: {\"first\"}", nil)
+	rec.GrpcResp.AdditionalMessages = []models.GrpcLengthPrefixedMessage{{DecodedData: "1: {\"second\"}"}}
+	pass, res := compareWithProtos(r, rec, ordersResp("1: {\"first\"}"))
+	if pass {
+		t.Fatal("a message is missing; the test passed")
+	}
+	d := res.GrpcDecode
+	if d == nil || !strings.Contains(d.ExpectedJSON, "first") || !strings.Contains(d.Note, "different number of messages (2 recorded, 1 now)") {
+		t.Fatalf("decoded view: %+v", d)
+	}
+}
+
+// A body noised whole passes; a difference only in its encoding is never
+// said of a test that passed.
+func TestABodyNoisedWholeNeverSaysItDiffersInEncoding(t *testing.T) {
+	r := protoReplayer(t)
+	// The new body writes status's default value: the same fields, encoded
+	// otherwise. Noise excuses the difference; the test passes.
+	rec := ordersCase("1: {\"o-1\"}", map[string][]string{"body.decoded_data": {}, "body.message_length": {}})
+	pass, res := compareWithProtos(r, rec, ordersResp("1: {\"o-1\"}\n3: {\"\"}"))
+	if !pass {
+		t.Fatalf("the body is noise; the test failed: %+v", res.BodyResult)
+	}
+	d := res.GrpcDecode
+	if d == nil || !strings.Contains(d.ActualJSON, "o-1") || d.Note == encodingOnlyNote {
+		t.Fatalf("decoded view: %+v", d)
+	}
+}
+
+// A test that failed on its status, its body noised whole, never says the
+// body differs in encoding: noise excused it.
+func TestAFailedTestWithItsBodyNoisedNeverSaysItDiffersInEncoding(t *testing.T) {
+	r := protoReplayer(t)
+	rec := ordersCase("1: {\"o-1\"}", map[string][]string{"body.decoded_data": {}, "body.message_length": {}})
+	act := ordersResp("1: {\"o-1\"}\n3: {\"\"}")
+	act.Trailers.OrdinaryHeaders = map[string]string{"grpc-status": "5"}
+	pass, res := compareWithProtos(r, rec, act)
+	if pass {
+		t.Fatal("the status changed; the test passed")
+	}
+	if d := res.GrpcDecode; d == nil || d.Note == encodingOnlyNote {
+		t.Fatalf("decoded view: %+v", d)
+	}
+}
+
+// A body that differs only in its encoding, read with the protos, fails
+// graded: never with no risk, which replay would keep no reason for.
+func TestABodyDifferingOnlyInEncodingIsGraded(t *testing.T) {
+	r := protoReplayer(t)
+	pass, res := compareWithProtos(r, ordersCase("1: {\"o-1\"}", nil), ordersResp("1: {\"o-1\"}\n3: {\"\"}"))
+	if pass {
+		t.Fatal("the bytes differ; the test passed")
+	}
+	if res.FailureInfo.Risk == models.None || res.FailureInfo.Assessment == nil || !slices.Contains(res.FailureInfo.Assessment.Reasons, "the decoded fields are equal: the bodies differ only in how they are encoded") {
+		t.Fatalf("not graded: %+v", res.FailureInfo)
+	}
+}
+
 // Test-case noise wins over global noise naming the same field, every run.
 func TestTestCaseNoiseWinsOverGlobalForTheSameField(t *testing.T) {
 	for i := 0; i < 20; i++ {
