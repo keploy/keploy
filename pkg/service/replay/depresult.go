@@ -41,7 +41,11 @@ type mockDisplayInfo struct {
 	// asynchronous output, placed at place (models.PlaceOf), which the release
 	// rule gives to the test whose window or gap after it holds it.
 	carryOver bool
-	place     time.Time
+	// messageDelivery: a broker message delivery (models.IsMessageDelivery,
+	// e.g. SQS ReceiveMessage with Messages, Kafka Fetch with records) that is
+	// spent once and never re-armed by the readiness gate.
+	messageDelivery bool
+	place           time.Time
 	// fault is the mock's models.Mock.FaultServed: the line the set's
 	// summary says of it when the replay served it (logFaultsServed), "" for
 	// a mock whose answer ends in no fault.

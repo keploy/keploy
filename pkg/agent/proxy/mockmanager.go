@@ -2110,10 +2110,11 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 	m.noteAppStartLocked(filtered, unfiltered, explicitStartup, end,
 		isInitialStaging && !scope && (m.boundaryPending || (!m.testFiredThisSet && !m.scopeFiredThisSet)))
 	if !fenced {
-		// A carry-over mock the app consumed as it started is not staged
-		// again, whatever this staging was handed (bootTaken). The previous
-		// set's are not this one's.
+		// A carry-over mock or message delivery the app consumed as it started
+		// is not staged again, whatever this staging was handed (bootTaken).
+		// The previous set's are not this one's.
 		filtered = m.withoutBootCarry(filtered)
+		explicitStartup = m.withoutBootCarry(explicitStartup)
 	}
 	// Every mock this staging pools is of the set generation current once
 	// it is published.
@@ -4766,14 +4767,23 @@ func (m *MockManager) deleteFilteredTier(mock models.Mock) bool {
 	m.treesMu.Unlock()
 
 	// consumed: the per-test tree held it and the consume counts. A
-	// carry-over mock the app consumed as it started is not consumed again
-	// (bootConsumed: a copy test-1's staging filed before that consume
-	// landed), and a mock the previous set pooled is not this set's
-	// (errPreviousSet): either leaves the tree without it and reports it not
-	// consumed, so the caller matches again against the pool.
+	// carry-over mock or message delivery the app consumed as it started is
+	// not consumed again (bootConsumed: a copy test-1's staging filed before
+	// that consume landed), and a mock the previous set pooled is not this
+	// set's (errPreviousSet): either leaves the tree without it and reports it
+	// not consumed, so the caller matches again against the pool.
 	consumed := deletedGlobal
-	if deletedGlobal && models.IsCarryOver(&mock) && m.bootConsumed(&mock) {
-		consumed = false
+	bootDelivery := false
+	if deletedGlobal && isBootSingleConsume(&mock) {
+		if m.bootConsumed(&mock) {
+			consumed = false
+		} else if models.IsMessageDelivery(&mock) && !m.HasFirstTestFired() {
+			if !m.takeBootOnce(&mock) {
+				consumed = false
+			} else {
+				bootDelivery = true
+			}
+		}
 	}
 	if consumed {
 		if err := m.flagMockAsUsed(models.MockState{
@@ -4793,6 +4803,7 @@ func (m *MockManager) deleteFilteredTier(mock models.Mock) bool {
 			Clocks:           clocksOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
 			LearnedAfterEnd:  m.learnedAfterEndAt(removed, &mock),
+			CarryOver:        bootDelivery,
 		}, mock.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				consumed = false
@@ -5104,7 +5115,7 @@ func (m *MockManager) deleteStartupMockFrom(tree *TreeDb, mock models.Mock) bool
 		// drained the first) is refused, and every later staging leaves it
 		// out (bootTaken).
 		usage, carried := models.Updated, m.consumedOutOfWindow(*mk)
-		if models.IsCarryOver(mk) {
+		if isBootSingleConsume(mk) || (mk.HasSpilledResponse() && models.IsMessageDelivery(&mock)) {
 			usage, carried = models.Deleted, true
 			if tree.bootBuilt && !m.exact.fired.Load() {
 				if !m.takeBootOnce(mk) {
@@ -6776,8 +6787,17 @@ func (m *MockManager) forgetBootTaken(names []string) {
 	m.bootTakenMu.Unlock()
 }
 
-// withoutBootCarry is mocks less the carry-over mocks the app consumed as it
-// started (bootTaken); mocks itself when there are none.
+// isBootSingleConsume reports whether mk is a per-test mock that the
+// application must consume at most once when served before the first test:
+// registered carry-over mocks (models.IsCarryOver) and broker message
+// deliveries (models.IsMessageDelivery, e.g. SQS ReceiveMessage with Messages,
+// Kafka Fetch with records).
+func isBootSingleConsume(mk *models.Mock) bool {
+	return models.IsCarryOver(mk) || models.IsMessageDelivery(mk)
+}
+
+// withoutBootCarry is mocks less the carry-over mocks and message deliveries
+// the app consumed as it started (bootTaken); mocks itself when there are none.
 func (m *MockManager) withoutBootCarry(mocks []*models.Mock) []*models.Mock {
 	m.bootTakenMu.Lock()
 	defer m.bootTakenMu.Unlock()
@@ -6786,7 +6806,7 @@ func (m *MockManager) withoutBootCarry(mocks []*models.Mock) []*models.Mock {
 	}
 	out := make([]*models.Mock, 0, len(mocks))
 	for _, mk := range mocks {
-		if mk != nil && models.IsCarryOver(mk) {
+		if mk != nil && isBootSingleConsume(mk) {
 			if _, taken := m.bootTaken[carryKeyOf(mk)]; taken {
 				continue
 			}

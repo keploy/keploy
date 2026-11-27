@@ -3921,6 +3921,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	carried, initialConsumed := splitCarriedConsumed(consumedMocks)
 	startupConsumed, rearmedConsumed := partitionInitialConsumed(initialConsumed)
 	startupConsumed = append(startupConsumed, carried...)
+	// Never re-arm a broker message delivery (SQS ReceiveMessage with Messages,
+	// Kafka Fetch with records) consumed before the first test, even if an
+	// older agent or test hook did not flag it CarryOver/Deleted: re-arming
+	// would re-stage it into a test window and deliver the same message twice.
+	startupConsumed, rearmedConsumed = splitInitialDeliveries(startupConsumed, rearmedConsumed, mockLookup)
 	// Under exact serving a worker-scope mock (models.Mapping.Worker) the
 	// application consumed before the first test is spent for the staging
 	// on the agent (decision 31): nothing re-arms it, and the set's end
@@ -8566,6 +8571,7 @@ func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock)
 			}
 		}
 		info.carryOver, info.place = models.IsCarryOver(mock), models.PlaceOf(mock)
+		info.messageDelivery = models.IsMessageDelivery(mock)
 		info.fault = mock.FaultServed()
 		lookup[mock.Name] = info
 	}
@@ -11096,6 +11102,34 @@ func splitCarriedConsumed(consumed []models.MockState) (carried, rest []models.M
 		rest = append(rest, m)
 	}
 	return carried, rest
+}
+
+// splitInitialDeliveries moves any broker message delivery (SQS ReceiveMessage
+// with Messages, Kafka Fetch with records) out of rearm and into startup with
+// Usage=Deleted so the readiness-gate re-arm never re-stages a delivery
+// consumed before the first test, and ensures any delivery already in startup
+// (e.g. flagged CarryOver with Usage=Updated by an older agent or hook) is
+// recorded Deleted for filterOutDeleted.
+func splitInitialDeliveries(startup, rearm []models.MockState, lookup map[string]mockDisplayInfo) (nextStartup, nextRearm []models.MockState) {
+	if len(lookup) == 0 {
+		return startup, rearm
+	}
+	nextStartup = make([]models.MockState, len(startup))
+	copy(nextStartup, startup)
+	for i := range nextStartup {
+		if lookup[nextStartup[i].Name].messageDelivery {
+			nextStartup[i].Usage = models.Deleted
+		}
+	}
+	for _, m := range rearm {
+		if lookup[m.Name].messageDelivery {
+			m.Usage = models.Deleted
+			nextStartup = append(nextStartup, m)
+			continue
+		}
+		nextRearm = append(nextRearm, m)
+	}
+	return nextStartup, nextRearm
 }
 
 func isMockSubset(actual []string, expected []string) bool {
