@@ -635,6 +635,17 @@ func TestMountCheckErrorClassificationAndOpenGraceOwner(t *testing.T) {
 				wantHostN:  1,
 			},
 			{
+				// Kills M87: attempt 1 fails with ENOMEM on /sys/fs/bpf (failedPath=n),
+				// retry sees not-bpffs on /sys/fs/bpf and surfaces hostErr EACCES on
+				// /run/keploy/host-bpffs — failedPath MUST refresh to h on retry.
+				name:       "container_eacces_host_fallback_transient",
+				hostErrs:   []error{eacces(h)},
+				nativeErrs: []error{enomem(n), notBPF(n)},
+				wantArmed:  false,
+				wantWarn:   unprotectedPermWarnMessage(h),
+				wantHostN:  2,
+			},
+			{
 				name:        "transient_mountinfo_enomem_recovers_on_retry",
 				hostErrs:    []error{enoent(h)},
 				nativeErrs:  []error{nil},
@@ -923,22 +934,30 @@ func TestMountCheckErrorClassificationAndOpenGraceOwner(t *testing.T) {
 
 		// S1: unmounted host where ensureNativeBPFFS hits a transient fault (statfs,
 		// MkdirAll, or Mount) must retry and end ARMED; persistent faults must log
-		// the system-error or permission WARN rather than the mount hint.
+		// the system-error or permission WARN rather than the mount hint; mount
+		// counts are asserted so stacked mounts or spurious mount attempts fail.
 		ensureCases := []struct {
-			name        string
-			statfsErrs  []error
-			mkdirErrs   []error
-			mountErrs   []error
-			wantArmed   bool
-			wantWarn    string
-			wantEnsureN int
+			name           string
+			statfsErrs     []error
+			mkdirErrs      []error
+			mountErrs      []error
+			nativeErrs     []error
+			wantArmed      bool
+			wantWarn       string
+			wantEnsureN    int
+			wantMountCalls int
+			wantMounted    int
 		}{
-			{"transient_statfs_enomem_recovers", []error{unix.ENOMEM, nil}, nil, nil, true, "", 2},
-			{"transient_mkdir_enomem_recovers", nil, []error{unix.ENOMEM, nil}, nil, true, "", 2},
-			{"transient_mount_enomem_recovers", nil, nil, []error{unix.ENOMEM, nil}, true, "", 2},
-			{"persistent_statfs_enomem_syserr", []error{unix.ENOMEM}, nil, nil, false, UnprotectedMountCheckErrWarnMessage, 2},
-			{"persistent_mount_enomem_syserr", nil, nil, []error{unix.ENOMEM}, false, UnprotectedMountCheckErrWarnMessage, 2},
-			{"mount_eperm_perm_warn_no_retry", nil, nil, []error{unix.EPERM}, false, unprotectedPermWarnMessage(n), 1},
+			{"transient_statfs_enomem_recovers", []error{unix.ENOMEM, nil}, nil, nil, nil, true, "", 2, 1, 1},
+			{"transient_mkdir_enomem_recovers", nil, []error{unix.ENOMEM, nil}, nil, nil, true, "", 2, 1, 1},
+			{"transient_mount_enomem_recovers", nil, nil, []error{unix.ENOMEM, nil}, nil, true, "", 2, 2, 1},
+			{"persistent_statfs_enomem_syserr", []error{unix.ENOMEM}, nil, nil, nil, false, UnprotectedMountCheckErrWarnMessage, 2, 0, 0},
+			{"persistent_mount_enomem_syserr", nil, nil, []error{unix.ENOMEM}, nil, false, UnprotectedMountCheckErrWarnMessage, 2, 2, 0},
+			{"mount_eperm_perm_warn_no_retry", nil, nil, []error{unix.EPERM}, nil, false, unprotectedPermWarnMessage(n), 1, 1, 0},
+			{"mounted_then_validate_enomem_once_no_stack", nil, nil, nil, []error{enomem(n), nil}, true, "", 2, 1, 1},
+			// Kills M88: ensureErr operational ENOMEM takes precedence over validate EACCES
+			// (retries once and logs system-error WARN rather than permission WARN without retry).
+			{"unmounted_statfs_enomem_validate_eacces", []error{unix.ENOMEM}, nil, nil, []error{eacces(n)}, false, UnprotectedMountCheckErrWarnMessage, 2, 0, 0},
 		}
 		for _, tc := range ensureCases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -956,15 +975,14 @@ func TestMountCheckErrorClassificationAndOpenGraceOwner(t *testing.T) {
 					}
 					return errs[idx]
 				}
-				mounted := false
-				var statN, mkdirN, mountN int
+				var mounts, stacked, statN, mkdirN, mountN, natN int
 				nativeBPFFSStatfsFn = func(_ string, buf *unix.Statfs_t) error {
 					e := pick(tc.statfsErrs, statN)
 					statN++
 					if e != nil {
 						return e
 					}
-					if mounted {
+					if mounts > 0 {
 						buf.Type = unix.BPF_FS_MAGIC
 					} else {
 						buf.Type = 0x62656572
@@ -982,14 +1000,22 @@ func TestMountCheckErrorClassificationAndOpenGraceOwner(t *testing.T) {
 					if e != nil {
 						return e
 					}
-					mounted = true
+					if mounts > 0 {
+						stacked++
+					}
+					mounts++
 					return nil
 				}
 				validateHostBPFFSPathFn = func(path string, _ bool) error {
 					if path == h {
 						return enoent(h)
 					}
-					if mounted {
+					e := pick(tc.nativeErrs, natN)
+					natN++
+					if e != nil {
+						return e
+					}
+					if mounts > 0 {
 						return nil
 					}
 					return notBPF(n)
@@ -1023,6 +1049,9 @@ func TestMountCheckErrorClassificationAndOpenGraceOwner(t *testing.T) {
 				}
 				if statN != tc.wantEnsureN {
 					t.Fatalf("ensure statfs calls = %d, want %d", statN, tc.wantEnsureN)
+				}
+				if mountN != tc.wantMountCalls || mounts != tc.wantMounted || stacked != 0 {
+					t.Fatalf("mount calls=%d (want %d), mounted=%d (want %d), stacked=%d (want 0)", mountN, tc.wantMountCalls, mounts, tc.wantMounted, stacked)
 				}
 				if tc.wantArmed {
 					if logs.Len() != 0 {
