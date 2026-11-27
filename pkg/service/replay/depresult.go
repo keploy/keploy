@@ -41,7 +41,16 @@ type mockDisplayInfo struct {
 	// asynchronous output, placed at place (models.PlaceOf), which the release
 	// rule gives to the test whose window or gap after it holds it.
 	carryOver bool
-	place     time.Time
+	// messageDelivery: a broker message delivery (models.IsMessageDelivery,
+	// e.g. SQS ReceiveMessage with Messages, Kafka Fetch with records) that is
+	// spent once and never re-armed by the readiness gate.
+	messageDelivery bool
+	// testDriven: true when the mock represents a test-driven outgoing call
+	// suitable for default-mode unmade-call reporting (excludes reusable,
+	// carry-over, message deliveries, idle/undelivered mocks, and Kafka
+	// consumer-group / broker coordination calls such as OffsetFetch).
+	testDriven bool
+	place      time.Time
 	// fault is the mock's models.Mock.FaultServed: the line the set's
 	// summary says of it when the replay served it (logFaultsServed), "" for
 	// a mock whose answer ends in no fault.
@@ -1092,6 +1101,14 @@ func (r *Replayer) warnUnexercisedDependencies(testSetID string, tests map[strin
 		missedClosest := map[string]map[string]bool{}
 		for _, f := range r.mockMismatchFailures.GetFailures() {
 			if f.TestSetID == testSetID && f.FailureReason == models.ErrMockNotFound && f.MismatchReport != nil && f.MismatchReport.CountsAgainstTest() && f.MismatchReport.ClosestMock != "" {
+				if missedClosest[f.TestID] == nil {
+					missedClosest[f.TestID] = map[string]bool{}
+				}
+				missedClosest[f.TestID][f.MismatchReport.ClosestMock] = true
+			}
+		}
+		for _, f := range r.mockMismatchFailures.GetUnmadeOutgoingCalls() {
+			if f.TestSetID == testSetID && f.MismatchReport != nil && f.MismatchReport.ClosestMock != "" {
 				if missedClosest[f.TestID] == nil {
 					missedClosest[f.TestID] = map[string]bool{}
 				}

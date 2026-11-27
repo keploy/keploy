@@ -1988,11 +1988,20 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 					zap.String("next_step", failedMismatchNextStep(failedRows)))
 				r.mockMismatchFailures.PrintFailuresTableRows(r.console, failedRows)
 			}
+			unmadeRows := filterUnmadeNotCoveredByDrifted(r.mockMismatchFailures.GetUnmadeOutgoingCalls(), tableUnmatched)
+			if len(unmadeRows) > 0 {
+				tableUnmatched = append(tableUnmatched, unmadeRows...)
+			}
 			if len(tableUnmatched) > 0 {
 				warnMsg := outgoingDiffTableWarnMessage(tableUnmatched, passedTests, testRunResult, failedTestCount)
-				r.logger.Warn(warnMsg,
+				warnFields := []zap.Field{
 					zap.String("test_sets", joinSortedTestSets(tableUnmatched)),
-					zap.String("next_step", "Review the outgoing call diffs table below. Add drifting dynamic fields as noise (test.globalNoise), or re-record the test-set with 'keploy record' if the request structure changed."))
+					zap.String("next_step", "Review the outgoing call diffs table below. Add drifting dynamic fields as noise (test.globalNoise), or re-record the test-set with 'keploy record' if the request structure changed."),
+				}
+				if len(unmadeRows) > 0 {
+					warnFields = append(warnFields, zap.Strings("unmade_calls", unmadeCallDescriptions(unmadeRows)))
+				}
+				r.logger.Warn(warnMsg, warnFields...)
 				r.printOutgoingDiffTable(tableUnmatched)
 			}
 			if len(mappingOnly) > 0 {
@@ -2910,6 +2919,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// mocks are loaded (loadTestSetMocks), or below, before the tests run,
 	// when they are not loaded here.
 	var mockLookup map[string]mockDisplayInfo
+	// recordedWindowExpected holds per-test recorded test-driven outgoing calls
+	// derived from recorded test windows when a set runs unmapped (e.g.
+	// auto-replay before mappings.yaml exists), so default mode can report
+	// recorded calls that were not seen in a passing test's window.
+	var recordedWindowExpected map[string][]models.MockEntry
 	addKinds := func(mocks []*models.Mock) {
 		for _, m := range mocks {
 			mockKindByName[m.Name] = m.Kind
@@ -3057,6 +3071,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			expectedTestMockMappings, workerScope, conc = r.windowOwnershipOf(testSetID, testCases, windowsWhy, skipped.windowed, filtered, unfiltered)
 		}
 		mockLookup = lookup
+		if !useMappingBased && r.instrument {
+			recordedWindowExpected = deriveRecordedWindowExpected(testCases, filtered, startupMockNames)
+		}
 		addKinds(filtered)
 		addKinds(unfiltered)
 		addSkippedKinds(skipped.kinds)
@@ -3921,6 +3938,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	carried, initialConsumed := splitCarriedConsumed(consumedMocks)
 	startupConsumed, rearmedConsumed := partitionInitialConsumed(initialConsumed)
 	startupConsumed = append(startupConsumed, carried...)
+	// Never re-arm a broker message delivery (SQS ReceiveMessage with Messages,
+	// Kafka Fetch with records) consumed before the first test, even if an
+	// older agent or test hook did not flag it CarryOver/Deleted: re-arming
+	// would re-stage it into a test window and deliver the same message twice.
+	startupConsumed, rearmedConsumed = splitInitialDeliveries(startupConsumed, rearmedConsumed, mockLookup)
 	// Under exact serving a worker-scope mock (models.Mapping.Worker) the
 	// application consumed before the first test is spent for the staging
 	// on the agent (decision 31): nothing re-arms it, and the set's end
@@ -3970,7 +3992,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// A per-test mock re-armed above that was recorded in a test's window (a
 	// readiness gate's) belongs to its own test's section, not to startup.
 	setupBoot := bootBandOf(rearmedConsumed, models.NewWindowSchedule(recordedTestWindows(testCases)), firstRecordedTestStart(testCases), "")
-	setStartupMocks(actualTestMockMappings, append(append([]models.MockState(nil), startupConsumed...), setupBoot...))
+	// Never bake a pre-test broker message delivery into mappings.yaml's
+	// STARTUP section: early consumption is spent once for this run (via
+	// totalConsumedMocks) without turning a delivery into permanent startup
+	// traffic for future mapped runs.
+	setStartupMocks(actualTestMockMappings, append(append([]models.MockState(nil), withoutMessageDeliveries(startupConsumed, mockLookup)...), setupBoot...))
 
 	// Snapshot the post-setup consumed-mock baseline. These are the
 	// reusable/session mocks (driver handshake, auth, connection pool
@@ -5348,6 +5374,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					missingDepNames, depLevel := attachDepResults(testCaseResult, testStatus, depAssert, r.assertTestMocks())
 					recordUnexercised(depMissingTests, testCase.Name, testStatus, depLevel)
 					recordUnexercisedMocks(r.unexercisedMocksByTest, testCase.Name, depAssert.Missing, depLevel)
+					if !r.assertTestMocks() && testStatus == models.TestStatusPassed && perTestConsumedKnown {
+						var unmadeMissing []models.UnconsumedMock
+						if depAssert.Checked {
+							unmadeMissing = depAssert.Missing
+						} else if !useMappingBased && len(recordedWindowExpected[testCase.Name]) > 0 {
+							unmadeMissing = unmadeFromWindowExpected(recordedWindowExpected[testCase.Name], perTestConsumed, reusableMockNames, mockKindByName, mockLookup)
+						}
+						r.mockMismatchFailures.SetUnmadeOutgoingCalls(testSetID, testCase.Name, buildUnmadeOutgoingCallRows(testSetID, testCase.Name, unmadeMissing, mockLookup))
+					} else {
+						r.mockMismatchFailures.SetUnmadeOutgoingCalls(testSetID, testCase.Name, nil)
+					}
 					switch depLevel {
 					case depLogError:
 						r.logger.Error("dependency assertion failed: an expected dependency was not observed during this test's window",
@@ -6386,6 +6423,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	for k, v := range totalConsumedMocks.Map() {
 		allConsumedAcrossCycles[k] = v
 	}
+
+	// Drop any default-mode unmade outgoing-call rows whose recorded mock was
+	// consumed elsewhere in the test set (e.g., an async / linger-batched
+	// producer flushed after the test's HTTP response was written).
+	r.mockMismatchFailures.PruneConsumedUnmadeOutgoingCalls(testSetID, allConsumedAcrossCycles)
 
 	// ONE summary line per test set for dependencies that were recorded but
 	// not observed, in the default (knob off) mode. Per-test this is logged
@@ -8566,6 +8608,8 @@ func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock)
 			}
 		}
 		info.carryOver, info.place = models.IsCarryOver(mock), models.PlaceOf(mock)
+		info.messageDelivery = models.IsMessageDelivery(mock)
+		info.testDriven = isTestDrivenOutgoingMock(mock)
 		info.fault = mock.FaultServed()
 		lookup[mock.Name] = info
 	}
@@ -11096,6 +11140,34 @@ func splitCarriedConsumed(consumed []models.MockState) (carried, rest []models.M
 		rest = append(rest, m)
 	}
 	return carried, rest
+}
+
+// splitInitialDeliveries moves any broker message delivery (SQS ReceiveMessage
+// with Messages, Kafka Fetch with records) out of rearm and into startup with
+// Usage=Deleted so the readiness-gate re-arm never re-stages a delivery
+// consumed before the first test, and ensures any delivery already in startup
+// (e.g. flagged CarryOver with Usage=Updated by an older agent or hook) is
+// recorded Deleted for filterOutDeleted.
+func splitInitialDeliveries(startup, rearm []models.MockState, lookup map[string]mockDisplayInfo) (nextStartup, nextRearm []models.MockState) {
+	if len(lookup) == 0 {
+		return startup, rearm
+	}
+	nextStartup = make([]models.MockState, len(startup))
+	copy(nextStartup, startup)
+	for i := range nextStartup {
+		if lookup[nextStartup[i].Name].messageDelivery {
+			nextStartup[i].Usage = models.Deleted
+		}
+	}
+	for _, m := range rearm {
+		if lookup[m.Name].messageDelivery {
+			m.Usage = models.Deleted
+			nextStartup = append(nextStartup, m)
+			continue
+		}
+		nextRearm = append(nextRearm, m)
+	}
+	return nextStartup, nextRearm
 }
 
 func isMockSubset(actual []string, expected []string) bool {

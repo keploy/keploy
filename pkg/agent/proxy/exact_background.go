@@ -468,7 +468,8 @@ func (m *MockManager) consumeUnsetBackground(mk *models.Mock, evicts bool, g *ro
 		if tier == nil || !tier() {
 			return true, false
 		}
-		if (evicts && bg.inPool(mk.Name)) || answersOnce(&m.exact.poolTrails, m.exact.poolSeries.Load(), mk.Name) {
+		series := m.exact.poolSeries.Load()
+		if (evicts && bg.inPool(mk.Name)) || answersOnce(&m.exact.poolTrails, series, mk.Name) || (!series.has(mk.Name) && models.IsMessageDelivery(mk)) {
 			bg.trySpend(mk.Name)
 		}
 		if observe != nil {

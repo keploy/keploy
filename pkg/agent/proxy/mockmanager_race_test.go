@@ -173,9 +173,10 @@ func TestTierKeyKeepsEveryFieldButTheID(t *testing.T) {
 			LoadSeq:         9,
 		},
 	}
-	// Populate the unexported readThroughState cache on TestModeInfo without
-	// altering the already-derived Lifetime fields.
+	// Populate the unexported readThroughState and messageDelivery caches on
+	// TestModeInfo without altering the already-derived Lifetime fields.
 	src.DeriveLifetime()
+	src.MarkMessageDelivery()
 	v := reflect.ValueOf(src.TestModeInfo)
 	for i := 0; i < v.NumField(); i++ {
 		if v.Field(i).IsZero() {

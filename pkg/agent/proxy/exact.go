@@ -814,6 +814,18 @@ func (o *outsideAnswers) trailUsed(name string, epoch uint64) bool {
 	return used
 }
 
+// isMessageDelivery reports whether the staged recording named name in epoch
+// is a broker message delivery (models.IsMessageDelivery), which answers at
+// most one call in the staging wherever its call lands unless a declared
+// rule's series manages it.
+func (o *outsideAnswers) isMessageDelivery(name string, epoch uint64) bool {
+	st := o.cur.Load()
+	if st == nil || st.epoch != epoch {
+		return false
+	}
+	return models.IsMessageDelivery(st.staged[name])
+}
+
 // isTrail reports whether name is, in trails (the manager's poolTrails), a
 // recording a trail move put in the worker scope.
 func isTrail(trails *atomic.Pointer[map[string]string], name string) bool {
@@ -950,7 +962,7 @@ func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict 
 	// staging, as a trailing write with no series does
 	// (seriesIndex.answersOnce).
 	series := m.exact.poolSeries.Load()
-	if answersOnce(&m.exact.poolTrails, series, mk.Name) {
+	if answersOnce(&m.exact.poolTrails, series, mk.Name) || (!series.has(mk.Name) && (models.IsMessageDelivery(staged) || models.IsMessageDelivery(mk))) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
 			return exactRefused
 		}
@@ -997,7 +1009,8 @@ func (m *MockManager) consumeBetween(mk *models.Mock) (verdict exactVerdict, fir
 	// answers again here, as the rest of the worker scope does, but for a
 	// once series' recording, which answers once in the staging wherever
 	// its call lands (seriesIndex.answersOnce).
-	if answersOnce(&m.exact.poolTrails, m.exact.poolSeries.Load(), mk.Name) {
+	series := m.exact.poolSeries.Load()
+	if answersOnce(&m.exact.poolTrails, series, mk.Name) || (!series.has(mk.Name) && (models.IsMessageDelivery(staged) || models.IsMessageDelivery(mk))) {
 		if _, taken := st.trailUsed.LoadOrStore(mk.Name, true); taken {
 			return exactRefused, false
 		}
@@ -3271,10 +3284,10 @@ func (v *exactView) spentOutsideIn(name string, windowed bool) bool {
 	if v.series != nil {
 		series = v.series.Load()
 	}
-	if answersOnce(v.trails, series, name) {
-		// A trailing write with no series, or a once series' recording,
-		// that answered once is spent for the staging, in every window and
-		// between tests
+	if answersOnce(v.trails, series, name) || (!series.has(name) && v.outside.isMessageDelivery(name, e)) {
+		// A trailing write with no series, a once series' recording, or a
+		// broker message delivery outside a declared series that answered once
+		// is spent for the staging, in every window and between tests
 		// (outsideState.trailUsed).
 		return v.outside.trailUsed(name, e)
 	}
@@ -4015,7 +4028,7 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		(*f)(mk.Name)
 	}
 	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
-		if v != nil && mk != nil && (evicts || v.spendsInTests(mk, g.windowed(v)) || v.spendsBetween(mk, g.windowed(v)) || v.spendsAsPool(mk)) {
+		if v != nil && mk != nil && (evicts || v.spendsInTests(mk, g.windowed(v)) || v.spendsBetween(mk, g.windowed(v)) || v.spendsAsPool(mk) || (v.test == "" && !mk.IsProtocolPhase() && models.IsMessageDelivery(mk))) {
 			if _, own := v.index[mk.Name]; !own {
 				// What a spend reads (consumeOutside), and the staged
 				// recording its take names (stagedRecording), before the
@@ -4199,7 +4212,8 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool,
 		}
 	}
 	worker := v.spendsInTests(mk, windowed)
-	if !evicts && !worker && !v.spendsAsPool(mk) {
+	bootDelivery := v.test == "" && !mk.IsProtocolPhase() && models.IsMessageDelivery(mk)
+	if !evicts && !worker && !v.spendsAsPool(mk) && !bootDelivery {
 		return exactPass, nil, nil
 	}
 	// A data-plane recording consumed through a delete door with no test

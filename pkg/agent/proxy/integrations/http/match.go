@@ -2237,8 +2237,10 @@ func (h *HTTP) consumeWith(ctx context.Context, matchedMock *models.Mock, mockDb
 		return mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
 	}
 	// A per-test recording of a stateful dependency, as a recorder that states
-	// lifetimes writes it (ConsumeCursorSaturate).
-	if lifetime == models.LifetimePerTest && updatedMock.TestModeInfo.Consume == models.ConsumeCursorSaturate && matchedMock.StatesLifetime() {
+	// lifetimes writes it (ConsumeCursorSaturate). Message deliveries (e.g.
+	// SQS ReceiveMessage with Messages) are single-consume events and must
+	// never take the keeping/cursor-saturate path.
+	if lifetime == models.LifetimePerTest && updatedMock.TestModeInfo.Consume == models.ConsumeCursorSaturate && matchedMock.StatesLifetime() && !models.IsMessageDelivery(matchedMock) {
 		used := *matchedMock
 		attach(&used.Spec)
 		// No open test's own (openTestOwner: no test is open, or every test
