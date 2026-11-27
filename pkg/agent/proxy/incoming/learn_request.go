@@ -8,7 +8,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -146,8 +145,9 @@ var tooLarge = fmt.Sprintf("its body is larger than the %d bytes keploy reads of
 // text as sent, one of another encoding is not read, as a recording keeps
 // it as its client sent it; a multipart form is
 // taken apart into its text parts (live.Form), its Content-Type kept
-// without its boundary, and a file part in it is not read; a form sent
-// URL-encoded is unescaped; any other body is its text.
+// without its boundary, and a file part in it is not read; any other body
+// (including application/x-www-form-urlencoded, kept raw so percent-encoded
+// delimiters stay intact) is its text.
 func readTakenBody(live *models.HTTPReq, h http.Header, body []byte) string {
 	if enc := strings.TrimSpace(h.Get("Content-Encoding")); enc != "" {
 		switch strings.ToLower(enc) {
@@ -174,11 +174,6 @@ func readTakenBody(live *models.HTTPReq, h http.Header, body []byte) string {
 		}
 		live.Form = form
 		live.Header["Content-Type"] = strings.TrimSpace(strings.Split(ct, ";")[0])
-	case ct == "application/x-www-form-urlencoded":
-		live.Body = string(body)
-		if decoded, err := url.QueryUnescape(live.Body); err == nil {
-			live.Body = decoded
-		}
 	default:
 		live.Body = string(body)
 	}

@@ -377,11 +377,21 @@ func (v reqView) read(vp varPlace) (held, bool) {
 func (v reqView) leaf(p variables.Place) (held, bool) {
 	switch p.Part {
 	case variables.PartBody:
-		l, ok := variables.JSONLeafAt(v.body, p.Path)
-		if !ok {
-			return held{}, false
+		if variables.IsJSONDoc(v.body) {
+			l, ok := variables.JSONLeafAt(v.body, p.Path)
+			if !ok {
+				return held{}, false
+			}
+			return held{value: l.Value(v.body), kind: l.Kind, raw: l.Raw(v.body), body: true}, true
 		}
-		return held{value: l.Value(v.body), kind: l.Kind, raw: l.Raw(v.body), body: true}, true
+		if ct := v.header.Get("Content-Type"); variables.IsFormMediaType(ct) {
+			val, ok := variables.FormLeafAt(v.body, ct, p.Path)
+			if !ok {
+				return held{}, false
+			}
+			return held{value: val, kind: templates.LeafString}, true
+		}
+		return held{}, false
 	case variables.PartPath:
 		if p.Index >= len(v.segments) {
 			return held{}, false
@@ -444,7 +454,7 @@ func (v reqView) putBackWords(p variables.Place, puts []variables.WordPut) (out 
 		return v, i, j, false
 	}
 	put := held{value: text}
-	if p.Part == variables.PartBody {
+	if p.Part == variables.PartBody && (variables.IsJSONDoc(v.body) || !variables.IsFormMediaType(v.header.Get("Content-Type"))) {
 		raw, ok := variables.SpliceJSONString(cur.raw, text)
 		if !ok {
 			return v, 0, -1, false
@@ -459,6 +469,14 @@ func (v reqView) putBackWords(p variables.Place, puts []variables.WordPut) (out 
 func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 	switch p.Part {
 	case variables.PartBody:
+		if !variables.IsJSONDoc(v.body) && variables.IsFormMediaType(v.header.Get("Content-Type")) {
+			body, ok := variables.SpliceFormAt(v.body, p.Path, rec.value)
+			if !ok {
+				return v, false
+			}
+			v.body = body
+			break
+		}
 		body, ok := variables.SpliceAt(v.body, p.Path, rec.raw)
 		if !ok {
 			return v, false

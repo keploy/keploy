@@ -1,0 +1,154 @@
+package proxy
+
+import (
+	"fmt"
+	"net/url"
+	"strconv"
+	"testing"
+	"time"
+
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+)
+
+// TestWireFormURLEncodedRoundTripThroughCaptureLearnAndReplay feeds raw HTTP
+// wire bytes containing encoded '&' (%26), '=' (%3D), '+' (%2B), '%' (%25),
+// spaces, and an encoded redirect_uri with query parameters through
+// IngressProxyManager.takeRequest (readTakenBody), into learn.Tracker.Incoming,
+// through learn.Decide, and finally back out through httpint.RequestPlace under
+// both exact Content-Type "application/x-www-form-urlencoded" and parameterized
+// "application/x-www-form-urlencoded; charset=utf-8". Capture keeps the raw wire
+// bytes so per-pair decoding preserves embedded delimiters without truncation
+// or phantom keys, and invalid percent escapes fail closed.
+func TestWireFormURLEncodedRoundTripThroughCaptureLearnAndReplay(t *testing.T) {
+	rNanos := int64(1794207702156240454)
+	fNanos := rNanos + int64(69*time.Second+3*time.Millisecond)
+	rReqAt := time.Unix(0, rNanos).Add(131 * time.Microsecond)
+	fReqAt := time.Unix(0, fNanos).Add(131 * time.Microsecond)
+	rCallAt, fCallAt := rReqAt.Add(2*time.Millisecond), fReqAt.Add(2*time.Millisecond)
+	ns := func(v int64) string { return strconv.FormatInt(v, 10) }
+
+	rInst, fInst := "cli-inst-"+ns(rNanos), "cli-inst-"+ns(fNanos)
+	rChal, fChal := "pkceRec+token/99", "pkceLive+token/88"
+	rNote, fNote := "x&y=rec 50% off", "x&y=live 75% off"
+	rRedirect := "https://app.example/cb?state=abc&nonce=" + ns(rNanos)
+	fRedirect := "https://app.example/cb?state=abc&nonce=" + ns(fNanos)
+
+	capture := func(ct, rawWireBody string, at time.Time) *models.HTTPReq {
+		t.Helper()
+		log := &requestLog{}
+		log.wants.Store(true)
+		pm := &IngressProxyManager{logger: zap.NewNop()}
+		pm.SetRequestTaker(log)
+		rawHTTP := fmt.Sprintf("POST /oauth/par HTTP/1.1\r\nHost: localhost:8083\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n%s",
+			ct, len(rawWireBody), rawWireBody)
+		pm.takeRequest(readRequest(t, rawHTTP), at)
+		got := log.list()
+		if len(got) != 1 || got[0].unread != "" {
+			t.Fatalf("takeRequest(%s) = %+v; want 1 readable request", ct, got)
+		}
+		got[0].req.Timestamp = at
+		return got[0].req
+	}
+
+	for _, ct := range []string{
+		"application/x-www-form-urlencoded",
+		"application/x-www-form-urlencoded; charset=utf-8",
+	} {
+		t.Run(ct, func(t *testing.T) {
+			recWire := url.Values{
+				"client_id":       {"demo-cli"},
+				"redirect_uri":    {rRedirect},
+				"installation_id": {rInst},
+				"code_challenge":  {rChal},
+				"note":            {rNote},
+			}.Encode()
+			liveWire := url.Values{
+				"client_id":       {"demo-cli"},
+				"redirect_uri":    {fRedirect},
+				"installation_id": {fInst},
+				"code_challenge":  {fChal},
+				"note":            {fNote},
+			}.Encode()
+
+			recReq := capture(ct, recWire, rReqAt)
+			liveReq := capture(ct, liveWire, fReqAt)
+
+			tr := learn.NewTracker()
+			tr.SetClientTests(true)
+			tr.Begin()
+			tr.SetCases([]learn.ClientCase{{Name: "post-oauth-par-2", Req: recReq}})
+			if !tr.Incoming(liveReq, "", fReqAt) {
+				t.Fatal("Tracker.Incoming did not pair form request")
+			}
+
+			dc := tr.Drifts()
+			placeAll := func(l learn.Leaf, _ bool) (string, bool) { return learn.VarPlace(l, true) }
+
+			// 1. Learn + replay-read UnixNano word inside installation_id.
+			ds := learn.Decide(learn.Input{
+				Drifts:  dc,
+				Drift:   []string{"body.docs.msgs.0.installation_id"},
+				Rec:     learn.Shape{Leaves: map[string]learn.Leaf{"body.docs.msgs.0.installation_id": {Path: "body.docs.msgs.0.installation_id", Type: learn.String, Value: rInst}}},
+				Live:    learn.Shape{Leaves: map[string]learn.Leaf{"body.docs.msgs.0.installation_id": {Path: "body.docs.msgs.0.installation_id", Type: learn.String, Value: fInst}}},
+				At:      rCallAt,
+				Arrived: fCallAt,
+				Earlier: tr.Placed().Earlier,
+				Caps:    learn.Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
+				PlaceOf: placeAll,
+			})
+			if len(ds) != 1 || ds[0].Outcome != learn.OutcomeValue || !ds[0].From.Client || ds[0].FromAt.String() != "body.installation_id#2" {
+				t.Fatalf("installation_id Decide = %+v; want OutcomeValue at body.installation_id#2", ds)
+			}
+			if val, why := httpint.RequestPlace(recReq, liveReq, ds[0].FromAt.String(), ds[0].Recorded); why != "" || val != ns(fNanos) {
+				t.Fatalf("RequestPlace(%s) = (%q, %q); want (%q, \"\")", ds[0].FromAt.String(), val, why, ns(fNanos))
+			}
+
+			// 2. Replay-read whole fields with literal '+', '%', '&', and '=' without truncation or phantom keys.
+			if val, why := httpint.RequestPlace(recReq, liveReq, "body.code_challenge", rChal); why != "" || val != fChal {
+				t.Fatalf("RequestPlace(body.code_challenge) = (%q, %q); want (%q, \"\")", val, why, fChal)
+			}
+			if val, why := httpint.RequestPlace(recReq, liveReq, "body.note", rNote); why != "" || val != fNote {
+				t.Fatalf("RequestPlace(body.note) = (%q, %q); want (%q, \"\")", val, why, fNote)
+			}
+			if val, why := httpint.RequestPlace(recReq, liveReq, "body.y", "rec 50% off"); why == "" {
+				t.Fatalf("RequestPlace(body.y) = (%q, \"\"); phantom key from encoded &/= must be refused", val)
+			}
+			if val, why := httpint.RequestPlace(recReq, liveReq, "body.redirect_uri", rRedirect); why != "" || val != fRedirect {
+				t.Fatalf("RequestPlace(body.redirect_uri) = (%q, %q); want (%q, \"\")", val, why, fRedirect)
+			}
+			if val, why := httpint.RequestPlace(recReq, liveReq, "body.nonce", ns(rNanos)); why == "" {
+				t.Fatalf("RequestPlace(body.nonce) = (%q, \"\"); phantom key from encoded & inside redirect_uri must be refused", val)
+			}
+
+			// 3. Invalid escape anywhere in the form body fails closed (never reads raw "a+b%20c")
+			// and capture preserves the raw wire bytes without dropping the request.
+			badRec := capture(ct, "discount=50%&name=a+b%20c", rReqAt)
+			badLive := capture(ct, "discount=50%&name=c+d%20e", fReqAt)
+			if badRec.Body != "discount=50%&name=a+b%20c" {
+				t.Fatalf("capture altered raw wire body: got %q", badRec.Body)
+			}
+			if val, why := httpint.RequestPlace(badRec, badLive, "body.name", "a+b%20c"); why == "" {
+				t.Fatalf("RequestPlace on invalid-escape form = (%q, \"\"); want failure", val)
+			}
+			if val, why := httpint.RequestPlace(badRec, badLive, "body.name", "a b c"); why == "" {
+				t.Fatalf("RequestPlace on invalid-escape form = (%q, \"\"); want failure", val)
+			}
+
+			// 4. Backward compatibility: legacy pre-decoded recordings paired with
+			// raw live requests fail closed cleanly (never silently bind wrong data).
+			legacyDecodedRec := &models.HTTPReq{
+				Method:    "POST",
+				URL:       "http://localhost:8083/oauth/par",
+				Timestamp: rReqAt,
+				Header:    map[string]string{"Content-Type": ct, "Host": "localhost:8083"},
+				Body:      "redirect_uri=https://app.example/cb?state=abc&nonce=111&note=x&y=rec 50% off",
+			}
+			if val, why := httpint.RequestPlace(legacyDecodedRec, liveReq, "body.redirect_uri", rRedirect); why == "" {
+				t.Fatalf("RequestPlace on legacy decoded recording = (%q, \"\"); want fail-closed mismatch", val)
+			}
+		})
+	}
+}

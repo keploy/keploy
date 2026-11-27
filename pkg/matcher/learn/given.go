@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // THE TEST CASE'S OWN REQUEST.
@@ -143,8 +144,9 @@ const strayRequest = "the test case's request reached the agent while no test wa
 // (Earlier.Given), read as the HTTP adapter reads an exchange F served: each
 // part a leaf, recorded and as sent; its URL as its path's segments and its
 // query's values (url.path.<i>, url.query.<key>), never its scheme, host or
-// port, where the application is reached; a JSON body's leaves too, ahead of
-// the body whole, so a reason names the leaf, and its object keys
+// port, where the application is reached; a JSON body's leaves (or an
+// application/x-www-form-urlencoded body's body.<key> leaves) too, ahead of
+// the body whole, so a reason names the leaf, and a JSON body's object keys
 // (KeysLeaf); the text a body kept as the base64 of its bytes holds
 // (binaryText), beside the base64; the names of its query
 // parameters, headers and form fields (request{names}); and none of what
@@ -214,7 +216,19 @@ func GivenRequest(req *models.TestRequest) Earlier {
 				continue
 			}
 		case part.Name == "body":
-			e.Seen = append(e.Seen, jsonSeen(part.Recorded, part.Sent)...)
+			if !variables.IsJSONDoc(part.Recorded) && variables.IsFormMediaType(recMedia) {
+				if leaves, rn, sn, ok := formSeen(part.Recorded, recMedia, part.Sent, sentMedia); ok {
+					e.Seen = append(e.Seen, leaves...)
+					for _, n := range rn {
+						recNames[n] = true
+					}
+					for _, n := range sn {
+						sentNames[n] = true
+					}
+				}
+			} else {
+				e.Seen = append(e.Seen, jsonSeen(part.Recorded, part.Sent)...)
+			}
 		case part.Name == "binary":
 			// A body of a text media type keploy keeps as the base64 of
 			// its bytes (models.HTTPReq.Binary): read as the text its bytes
@@ -323,6 +337,48 @@ func textMedia(ct string) bool {
 		return true
 	}
 	return false
+}
+
+// formSeen are the leaves of a raw wire application/x-www-form-urlencoded test
+// request body, recorded and as sent, by key (body.<key>), with the parameter
+// names on each side; ok is false for an empty, JSON, or unparseable recorded
+// body. A key that repeats on either side, is empty, or holds '.', '[' or ']'
+// is marked Unnamed so it stays visible as an earlier text while never naming a
+// single-value variable place.
+func formSeen(recorded, recMedia, sent, sentMedia string) (leaves []Seen, recNames, sentNames []string, ok bool) {
+	rf, rok := variables.ParseFormBody(recorded, recMedia)
+	if !rok {
+		return nil, nil, nil, false
+	}
+	lf, _ := variables.ParseFormBody(sent, sentMedia)
+	join := func(vs []string) string {
+		if len(vs) == 0 {
+			return ""
+		}
+		if len(vs) == 1 {
+			return vs[0]
+		}
+		cp := append([]string(nil), vs...)
+		sort.Strings(cp)
+		return strings.Join(cp, ", ")
+	}
+	keys := make([]string, 0, len(rf))
+	for k := range rf {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		rvs := rf[k]
+		lvs := lf[k]
+		p := "body." + k
+		unnamed := k == "" || len(rvs) != 1 || len(lvs) > 1 || strings.ContainsAny(k, ".[]")
+		leaves = append(leaves, Seen{Side: Request, Leaf: Leaf{Path: p, Noise: p, Type: String, Value: join(rvs), Unnamed: unnamed}, Live: join(lvs)})
+		recNames = append(recNames, k)
+	}
+	for k := range lf {
+		sentNames = append(sentNames, k)
+	}
+	return leaves, recNames, sentNames, true
 }
 
 // bodyUnread is why one side of a test case's request body (part: "body",

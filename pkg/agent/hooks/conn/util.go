@@ -261,13 +261,6 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 				RemoveFormFiles(logger, formData)
 			}
 		}()
-	} else if contentType := req.Header.Get("Content-Type"); contentType == "application/x-www-form-urlencoded" {
-		decodedBody, err := url.QueryUnescape(string(reqBody))
-		if err != nil {
-			utils.LogError(logger, err, "failed to decode the url-encoded request body")
-			return
-		}
-		reqBody = []byte(decodedBody)
 	}
 
 	if resp.Header.Get("Content-Encoding") != "" {

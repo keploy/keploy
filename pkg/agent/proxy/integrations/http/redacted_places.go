@@ -344,6 +344,9 @@ func redactedPlacesOf(r *models.HTTPReq, noise []string) redactedPlaces {
 	}
 	ct := headerValue(r.Header, "Content-Type")
 	p.fieldsIn = fieldsForm(ct)
+	if p.fieldsIn == bodyFormURLEncoded && variables.IsJSONDoc(r.Body) {
+		p.fieldsIn = bodyJSON
+	}
 	if p.values == nil {
 		return p
 	}

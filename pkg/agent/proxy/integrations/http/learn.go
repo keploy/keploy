@@ -282,7 +282,7 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 	switch {
 	case len(p.body) == 0:
 		s.Fixed["body"] = ""
-	case p.mediaType == "application/x-www-form-urlencoded":
+	case p.mediaType == "application/x-www-form-urlencoded" && !variables.IsJSONDoc(string(p.body)):
 		form, err := url.ParseQuery(string(p.body))
 		if err != nil {
 			s.Fixed["body"] = "text " + string(p.body)

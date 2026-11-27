@@ -78,7 +78,7 @@ func TestCaptureTellsItsCallerTheBodiesItsTestCaseHoldsOnceDecoded(t *testing.T)
 		{name: "GZIP request, br response", reqEnc: " GZIP ", respEnc: "br", reqBody: json, respBody: json, wantReq: len(json), wantResp: len(json), wantDecodes: 2, wantRespBodyKept: true, wantReqBodyInCase: json},
 		{name: "gzip response over the large-body threshold", respEnc: "gzip", reqBody: json, respBody: large, wantReq: len(json), wantResp: 0, wantDecodes: 1, wantReqBodyInCase: json},
 		{name: "multipart request", reqBody: mp.Bytes(), reqType: mw.FormDataContentType(), respBody: json, wantReq: mp.Len(), wantResp: len(json), wantRespBodyKept: true, wantReqBodyInCase: []byte{}},
-		{name: "url-encoded request, gzip'd", reqEnc: "gzip", reqBody: form, reqType: "application/x-www-form-urlencoded", respBody: json, wantReq: len(form), wantResp: len(json), wantDecodes: 1, wantRespBodyKept: true},
+		{name: "url-encoded request, gzip'd", reqEnc: "gzip", reqBody: form, reqType: "application/x-www-form-urlencoded", respBody: json, wantReq: len(form), wantResp: len(json), wantDecodes: 1, wantRespBodyKept: true, wantReqBodyInCase: form},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
