@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/bpfsafety"
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/service/agent"
@@ -347,5 +348,25 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 		return nil
 	}
 
+	cmd.AddCommand(agentCleanupCmd(ctx, logger))
+
 	return cmd
+}
+
+func agentCleanupCmd(ctx context.Context, logger *zap.Logger) *cobra.Command {
+	var hostBPFFS string
+	cleanupCmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "calmly remove pinned eBPF trampoline anchor links when no Keploy agent is running",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := bpfsafety.CleanupAnchors(ctx, logger, hostBPFFS); err != nil {
+				utils.LogError(logger, err, "failed to clean up eBPF trampoline anchors")
+				utils.SetExitCodeOnce(utils.ExitKeployError)
+				return nil
+			}
+			return nil
+		},
+	}
+	cleanupCmd.Flags().StringVar(&hostBPFFS, "host-bpffs", "", "path to the host bpffs mount (defaults to /run/keploy/host-bpffs or /sys/fs/bpf)")
+	return cleanupCmd
 }

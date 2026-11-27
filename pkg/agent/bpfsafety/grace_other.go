@@ -14,6 +14,7 @@ const (
 	DefaultHostBPFFSPath           = "/run/keploy/host-bpffs"
 	DefaultNativeBPFFSPath         = "/sys/fs/bpf"
 	GraceRootSubdir                = "keploy-grace"
+	AnchorsSubdir                  = "anchors"
 	GraceModeHostBPFFS             = "host-bpffs"
 	GraceModeUnprotected           = "unprotected"
 	UnprotectedWarnMessage         = "eBPF crash protection is OFF: mount the host's /sys/fs/bpf at /run/keploy/host-bpffs (see docs/kernel-safety.md)"
@@ -21,17 +22,10 @@ const (
 	EnvHostBPFFSDev                = "KEPLOY_HOST_BPFFS_DEV"
 	EnvLaunchMode                  = "KEPLOY_LAUNCH_MODE"
 	EnvAllowUnprotectedTrampolines = "KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES"
-	EnvGraceDuration               = "KEPLOY_BPF_GRACE_DURATION"
 	EnvGraceTestTag                = "KEPLOY_BPF_GRACE_TEST_TAG"
 	GraceDirPrefix                 = "grace-"
 	GraceTestDirPrefix             = "grace-test-"
-	DefaultGracePeriod             = 15 * time.Minute
-	DefaultReapInterval            = 3 * time.Minute
-	DefaultConfirmGap              = 1 * time.Minute
-	MinProdGracePeriod             = 15 * time.Minute
-	MaxProdGracePeriod             = 24 * time.Hour
-	MinProdConfirmGap              = 1 * time.Minute
-	MaxProdConfirmGap              = 30 * time.Minute
+	DefaultReapInterval            = 15 * time.Second
 )
 
 var (
@@ -55,11 +49,15 @@ type TestCleaner interface {
 	Cleanup(func())
 }
 
-type MetricsObserver func(dirsPresent, pinnedProgs int, unprotected bool)
+type MetricsObserver func(dirsPresent, pinnedProgs, anchorLinks int, unprotected, staleTrampoline bool)
 
-func DetectMode(daemonSet bool) Mode                                        { return ModeNative }
-func SetMetricsObserver(fn MetricsObserver)                                 {}
-func UnprotectedTrampolinesActive() bool                                    { return false }
+func DetectMode(daemonSet bool) Mode                                            { return ModeNative }
+func SetMetricsObserver(fn MetricsObserver)                                     {}
+func UnprotectedTrampolinesActive() bool                                        { return false }
+func StaleTrampolineDetected() bool                                             { return false }
+func ReportStaleTrampoline(logger *zap.Logger, funcName string, err error)      {}
+func CountAnchorLinks(root string) int                                          { return 0 }
+func CleanupAnchors(ctx context.Context, logger *zap.Logger, path string) error { return nil }
 func ActiveGraceMode() string                                               { return "" }
 func Armed() bool                                                           { return false }
 func ActiveGraceDir() string                                                { return "" }
@@ -72,5 +70,6 @@ func ResetShutdownForTest(tb TestCleaner)                                   {}
 func ResetUnprotectedForTest(tb TestCleaner)                                {}
 func HasActiveWork() bool                                                   { return false }
 func Init(ctx context.Context, logger *zap.Logger, m Mode) error            { return nil }
+func RegisterDisarmHook(fn func())                                          {}
 func RegisterDetachHook(fn func())                                          {}
 func GracefulShutdown(ctx context.Context, logger *zap.Logger)              {}

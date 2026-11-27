@@ -5,6 +5,7 @@ package bpfsafety
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,11 +21,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }
+
 func resetStateForTest(t *testing.T) {
 	t.Helper()
 	stateMu.Lock()
 	prevOwner := activeOwner
 	prevObs := metricsObserver
+	prevDisarms := disarmHooks
 	prevHooks := detachHooks
 	prevLockFDs := unpinnedLockFDs
 	prevOverlays := make(map[uint64]bool, len(privateOverlayDevs))
@@ -33,12 +39,14 @@ func resetStateForTest(t *testing.T) {
 	}
 	activeOwner = nil
 	metricsObserver = nil
+	disarmHooks = nil
 	detachHooks = nil
 	unpinnedLockFDs = nil
 	privateOverlayDevs = map[uint64]bool{}
 	stateMu.Unlock()
 	prevUnprot := unprotectedTrampolines.Swap(false)
 	prevWarned := unprotectedWarned.Swap(false)
+	prevStale := staleTrampolineDetected.Swap(false)
 	prevShuttingDown := shuttingDown.Swap(false)
 	prevBypass := testBypassPin.Swap(false)
 	t.Cleanup(func() {
@@ -48,15 +56,56 @@ func resetStateForTest(t *testing.T) {
 		}
 		activeOwner = prevOwner
 		metricsObserver = prevObs
+		disarmHooks = prevDisarms
 		detachHooks = prevHooks
 		unpinnedLockFDs = prevLockFDs
 		privateOverlayDevs = prevOverlays
 		stateMu.Unlock()
 		unprotectedTrampolines.Store(prevUnprot)
 		unprotectedWarned.Store(prevWarned)
+		staleTrampolineDetected.Store(prevStale)
 		shuttingDown.Store(prevShuttingDown)
 		testBypassPin.Store(prevBypass)
 	})
+}
+
+func TestTrampolineKeyAndKallsymsParsing(t *testing.T) {
+	// Matches Debian 6.12.117 unix_dgram_sendmsg (btf_obj_id=1, btf_id=104305).
+	if got := trampolineKey(1, 104305); got != 6442555249 {
+		t.Fatalf("trampolineKey(1, 104305) = %d, want 6442555249", got)
+	}
+	if got := trampolineKey(0, 104305); got != 6442555249 {
+		t.Fatalf("trampolineKey(0, 104305) = %d, want 6442555249 (default vmlinux obj 1)", got)
+	}
+
+	ks := filepath.Join(t.TempDir(), "kallsyms")
+	content := strings.Join([]string{
+		"ffffffff81000000 T _text",
+		"ffffffffc031a300 t bpf_trampoline_6442555249\t[bpf]",
+		"ffffffffc031b400 t bpf_trampoline_6442555249\t[bpf]",
+		"ffffffffb5ecb260 t bpf_trampoline_lookup",
+	}, "\n") + "\n"
+	if err := os.WriteFile(ks, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tramps, vis, err := parseKallsymsTrampolines(ks)
+	if err != nil || !vis {
+		t.Fatalf("parseKallsymsTrampolines = (%v, %v, %v), want visible", tramps, vis, err)
+	}
+	addrs := tramps[6442555249]
+	if len(addrs) != 2 || addrs[0] != 0xffffffffc031a300 || addrs[1] != 0xffffffffc031b400 {
+		t.Fatalf("tramps[6442555249] = %x, want 2 addresses", addrs)
+	}
+
+	// kptr_restrict zeroed addresses MUST report visible=false.
+	ksZero := filepath.Join(t.TempDir(), "kallsyms-zero")
+	if err := os.WriteFile(ksZero, []byte("0000000000000000 t bpf_trampoline_6442555249\t[bpf]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, visZero, err := parseKallsymsTrampolines(ksZero)
+	if err != nil || visZero {
+		t.Fatalf("zeroed kallsyms must return visible=false, got vis=%v err=%v", visZero, err)
+	}
 }
 
 func TestDetectMode_K8sCIPodIsNative(t *testing.T) {
@@ -140,7 +189,6 @@ func TestPinBeforeAttachFailsClosedByConstruction(t *testing.T) {
 		t.Fatalf("PinBeforeAttach with SetBypassForTest = %v, want nil", err)
 	}
 
-	// Once shutdown gate closes, PinBeforeAttach MUST fail closed even with bypass.
 	shuttingDown.Store(true)
 	if err := PinBeforeAttach(&dummy, "proxyless", "keploy_tcp_sendmsg", "p"); !errors.Is(err, ErrShuttingDown) {
 		t.Fatalf("PinBeforeAttach after shutdown gate = %v, want ErrShuttingDown", err)
@@ -156,7 +204,7 @@ func TestInitWithoutHostBPFFSEntersHonestUnprotectedModeOnce(t *testing.T) {
 	core, logs := observer.New(zapcore.WarnLevel)
 	var obsUnprot bool
 	var obsCalls int
-	SetMetricsObserver(func(_, _ int, unprot bool) {
+	SetMetricsObserver(func(_, _, _ int, unprot, _ bool) {
 		obsUnprot = unprot
 		obsCalls++
 	})
@@ -186,48 +234,15 @@ func TestInitWithoutHostBPFFSEntersHonestUnprotectedModeOnce(t *testing.T) {
 		t.Fatalf("WARN message must not mention %s: %q", EnvAllowUnprotectedTrampolines, msg)
 	}
 
-	// After honest unprotected Init, PinBeforeAttach permits attach so recording continues.
 	var dummy ebpf.Program
 	if err := PinBeforeAttach(&dummy, "proxyless", "keploy_tcp_sendmsg", "p"); err != nil {
 		t.Fatalf("PinBeforeAttach under honest unprotected mode returned %v, want nil", err)
 	}
 }
 
-func TestResolveGraceTimingEnforces15mFloorAnd24hUpperClamp(t *testing.T) {
-	resetStateForTest(t)
-
-	// Sub-15m values (including 10m = RCU_TASK_STALL_TIMEOUT) MUST clamp up to 15m.
-	for _, raw := range []string{"5s", "10m", "14m59s"} {
-		t.Setenv(EnvGraceDuration, raw)
-		gp, _, cg := resolveGraceTiming()
-		if gp != MinProdGracePeriod {
-			t.Fatalf("EnvGraceDuration=%q -> gracePeriod=%v, want %v", raw, gp, MinProdGracePeriod)
-		}
-		if cg < MinProdConfirmGap {
-			t.Fatalf("EnvGraceDuration=%q -> confirmGap=%v, want >= %v", raw, cg, MinProdConfirmGap)
-		}
-	}
-
-	// Excessively large values clamp down to MaxProdGracePeriod (24h).
-	t.Setenv(EnvGraceDuration, "1000h")
-	gp, _, _ := resolveGraceTiming()
-	if gp != MaxProdGracePeriod {
-		t.Fatalf("EnvGraceDuration=1000h -> gracePeriod=%v, want %v", gp, MaxProdGracePeriod)
-	}
-
-	// Short-grace test mode lifts the floor.
-	t.Setenv(EnvGraceDuration, "5s")
-	AllowShortGraceForTest(t)
-	gp, _, cg := resolveGraceTiming()
-	if gp != 5*time.Second || cg != 2500*time.Millisecond {
-		t.Fatalf("test short gracePeriod=%v confirmGap=%v, want 5s / 2.5s", gp, cg)
-	}
-}
-
-func TestShortGraceBuildReapsOnlyOwnTestPrefix(t *testing.T) {
+func TestTestTagBuildReapsOnlyOwnTestPrefix(t *testing.T) {
 	resetStateForTest(t)
 	AllowShortGraceForTest(t)
-	t.Setenv(EnvGraceDuration, "2s")
 	t.Setenv(EnvGraceTestTag, "e2e")
 
 	root := t.TempDir()
@@ -238,7 +253,7 @@ func TestShortGraceBuildReapsOnlyOwnTestPrefix(t *testing.T) {
 	defer func() { _ = unix.Close(owner.lockFD) }()
 
 	if !strings.HasPrefix(owner.self, GraceTestDirPrefix+"e2e-") {
-		t.Fatalf("short-grace owner.self = %q, want prefix %q", owner.self, GraceTestDirPrefix+"e2e-")
+		t.Fatalf("test owner.self = %q, want prefix %q", owner.self, GraceTestDirPrefix+"e2e-")
 	}
 	if got := sanitizeTag("e2e-2"); got != "e2e2" {
 		t.Fatalf("sanitizeTag(\"e2e-2\") = %q, want \"e2e2\"", got)
@@ -256,255 +271,278 @@ func TestShortGraceBuildReapsOnlyOwnTestPrefix(t *testing.T) {
 		}
 	}
 
-	now := uint64(500 * time.Second)
-	owner.reaper.bootNowNs = func() uint64 { return now }
+	owner.reaper.kallsymsSysctlFn = func() bool { return true }
+	owner.reaper.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return map[uint64][]uint64{}, true, nil }
 
-	owner.reaper.round() // rebuilds + stamps ownTestDead
-	now += uint64(3 * time.Second)
-	owner.reaper.round() // hits deadline
-	now += uint64(2 * time.Second)
-	owner.reaper.round() // reaps ONLY ownTestDead
+	owner.reaper.round() // Pass 1: marks ownTestDead pass1
+	owner.reaper.round() // Pass 2: no active trampoline targets -> reaps ONLY ownTestDead
 
 	if _, err := os.Stat(ownTestDead); !os.IsNotExist(err) {
-		t.Fatalf("ownTestDead was not reaped by matching short-grace tag: err=%v", err)
+		t.Fatalf("ownTestDead was not reaped by matching test tag: err=%v", err)
 	}
 	if _, err := os.Stat(prodDead); err != nil {
-		t.Fatalf("short-grace reaper MUST NOT touch production grace-* dir: %v", err)
+		t.Fatalf("tagged test reaper MUST NOT touch production grace-* dir: %v", err)
 	}
 	if _, err := os.Stat(otherTestDead); err != nil {
-		t.Fatalf("short-grace reaper MUST NOT touch another test tag's dir: %v", err)
+		t.Fatalf("tagged test reaper MUST NOT touch another test tag's dir: %v", err)
 	}
 }
 
-func TestOpenGraceOwnerBlockingFlockNoStartupRace(t *testing.T) {
+func TestReaperKallsymsCleanExitUnpinsOnlyWhenImageAddressDisappears(t *testing.T) {
+	resetStateForTest(t)
 	root := t.TempDir()
-	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
-	if err != nil {
-		t.Fatalf("openGraceOwnerInRoot: %v", err)
-	}
-	defer func() { _ = unix.Close(owner.lockFD) }()
-
-	if !strings.HasPrefix(owner.self, GraceDirPrefix) {
-		t.Fatalf("owner.self = %q, want prefix %q", owner.self, GraceDirPrefix)
-	}
-	if strings.HasPrefix(owner.self, "inst-") {
-		t.Fatalf("owner.self = %q must NOT start with inst-", owner.self)
-	}
-	if GraceRootSubdir == "keploy" {
-		t.Fatalf("GraceRootSubdir must be outside keploy/ (selfupdate.WipeBPFPins wipes keploy/)")
-	}
-
-	fd, err := unix.Open(owner.dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = unix.Close(fd) }()
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
-		t.Fatal("expected EWOULDBLOCK on published grace dir; flock was not held")
-	}
-}
-
-func TestSharedBoottimeStampAllowsCrossProcessReapOfCrashLoopsAndShortLanes(t *testing.T) {
-	root := t.TempDir()
-	deadDir := filepath.Join(root, GraceDirPrefix+"dead-shortlane")
-	liveDir := filepath.Join(root, GraceDirPrefix+"live-sibling")
-	selfDir := filepath.Join(root, GraceDirPrefix+"self")
-	for _, d := range []string{deadDir, liveDir, selfDir} {
-		if err := os.Mkdir(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(d, "000001-proxyless-tcp_sendmsg-p"), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	liveFD, err := unix.Open(liveDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = unix.Close(liveFD) }()
-	if err := unix.Flock(liveFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		t.Fatal(err)
-	}
-
-	now := uint64(1000 * time.Second)
-	newShortProcessReaper := func() *graceReaper {
-		r := newGraceReaper(root, GraceDirPrefix+"self", 15*time.Minute, 3*time.Minute, 1*time.Minute, zap.NewNop())
-		r.bootNowNs = func() uint64 { return now }
-		return r
-	}
-
-	dirs, progs := newShortProcessReaper().round()
-	if dirs != 3 || progs != 3 {
-		t.Fatalf("proc1: dirs=%d progs=%d, want 3/3", dirs, progs)
-	}
-
-	now += uint64(14 * time.Minute)
-	newShortProcessReaper().round()
-	if _, err := os.Stat(deadDir); err != nil {
-		t.Fatalf("deadDir reaped early at 14m: %v", err)
-	}
-
-	now += uint64(1*time.Minute + time.Second)
-	newShortProcessReaper().round()
-	if _, err := os.Stat(deadDir); err != nil {
-		t.Fatalf("deadDir reaped on first confirm pass: %v", err)
-	}
-
-	now += uint64(30 * time.Second)
-	newShortProcessReaper().round()
-	if _, err := os.Stat(deadDir); err != nil {
-		t.Fatalf("deadDir reaped before confirmGap: %v", err)
-	}
-
-	now += uint64(31 * time.Second)
-	dirs, progs = newShortProcessReaper().round()
-	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
-		t.Fatalf("deadDir was NOT reaped by fresh process after 15m + 1m confirm: err=%v", err)
-	}
-	if _, err := os.Stat(liveDir); err != nil {
-		t.Fatalf("liveDir was wrongly reaped despite held flock: %v", err)
-	}
-	if dirs != 2 || progs != 2 {
-		t.Fatalf("proc5 after reap: dirs=%d progs=%d, want 2/2", dirs, progs)
-	}
-}
-
-func TestReaperFailsClosedWhenTrampolineRebuildFails(t *testing.T) {
-	root := t.TempDir()
-	deadDir := filepath.Join(root, GraceDirPrefix+"dead-enomem")
-	if err := os.Mkdir(deadDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(deadDir, "000001-proxyless-unix_dgram_sendmsg-p"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	now := uint64(1000 * time.Second)
-	var rebuildErr error = unix.ENOMEM
-	rebuildCalls := 0
-	r := newGraceReaper(root, GraceDirPrefix+"self", 15*time.Minute, 3*time.Minute, 1*time.Minute, zap.NewNop())
-	r.bootNowNs = func() uint64 { return now }
-	r.rebuildFn = func(dirPath string) (uint64, error) {
-		rebuildCalls++
-		return 0, rebuildErr
-	}
-
-	// Repeated passes while rebuild fails MUST keep pins and never stamp or reap.
-	for i := 0; i < 4; i++ {
-		r.round()
-		now += uint64(10 * time.Minute)
-	}
-	if rebuildCalls != 4 {
-		t.Fatalf("rebuildCalls = %d, want 4", rebuildCalls)
-	}
-	if _, err := os.Stat(deadDir); err != nil {
-		t.Fatalf("deadDir was reaped despite rebuild ENOMEM failures: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(deadDir, stampFileName)); !os.IsNotExist(err) {
-		t.Fatalf("stamp file was written despite rebuild failure: err=%v", err)
-	}
-
-	// Once rebuild succeeds, full 15m + 1m window starts from THAT point.
-	rebuildErr = nil
-	r.round()
-	now += uint64(14 * time.Minute)
-	r.round()
-	if _, err := os.Stat(deadDir); err != nil {
-		t.Fatalf("deadDir reaped early after rebuild: %v", err)
-	}
-	now += uint64(1*time.Minute + time.Second)
-	r.round() // confirm pass 1
-	now += uint64(1*time.Minute + time.Second)
-	r.round() // reaped!
-	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
-		t.Fatalf("deadDir was NOT reaped after successful rebuild + 15m + 1m: err=%v", err)
-	}
-}
-
-func TestReaperRefusesUnpinAndRebuildsWhenRunCntIncreases(t *testing.T) {
-	root := t.TempDir()
-	deadDir := filepath.Join(root, GraceDirPrefix+"dead-still-running")
-	if err := os.Mkdir(deadDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(deadDir, "000001-proxyless-unix_dgram_sendmsg-p"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	now := uint64(1000 * time.Second)
-	curRunCnt := uint64(10)
-	rebuildCalls := 0
-	r := newGraceReaper(root, GraceDirPrefix+"self", 15*time.Minute, 3*time.Minute, 1*time.Minute, zap.NewNop())
-	r.bootNowNs = func() uint64 { return now }
-	r.rebuildFn = func(dirPath string) (uint64, error) {
-		rebuildCalls++
-		return curRunCnt, nil
-	}
-	r.runCntFn = func(dirPath string) (uint64, error) {
-		return curRunCnt, nil
-	}
-
-	r.round() // rebuild #1 at run_cnt=10
-	// Simulate stale trampoline STILL calling the pinned prog!
-	curRunCnt = 50
-	now += uint64(16 * time.Minute)
-	r.round() // detects run_cnt grew 10 -> 50, refuses confirm/unpin, resets rebuiltBootNs=0!
-	if _, err := os.Stat(deadDir); err != nil {
-		t.Fatalf("deadDir reaped while run_cnt was still increasing: %v", err)
-	}
-
-	// Next pass forces rebuild #2 (now stale trampoline stops calling prog).
-	now += uint64(3 * time.Minute)
-	r.round()
-	if rebuildCalls != 2 {
-		t.Fatalf("expected second rebuild after run_cnt increased, got rebuildCalls=%d", rebuildCalls)
-	}
-
-	// Run count stays flat at 50 for full 15m + 1m -> safely reaped.
-	now += uint64(15*time.Minute + time.Second)
-	r.round()
-	now += uint64(1*time.Minute + time.Second)
-	r.round()
-	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
-		t.Fatalf("deadDir not reaped once run_cnt stayed flat after second rebuild: %v", err)
-	}
-}
-
-func TestReaperUpgradesLegacy16ByteStampAndForcesRebuild(t *testing.T) {
-	root := t.TempDir()
-	deadDir := filepath.Join(root, GraceDirPrefix+"legacy-v3727")
+	deadDir := filepath.Join(root, GraceDirPrefix+"clean-exit")
 	if err := os.Mkdir(deadDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(deadDir, "000001-p"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Write a legacy 16-byte stamp that already passed its 15m deadline.
-	legacy := encodeStamp(sharedStamp{firstFreeBootNs: 100, deadlineHitBootNs: 200})
-	if err := os.WriteFile(filepath.Join(deadDir, stampFileName), legacy[:16], 0o600); err != nil {
+
+	const key = uint64(6442555249)
+	const oldAddr = uint64(0xffffffffc031a300)
+	const newAddr = uint64(0xffffffffc039f800)
+
+	store := autoStateStore{}
+	if err := store.writeSnapshot(deadDir, []trampImageRef{{Key: key, Addr: oldAddr}}); err != nil {
+		t.Fatal(err)
+	}
+	now := uint64(100 * time.Second)
+	if err := store.writeState(deadDir, reaperState{
+		Flags:           stateCleanSnapshot,
+		SnapshotCount:   1,
+		FirstSeenBootNs: now,
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	now := uint64(2000 * time.Second)
-	rebuilt := false
-	r := newGraceReaper(root, GraceDirPrefix+"self", 15*time.Minute, 3*time.Minute, 1*time.Minute, zap.NewNop())
+	liveTramps := map[uint64][]uint64{key: {oldAddr}}
+	rebuilds := 0
+	r := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.NewNop())
 	r.bootNowNs = func() uint64 { return now }
-	r.rebuildFn = func(dirPath string) (uint64, error) {
-		rebuilt = true
-		return 0, nil
+	r.kallsymsSysctlFn = func() bool { return true }
+	r.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return liveTramps, true, nil }
+	r.inspectTargetsFn = func(string) (dirTargets, error) {
+		return dirTargets{keyToFunc: map[uint64]string{key: "unix_dgram_sendmsg"}}, nil
+	}
+	r.rebuildTargetFn = func(fn string) error {
+		rebuilds++
+		return nil
 	}
 
+	// While oldAddr is still in kallsyms (< 2s settle), MUST keep pinned without forced rebuild yet.
 	r.round()
-	if !rebuilt {
-		t.Fatal("expected legacy 16-byte stamp (rebuiltBootNs=0) to trigger force-rebuild before reaping")
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("reaped while old trampoline image was still in kallsyms: %v", err)
+	}
+	if rebuilds != 0 {
+		t.Fatalf("unexpected forced rebuild during 2s settle window: %d", rebuilds)
+	}
+
+	// After 3s, oldAddr STILL in kallsyms (e.g. ENOMEM unlink) -> forces rebuild, STILL keeps pinned!
+	now += uint64(3 * time.Second)
+	r.round()
+	if rebuilds != 1 {
+		t.Fatalf("expected forced rebuild for stuck image, got rebuilds=%d", rebuilds)
 	}
 	if _, err := os.Stat(deadDir); err != nil {
-		t.Fatalf("legacy dir was reaped immediately instead of waiting full grace window after rebuild: %v", err)
+		t.Fatalf("reaped before old image address actually disappeared from kallsyms: %v", err)
+	}
+
+	// Even when a NEW trampoline image (newAddr) is active on the same key,
+	// once oldAddr is GONE from kallsyms, deadDir is safely reaped immediately!
+	liveTramps = map[uint64][]uint64{key: {newAddr}}
+	r.round()
+	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
+		t.Fatalf("deadDir not reaped after old image address vanished from kallsyms: err=%v", err)
 	}
 }
 
-func TestGracefulShutdown_HostBPFFSExitsImmediatelyAndLeavesPinForReaper(t *testing.T) {
+func TestReaperDeadOwnerSnapshotsOnPass2AndNeverUsesTimer(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	deadDir := filepath.Join(root, GraceDirPrefix+"sigkill-owner")
+	if err := os.Mkdir(deadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deadDir, "000001-p"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const key = uint64(6442555249)
+	const stuckAddr = uint64(0xffffffffc031a300)
+
+	now := uint64(1000 * time.Second)
+	liveTramps := map[uint64][]uint64{key: {stuckAddr}}
+	rebuildErr := error(unix.ENOMEM)
+	rebuilds := 0
+
+	r := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.NewNop())
+	r.bootNowNs = func() uint64 { return now }
+	r.kallsymsSysctlFn = func() bool { return true }
+	r.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return liveTramps, true, nil }
+	r.inspectTargetsFn = func(string) (dirTargets, error) {
+		return dirTargets{keyToFunc: map[uint64]string{key: "unix_dgram_sendmsg"}}, nil
+	}
+	r.rebuildTargetFn = func(string) error {
+		rebuilds++
+		return rebuildErr
+	}
+
+	// Pass 1: records stateDeadPass1 only (does NOT snapshot mid-exit_files).
+	r.round()
+	st1, ok, err := r.store.readState(deadDir)
+	if err != nil || !ok || st1.Flags != stateDeadPass1 {
+		t.Fatalf("after pass 1: state=(%+v, %v, %v), want stateDeadPass1 only", st1, ok, err)
+	}
+
+	// Pass 2: snapshots stuckAddr from kallsyms.
+	now += uint64(15 * time.Second)
+	r.round()
+	st2, ok, err := r.store.readState(deadDir)
+	if err != nil || !ok || st2.Flags&stateDeadSnapshot == 0 || st2.SnapshotCount != 1 {
+		t.Fatalf("after pass 2: state=(%+v, %v, %v), want stateDeadSnapshot with count=1", st2, ok, err)
+	}
+
+	// Advance clock by 2 HOURS while stuckAddr remains in kallsyms and rebuild hits ENOMEM:
+	// MUST NEVER unpin on any timer!
+	for i := 0; i < 4; i++ {
+		now += uint64(30 * time.Minute)
+		r.round()
+		if _, err := os.Stat(deadDir); err != nil {
+			t.Fatalf("timed unpin violation: deadDir reaped at iter %d while stuckAddr was still in kallsyms!", i)
+		}
+	}
+	if rebuilds != 4 {
+		t.Fatalf("expected 4 rebuild retries, got %d", rebuilds)
+	}
+
+	// Rebuild finally succeeds and old image disappears -> reaps cleanly!
+	rebuildErr = nil
+	r.round()
+	liveTramps = map[uint64][]uint64{}
+	r.round()
+	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
+		t.Fatalf("deadDir not reaped after rebuild succeeded and stuckAddr vanished: err=%v", err)
+	}
+}
+
+func TestReaperEBUSYMarksPermanentStaleTrampolineAndNeverUnpins(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	deadDir := filepath.Join(root, GraceDirPrefix+"last-link-ebusy")
+	if err := os.Mkdir(deadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deadDir, "000001-p"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const key = uint64(6442555249)
+	const stuckAddr = uint64(0xffffffffc031a300)
+
+	core, logs := observer.New(zapcore.WarnLevel)
+	var obsStale bool
+	SetMetricsObserver(func(_, _, _ int, _, stale bool) { obsStale = stale })
+
+	r := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.New(core))
+	r.kallsymsSysctlFn = func() bool { return true }
+	r.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return map[uint64][]uint64{key: {stuckAddr}}, true, nil }
+	r.inspectTargetsFn = func(string) (dirTargets, error) {
+		return dirTargets{keyToFunc: map[uint64]string{key: "unix_dgram_sendmsg"}}, nil
+	}
+	rebuildCalls := 0
+	r.rebuildTargetFn = func(string) error {
+		rebuildCalls++
+		return unix.EBUSY
+	}
+
+	r.round() // Pass 1
+	r.round() // Pass 2: snapshots stuckAddr
+	r.round() // Pass 3: forced rebuild hits EBUSY -> marks permanent stale!
+	r.round() // Pass 4: stays pinned forever and does NOT keep retrying EBUSY!
+
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("EBUSY stale dir was wrongly reaped: %v", err)
+	}
+	if !StaleTrampolineDetected() || !obsStale {
+		t.Fatalf("StaleTrampolineDetected=%v obsStale=%v, want both true", StaleTrampolineDetected(), obsStale)
+	}
+	if rebuildCalls != 1 {
+		t.Fatalf("expected 1 rebuild attempt before permanent stale latch, got %d", rebuildCalls)
+	}
+	foundRebootWarn := false
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "drain and reboot") {
+			foundRebootWarn = true
+			break
+		}
+	}
+	if !foundRebootWarn {
+		t.Fatalf("expected WARN instructing 'drain and reboot', got %+v", logs.All())
+	}
+}
+
+func TestReaperStatsFallbackAndFailClosedWithoutKallsyms(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	deadDir := filepath.Join(root, GraceDirPrefix+"no-kallsyms")
+	if err := os.Mkdir(deadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deadDir, "000001-p"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const key = uint64(6442555249)
+	statsErr := error(unix.EPERM)
+	runCntCalls := 0
+	runCntDelta := uint64(5) // still running on first check!
+
+	r := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.NewNop())
+	r.statsProbeWait = time.Millisecond
+	r.kallsymsSysctlFn = func() bool { return false } // kallsyms hidden
+	r.inspectTargetsFn = func(string) (dirTargets, error) {
+		return dirTargets{keyToFunc: map[uint64]string{key: "unix_dgram_sendmsg"}}, nil
+	}
+	r.rebuildTargetFn = func(string) error { return nil }
+	r.enableStatsFn = func() (io.Closer, error) {
+		if statsErr != nil {
+			return nil, statsErr
+		}
+		return nopCloser{}, nil
+	}
+	r.runCntFn = func(string) (uint64, error) {
+		runCntCalls++
+		if runCntCalls%2 == 1 {
+			return 100, nil
+		}
+		return 100 + runCntDelta, nil
+	}
+
+	r.round() // Pass 1
+	// Pass 2: kallsyms hidden AND BPF_ENABLE_STATS returns EPERM -> MUST fail closed (keep pins)!
+	r.round()
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("deadDir reaped when both kallsyms and BPF_ENABLE_STATS failed: %v", err)
+	}
+
+	// Pass 3: BPF_ENABLE_STATS works, but run_cnt increases (100 -> 105) -> MUST keep pins!
+	statsErr = nil
+	r.round()
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("deadDir reaped while BPF_ENABLE_STATS showed run_cnt increasing: %v", err)
+	}
+
+	// Pass 4: run_cnt is flat (100 -> 100) after forced rebuild -> safely reaped!
+	runCntDelta = 0
+	r.round()
+	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
+		t.Fatalf("deadDir not reaped when stats fallback confirmed flat run_cnt after rebuild: err=%v", err)
+	}
+}
+
+func TestGracefulShutdown_RunsDisarmBeforeDetachAndLeavesPinForReaper(t *testing.T) {
 	resetStateForTest(t)
 	root := t.TempDir()
 	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
@@ -517,32 +555,28 @@ func TestGracefulShutdown_HostBPFFSExitsImmediatelyAndLeavesPinForReaper(t *test
 	activeOwner = owner
 	stateMu.Unlock()
 
-	detached := false
+	var order []string
+	RegisterDisarmHook(func() {
+		order = append(order, "disarm")
+	})
 	RegisterDetachHook(func() {
-		if _, statErr := os.Stat(owner.dir); statErr != nil {
-			t.Errorf("detach hook saw missing owner.dir: %v", statErr)
-		}
+		order = append(order, "detach")
 		var dummy ebpf.Program
 		if perr := PinBeforeAttach(&dummy, "proxyless", "late", "p"); !errors.Is(perr, ErrShuttingDown) {
 			t.Errorf("PinBeforeAttach during detach hook = %v, want ErrShuttingDown", perr)
 		}
-		detached = true
 	})
 
 	start := time.Now()
 	GracefulShutdown(context.Background(), zap.NewNop())
-	elapsed := time.Since(start)
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("GracefulShutdown with host bpffs blocked exit for %v; must return immediately", elapsed)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("GracefulShutdown blocked exit for %v; must return immediately", elapsed)
 	}
-	if !detached {
-		t.Fatal("GracefulShutdown did not invoke registered detach hook")
+	if len(order) != 2 || order[0] != "disarm" || order[1] != "detach" {
+		t.Fatalf("shutdown hook order = %v, want [disarm detach]", order)
 	}
-	if !reaperCancelled {
-		t.Fatal("GracefulShutdown did not cancel background reaper")
-	}
-	if Armed() {
-		t.Fatal("Armed() = true after GracefulShutdown; want false")
+	if !reaperCancelled || Armed() {
+		t.Fatalf("reaperCancelled=%v Armed=%v, want true/false", reaperCancelled, Armed())
 	}
 	if _, err := os.Stat(owner.dir); err != nil {
 		t.Fatalf("GracefulShutdown prematurely deleted grace dir %s: %v", owner.dir, err)
@@ -557,14 +591,41 @@ func TestGracefulShutdown_HostBPFFSExitsImmediatelyAndLeavesPinForReaper(t *test
 	}
 }
 
-func TestLateRegisterDetachHookRunsSynchronouslyAfterShutdown(t *testing.T) {
+func TestOpenGraceOwnerBlockingFlockNoStartupRace(t *testing.T) {
+	root := t.TempDir()
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatalf("openGraceOwnerInRoot: %v", err)
+	}
+	defer func() { _ = unix.Close(owner.lockFD) }()
+
+	if !strings.HasPrefix(owner.self, GraceDirPrefix) {
+		t.Fatalf("owner.self = %q, want prefix %q", owner.self, GraceDirPrefix)
+	}
+	if GraceRootSubdir == "keploy" {
+		t.Fatalf("GraceRootSubdir must be outside keploy/")
+	}
+
+	fd, err := unix.Open(owner.dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
+		t.Fatal("expected EWOULDBLOCK on published grace dir; flock was not held")
+	}
+}
+
+func TestLateRegisterHooksRunSynchronouslyAfterShutdown(t *testing.T) {
 	resetStateForTest(t)
 	GracefulShutdown(context.Background(), zap.NewNop())
 
-	ran := false
-	RegisterDetachHook(func() { ran = true })
-	if !ran {
-		t.Fatal("late RegisterDetachHook after GracefulShutdown did not run synchronously")
+	disarmed := false
+	detached := false
+	RegisterDisarmHook(func() { disarmed = true })
+	RegisterDetachHook(func() { detached = true })
+	if !disarmed || !detached {
+		t.Fatalf("late hooks after shutdown: disarmed=%v detached=%v, want both true", disarmed, detached)
 	}
 }
 

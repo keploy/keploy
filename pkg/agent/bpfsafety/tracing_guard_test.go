@@ -124,7 +124,7 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 			if name, ok := matchImportedFunc(x.Fun, linkImps, forbiddenCiliumTrampolineFuncs); ok {
 				allowed := rel == "pkg/agent/bpfsafety/grace_linux.go" &&
 					name == "AttachTracing" &&
-					(fnName == "AttachTracing" || fnName == "attachPinnedReaperNoop")
+					(fnName == "AttachTracing" || fnName == "attachPinnedReaperNoop" || fnName == "attachPinnedAnchorNoop")
 				if !allowed {
 					out = append(out, fmt.Sprintf("%s:%d (%s): direct link.%s outside bpfsafety choke point", rel, fset.Position(x.Pos()).Line, fnName, name))
 				}

@@ -128,49 +128,42 @@ func TestOnKernelPinStaysLoadedPastDetachAndCrossProcessBPFFSStampReaps(t *testi
 		_ = unix.Close(reaperOwner.lockFD)
 	}()
 
-	now := clockBoottimeNs()
 	makeReaper := func() *graceReaper {
-		r := newGraceReaper(root, reaperOwner.self, 15*time.Minute, 3*time.Minute, 1*time.Minute, zap.NewNop())
-		r.bootNowNs = func() uint64 { return now }
+		r := newGraceReaper(root, reaperOwner.self, DefaultReapInterval, zap.NewNop())
 		r.pinNoop = func(p *ebpf.Program, funcName string) error {
 			return reaperOwner.pinProgram(p, "bpfsafety_reaper", funcName, "rb")
 		}
 		return r
 	}
 
-	// Reaper process 1: force-rebuilds bpf_fentry_test1 (pinning its own no-op
-	// in reaperOwner.dir) and writes 32-byte first_free_boottime stamp map.
+	// Pass 1 (dead owner): records stateDeadPass1 on real bpffs, does NOT reap yet.
 	r1 := makeReaper()
 	r1.round()
 	r1.closeNoopCache()
-	if _, err := os.Stat(filepath.Join(owner.dir, stampFileName)); err != nil {
-		t.Fatalf("expected pinned bpffs stamp map %s after force-rebuild: %v", stampFileName, err)
+	if _, err := os.Stat(filepath.Join(owner.dir, reaperStateFileName)); err != nil {
+		t.Fatalf("expected pinned bpffs state map %s on pass 1: %v", reaperStateFileName, err)
 	}
-	// On Linux 6.0+, verify the reaper pinned its own no-op into reaperOwner.dir!
-	if countPinnedProgs(reaperOwner.dir) == 0 {
-		t.Logf("note: reaper pinned 0 no-op progs (expected only on pre-6.0 kernels without attach_btf_id)")
-	}
-
-	// Reaper process 2 (15m01s later): reads pinned map, verifies run_cnt flat,
-	// updates deadlineHitBootNs, does NOT reap yet.
-	now += uint64(15*time.Minute + time.Second)
-	r2 := makeReaper()
-	r2.round()
-	r2.closeNoopCache()
 	alive2, err := ebpf.NewProgramFromID(progID)
 	if err != nil {
-		t.Fatalf("prog %d reaped on first confirm pass: %v", progID, err)
+		t.Fatalf("prog %d reaped prematurely on pass 1: %v", progID, err)
 	}
 	_ = alive2.Close()
 
-	// Reaper process 3 (1m01s later): reads pinned map, sees confirmGap met, unpins & removes dir!
-	now += uint64(1*time.Minute + time.Second)
-	r3 := makeReaper()
-	r3.round()
-	r3.closeNoopCache()
+	// Wait for the kernel's bpf_tramp_image_free (~1s) so kallsyms clears the
+	// old trampoline image, then Pass 2+ sees image freed and reaps cleanly!
+	reapDeadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(reapDeadline) {
+		rN := makeReaper()
+		rN.round()
+		rN.closeNoopCache()
+		if _, err := os.Stat(owner.dir); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 
 	if _, err := os.Stat(owner.dir); !os.IsNotExist(err) {
-		t.Fatalf("owner.dir still exists after 2-pass cross-process reap: %v", err)
+		t.Fatalf("owner.dir still exists after kallsyms image-liveness reap: %v", err)
 	}
 	// Wait briefly for kernel call_rcu to release the unpinned prog ID.
 	deadline := time.Now().Add(5 * time.Second)
@@ -329,16 +322,242 @@ func TestOnKernelDockerHostBPFFSPinSurvivesSIGKILL(t *testing.T) {
 	// Brief settle for container process teardown + RCU callback.
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify the pin directory exists on HOST /sys/fs/bpf/keploy-grace/ AND the
-	// BPF program is STILL LOADED in the kernel after container SIGKILL!
+	// Verify the pin directory AND the anchor link exist on HOST /sys/fs/bpf/keploy-grace/
+	// AND the BPF program is STILL LOADED in the kernel after container SIGKILL!
 	if countPinnedProgs(hostGraceDir) == 0 {
 		t.Fatalf("expected pinned prog on host %s after container SIGKILL, found 0", hostGraceDir)
 	}
+	hostAnchorLink := filepath.Join(DefaultNativeBPFFSPath, GraceRootSubdir, AnchorsSubdir, "bpf_fentry_test1"+anchorLinkSuffix)
+	if _, err := os.Stat(hostAnchorLink); err != nil {
+		t.Fatalf("expected anchor link %s on host bpffs to survive container SIGKILL: %v", hostAnchorLink, err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(hostGraceDir)
+		_ = CleanupAnchors(context.Background(), zap.NewNop(), DefaultNativeBPFFSPath)
+	})
 	alive, err := ebpf.NewProgramFromID(progID)
 	if err != nil {
 		t.Fatalf("BPF program %d did NOT survive container SIGKILL despite host bpffs mount: %v", progID, err)
 	}
 	_ = alive.Close()
+}
+
+// TestOnKernelAnchorCalmRemoval proves on a real Linux kernel:
+//  1. PinBeforeAttach creates a pinned anchor link under <root>/anchors/<func>.link
+//     and <root>/anchors/<func>.prog BEFORE attaching the real program.
+//  2. CleanupAnchors REFUSES to remove anchors while any live agent holds flock.
+//  3. Once the live agent exits, CleanupAnchors calmly detaches the anchor link,
+//     waits for /proc/kallsyms to confirm the trampoline image is freed, and
+//     unpins both .link and .prog cleanly.
+func TestOnKernelAnchorCalmRemoval(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("RemoveMemlock: %v", err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-anchor-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", root, err)
+	}
+	t.Cleanup(func() {
+		_ = cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 5*time.Second, nil)
+		_ = os.RemoveAll(root)
+	})
+
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatalf("openGraceOwnerInRoot: %v", err)
+	}
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Name:       "anchor_test_p",
+		Type:       ebpf.Tracing,
+		AttachType: ebpf.AttachTraceFEntry,
+		AttachTo:   "bpf_fentry_test1",
+		License:    "GPL",
+		Instructions: asm.Instructions{
+			asm.Mov.Imm(asm.R0, 0),
+			asm.Return(),
+		},
+	})
+	if err != nil {
+		_ = unix.Close(owner.lockFD)
+		t.Fatalf("load prog: %v", err)
+	}
+	l, err := AttachTracing(prog, "anchor_test", "bpf_fentry_test1", "p")
+	if err != nil {
+		_ = prog.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatalf("AttachTracing: %v", err)
+	}
+
+	linkPath := filepath.Join(root, AnchorsSubdir, "bpf_fentry_test1"+anchorLinkSuffix)
+	progPath := filepath.Join(root, AnchorsSubdir, "bpf_fentry_test1"+anchorProgSuffix)
+	if _, err := os.Stat(linkPath); err != nil {
+		t.Fatalf("expected anchor link %s created before attach: %v", linkPath, err)
+	}
+	if _, err := os.Stat(progPath); err != nil {
+		t.Fatalf("expected anchor prog %s pinned alongside link: %v", progPath, err)
+	}
+	if got := CountAnchorLinks(root); got != 1 {
+		t.Fatalf("CountAnchorLinks = %d, want 1", got)
+	}
+
+	// While live agent holds flock, CleanupAnchors MUST refuse!
+	if err := cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 5*time.Second, nil); err == nil {
+		t.Fatal("CleanupAnchors succeeded while live agent held flock; must refuse")
+	}
+
+	// Agent exits cleanly: anchor MUST STILL survive agent exit!
+	_ = l.Close()
+	_ = prog.Close()
+	_ = unix.Close(owner.lockFD)
+	stateMu.Lock()
+	activeOwner = nil
+	stateMu.Unlock()
+	if got := CountAnchorLinks(root); got != 1 {
+		t.Fatalf("anchor disappeared on agent exit (CountAnchorLinks=%d, want 1)", got)
+	}
+
+	// Calm removal with no live agents MUST detach link, verify kallsyms clears, and remove both .link and .prog!
+	if err := cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 10*time.Second, nil); err != nil {
+		t.Fatalf("calm CleanupAnchors failed: %v", err)
+	}
+	if _, err := os.Stat(linkPath); !os.IsNotExist(err) {
+		t.Fatalf("anchor link still exists after calm removal: %v", err)
+	}
+	if _, err := os.Stat(progPath); !os.IsNotExist(err) {
+		t.Fatalf("anchor prog still exists after calm removal: %v", err)
+	}
+}
+
+// TestOnKernelAnchorCalmRemovalDetectsStaleAfterENOMEM proves on a real Linux
+// debug kernel with CONFIG_FAILSLAB=y that if detaching the last anchor link
+// during calm CleanupAnchors hits -ENOMEM (the last-link ftrace_ops UAF state):
+//  1. CleanupAnchors detects that the trampoline image persisted in /proc/kallsyms.
+//  2. It sets StaleTrampolineDetected()=true and returns a drain-and-reboot error.
+//  3. It KEEPS the anchor program (.prog) pinned in host bpffs so the stale
+//     trampoline image never faults on a freed struct bpf_prog.
+func TestOnKernelAnchorCalmRemovalDetectsStaleAfterENOMEM(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	failslabDir := "/sys/kernel/debug/failslab"
+	if _, err := os.Stat(failslabDir); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y (%s missing: %v)", failslabDir, err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("RemoveMemlock: %v", err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-anchor-enomem-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", root, err)
+	}
+	// Do NOT remove root if stale .prog must remain pinned for the rest of this VM boot.
+
+	// Attach an auxiliary link on bpf_fentry_test2 so tr->refcnt stays >= 1 when
+	// failslab injects -ENOMEM on the anchor's close(linkFD). On Linux 6.12 with
+	// KASAN, -ENOMEM on the true last link triggers an immediate kernel slab-UAF
+	// inside bpf_trampoline_put -> ftrace_ops_trampoline before close() returns
+	// (the exact kernel bug anchor links exist to prevent). With refcnt >= 1,
+	// failslab still fails bpf_trampoline_unlink_prog with -ENOMEM and leaves the
+	// snapshotted trampoline image (still calling the anchor prog) stuck in
+	// /proc/kallsyms so we can verify CleanupAnchors' stale detection, alert, and
+	// fail-closed -prog retention end to end on the KASAN debug kernel.
+	auxProg, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Name:       "anchor_aux_keep",
+		Type:       ebpf.Tracing,
+		AttachType: ebpf.AttachTraceFEntry,
+		AttachTo:   "bpf_fentry_test2",
+		License:    "GPL",
+		Instructions: asm.Instructions{
+			asm.Mov.Imm(asm.R0, 0),
+			asm.Return(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("load auxProg: %v", err)
+	}
+	defer func() { _ = auxProg.Close() }()
+	auxLink, err := link.AttachTracing(link.TracingOptions{Program: auxProg})
+	if err != nil {
+		t.Fatalf("attach auxLink: %v", err)
+	}
+	defer func() {
+		// Closing auxLink without failslab forces a clean trampoline rebuild
+		// that retires the stale image so subsequent tests in this VM stay clean.
+		_ = auxLink.Close()
+		time.Sleep(500 * time.Millisecond)
+		_ = os.RemoveAll(root)
+	}()
+
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatalf("openGraceOwnerInRoot: %v", err)
+	}
+	owner.ensureAnchor("bpf_fentry_test2", zap.NewNop())
+	_ = unix.Close(owner.lockFD)
+
+	progPath := filepath.Join(root, AnchorsSubdir, "bpf_fentry_test2"+anchorProgSuffix)
+	if _, err := os.Stat(progPath); err != nil {
+		t.Fatalf("expected anchor prog %s: %v", progPath, err)
+	}
+
+	var failFD int
+	hooks := &anchorCleanupHooks{
+		beforeLinkClose: func(funcName string) {
+			runtime.LockOSThread()
+			tidFailPath := fmt.Sprintf("/proc/self/task/%d/make-it-fail", unix.Gettid())
+			fd, oerr := unix.Open(tidFailPath, unix.O_WRONLY, 0)
+			if oerr == nil {
+				failFD = fd
+				_ = os.WriteFile(filepath.Join(failslabDir, "task-filter"), []byte("Y"), 0o644)
+				_ = os.WriteFile(filepath.Join(failslabDir, "ignore-gfp-wait"), []byte("N"), 0o644)
+				_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("100"), 0o644)
+				_ = os.WriteFile(filepath.Join(failslabDir, "interval"), []byte("1"), 0o644)
+				_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("20"), 0o644)
+				_ = os.WriteFile(filepath.Join(failslabDir, "space"), []byte("0"), 0o644)
+				_, _ = unix.Pwrite(failFD, []byte("1\n"), 0)
+			}
+		},
+		afterLinkClose: func(funcName string) {
+			if failFD > 0 {
+				_, _ = unix.Pwrite(failFD, []byte("0\n"), 0)
+				_ = unix.Close(failFD)
+				failFD = 0
+			}
+			_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+			_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+			runtime.UnlockOSThread()
+		},
+	}
+
+	err = cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 3*time.Second, hooks)
+	if err == nil || !strings.Contains(err.Error(), "drain and reboot") {
+		t.Fatalf("expected drain-and-reboot stale error when anchor detach hits ENOMEM, got %v", err)
+	}
+	if !StaleTrampolineDetected() {
+		t.Fatal("expected StaleTrampolineDetected()=true after stale anchor detach")
+	}
+	if _, serr := os.Stat(progPath); serr != nil {
+		t.Fatalf("anchor prog %s was UNPINNED despite surviving stale trampoline image: %v", progPath, serr)
+	}
 }
 
 // TestOnKernelReaperSurvivesENOMEMUnlinkViaForceRebuild proves on a real Linux
@@ -536,7 +755,13 @@ func TestOnKernelReaperSurvivesENOMEMUnlinkViaForceRebuild(t *testing.T) {
 		t.Fatalf("expected stale trampoline to keep calling progDetach after ENOMEM unlink (c0=%d c1=%d)", c0, c1)
 	}
 
-	// Run our production graceReaper across all 3 passes (force-rebuild -> 15m -> 1m confirm).
+	// Run our production zero-timer image-liveness graceReaper:
+	//   - Pass 1: marks dead owner pass-1
+	//   - Pass 2: snapshots the STUCK stale trampoline address from /proc/kallsyms
+	//   - Pass 3: sees the stale address STILL in /proc/kallsyms -> forces rebuild
+	//     via pinned no-op fentry/unix_dgram_sendmsg in reaperOwner.dir
+	//   - Pass 4+: waits until the old stale trampoline address disappears from
+	//     /proc/kallsyms, THEN safely unpins and removes owner.dir!
 	reaperOwner, err := openGraceOwnerInRoot(root, zap.NewNop())
 	if err != nil {
 		t.Fatalf("openGraceOwnerInRoot(reaper): %v", err)
@@ -546,10 +771,13 @@ func TestOnKernelReaperSurvivesENOMEMUnlinkViaForceRebuild(t *testing.T) {
 		_ = unix.Close(reaperOwner.lockFD)
 	}()
 
-	now := clockBoottimeNs()
-	reaperOwner.reaper.bootNowNs = func() uint64 { return now }
+	reaperOwner.reaper.round() // Pass 1: stateDeadPass1
+	reaperOwner.reaper.round() // Pass 2: snapshots stuck stale address from kallsyms
+	if _, err := os.Stat(owner.dir); err != nil {
+		t.Fatalf("owner.dir reaped prematurely while stale trampoline image was still live: %v", err)
+	}
 
-	// Pass 1: force-rebuild unix_dgram_sendmsg via cached pinned no-op in reaperOwner.dir!
+	// Pass 3: sees stale address still in kallsyms -> forces rebuild!
 	reaperOwner.reaper.round()
 	time.Sleep(500 * time.Millisecond)
 
@@ -560,14 +788,18 @@ func TestOnKernelReaperSurvivesENOMEMUnlinkViaForceRebuild(t *testing.T) {
 		t.Fatalf("stale trampoline STILL called progDetach after production reaper force-rebuild: c1=%d c2=%d", c1, c2)
 	}
 
-	// Pass 2 (15m01s) & Pass 3 (1m01s): reap owner.dir!
-	now += uint64(15*time.Minute + time.Second)
-	reaperOwner.reaper.round()
-	now += uint64(1*time.Minute + time.Second)
-	reaperOwner.reaper.round()
+	// Poll passes until old stale image address clears from /proc/kallsyms -> reaped!
+	reapDeadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(reapDeadline) {
+		reaperOwner.reaper.round()
+		if _, err := os.Stat(owner.dir); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 
 	if _, err := os.Stat(owner.dir); !os.IsNotExist(err) {
-		t.Fatalf("owner.dir still exists after production reaper rebuild + grace + confirm: %v", err)
+		t.Fatalf("owner.dir still exists after production reaper rebuild + kallsyms clear: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond)
 
