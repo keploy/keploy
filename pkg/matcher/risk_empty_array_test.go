@@ -32,11 +32,10 @@ func TestComputeFailureAssessmentJSON_AnArrayThatWasEmpty(t *testing.T) {
 			want: models.Medium,
 		},
 		{
-			name:    "an array loses its last scalar element",
-			exp:     `{"items":["a"]}`,
-			act:     `{"items":[]}`,
-			want:    models.High,
-			removed: []string{"items[]"},
+			name: "an array loses its last scalar element",
+			exp:  `{"items":["a"]}`,
+			act:  `{"items":[]}`,
+			want: models.Medium,
 		},
 		{
 			name:    "an array loses its last object element",

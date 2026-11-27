@@ -155,6 +155,32 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	hasType := len(typeChanges) > 0
 	hasValue := len(valueChanges) > 0
 
+	// A removed empty-array sentinel whose counterpart array is populated
+	// (act holds nested paths under the same array) is not a real removal:
+	// the array went from empty to populated, a value change rather than a
+	// deleted field. Track this so it blocks the auto-pass (Low) without
+	// grading as SchemaBroken (High).
+	allRemovedConsumed := hasRemoved
+	if allRemovedConsumed {
+		for _, r := range removed {
+			if expMaps.types[r] != "" {
+				allRemovedConsumed = false
+				break
+			}
+				hasNested := false
+			for ak := range actMaps.types {
+				if ak != r && strings.HasPrefix(ak, r) {
+					hasNested = true
+					break
+				}
+			}
+			if !hasNested {
+				allRemovedConsumed = false
+				break
+			}
+		}
+	}
+
 	// The path maps above keep one value per path, an array's elements
 	// folded into one "[]" path (the last element's value wins), so they
 	// cannot see a value, a field or an element that changed inside an array
@@ -188,7 +214,7 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	}
 
 	// Build reasons (human friendly)
-	if hasRemoved {
+	if hasRemoved && !allRemovedConsumed {
 		assess.Reasons = append(assess.Reasons, "Removed fields: "+strings.Join(removed, ", "))
 	}
 	if hasType {
@@ -216,7 +242,7 @@ func ComputeFailureAssessmentJSON(expJSON, actJSON string, bodyNoise map[string]
 	//     * new + some value changes        -> Medium
 	// - No differences at all               -> SchemaUnchanged / None
 	switch {
-	case hasRemoved || hasType:
+	case (hasRemoved && !allRemovedConsumed) || hasType:
 		assess.Category = []models.FailureCategory{models.SchemaBroken}
 		assess.Risk = models.High
 
@@ -492,6 +518,16 @@ func collectJSON(v interface{}, path string, ni noiseIndex, out *pathMaps, recor
 		} else {
 			p = "[]"
 		}
+		// An empty array records its element path as a sentinel so a later,
+		// populated array at the same path is seen as a value change rather
+		// than a brand-new field (which would grade as an additive schema
+		// change and could auto-pass). The sentinel type ("") is treated as
+		// compatible with any element type in diffMaps.
+		if len(t) == 0 {
+			if _, ok := out.types[p]; !ok {
+				out.types[p] = ""
+			}
+		}
 		for _, e := range t {
 			collectJSON(e, p, ni, out, recorded)
 		}
@@ -559,6 +595,17 @@ func diffMaps(exp, act pathMaps) (added, removed, typeChanges, valueChanges []st
 		actType, ok := act.types[k]
 		if !ok {
 			removed = append(removed, k)
+			continue
+		}
+		// An empty-array sentinel ("") is compatible with any element type:
+		// an array going from empty to populated (or back) is a value change,
+		// not a type change or a brand-new field. Two empty arrays are
+		// identical, so two sentinels produce no change.
+		if expType == "" || actType == "" {
+			if expType == "" && actType == "" {
+				continue
+			}
+			valueChanges = append(valueChanges, k)
 			continue
 		}
 		if expType != actType {
