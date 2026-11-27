@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -202,9 +203,9 @@ func resolveTrampolineTarget(info uapiProgInfo) (btfObjID, btfID uint32, funcNam
 }
 
 // resolveFuncNameInBTF resolves a kernel function name (vmlinux or loaded kernel
-// module such as tls.ko) to its (btfObjID, btfID, isModule) using
-// /sys/kernel/btf/*. Used on Linux 5.10..5.19 (where bpf_prog_info omits
-// attach_btf_id) and for CAP_BPF-only agents inspecting module targets on 6.0+.
+// module such as tls.ko) using /sys/kernel/btf/*. Used on Linux 5.10..5.19
+// (where bpf_prog_info omits attach_btf_id) and for CAP_BPF-only agents
+// inspecting module targets on 6.0+.
 func resolveFuncNameInBTF(funcName string) (btfObjID, btfID uint32, isModule, ok bool, err error) {
 	if funcName == "" {
 		return 0, 0, false, false, nil
@@ -220,27 +221,40 @@ func resolveFuncNameInBTF(funcName string) (btfObjID, btfID uint32, isModule, ok
 		}
 	}
 	// Check loaded kernel modules (e.g. tls.ko for tls_sw_sendmsg/recvmsg/tls_init).
-	entries, rerr := os.ReadDir("/sys/kernel/btf")
-	if rerr != nil {
-		return 0, 0, false, false, nil
-	}
-	for _, e := range entries {
-		modName := e.Name()
-		if modName == "vmlinux" || e.IsDir() {
-			continue
-		}
-		modSpec, merr := btf.LoadKernelModuleSpec(modName)
-		if merr != nil {
-			continue
-		}
-		var mfn *btf.Func
-		if err := modSpec.TypeByName(funcName, &mfn); err == nil && mfn != nil {
-			if id, ierr := modSpec.TypeID(mfn); ierr == nil && id != 0 {
-				return 0, uint32(id), true, true, nil
+	if entries, rerr := os.ReadDir("/sys/kernel/btf"); rerr == nil {
+		for _, e := range entries {
+			modName := e.Name()
+			if modName == "vmlinux" || e.IsDir() {
+				continue
+			}
+			modSpec, merr := btf.LoadKernelModuleSpec(modName)
+			if merr != nil {
+				continue
+			}
+			var mfn *btf.Func
+			if err := modSpec.TypeByName(funcName, &mfn); err == nil && mfn != nil {
+				if id, ierr := modSpec.TypeID(mfn); ierr == nil && id != 0 {
+					return 0, uint32(id), true, true, nil
+				}
 			}
 		}
 	}
 	return 0, 0, false, false, nil
+}
+
+// isRawBTFTracepointName reports whether name corresponds to a raw BTF
+// tracepoint (`tp_btf/<name>` attaches to `btf_trace_<name>` typedef in
+// vmlinux BTF, not a bpf_trampoline).
+func isRawBTFTracepointName(name string) bool {
+	if name == "" {
+		return false
+	}
+	vmlinux, err := loadKernelBTF()
+	if err != nil {
+		return false
+	}
+	_, terr := vmlinux.AnyTypeByName("btf_trace_" + name)
+	return terr == nil
 }
 
 type dirTargets struct {
@@ -276,14 +290,29 @@ func (d dirTargets) hasKallsymsMatchers() bool {
 	return len(d.keyToFunc) > 0 || len(d.modIDToFunc) > 0
 }
 
-// inspectDirTrampolineTargets scans every pinned program in a dead grace
-// directory and returns its resolved trampoline keys and kernel function names.
+// parsePinTargetMap decodes per-pin `pinName=targetFunc` entries from
+// target_funcs. Legacy entries without `=` do not satisfy per-pin resolution
+// (so a legacy dir with unresolved pre-6.0 or EPERM pins stays safely pinned).
+func parsePinTargetMap(entries []string) map[string]string {
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if idx := strings.IndexByte(e, '='); idx > 0 && idx+1 < len(e) {
+			out[e[:idx]] = e[idx+1:]
+		}
+	}
+	return out
+}
+
+// inspectDirTrampolineTargets scans EVERY pinned program in a dead grace
+// directory and resolves its trampoline keys and kernel function name PER
+// PROGRAM (not per directory).
 //
 // Works on BOTH Linux 6.0+ (from bpf_prog_info.attach_btf_id) and Linux
-// 5.10..5.19 (from the pin-time target_funcs metadata resolved against kernel
-// BTF). FAILS CLOSED (returns an error) if ANY Tracing/LSM program is present
-// whose target function cannot be resolved — never returns an empty target set
-// for an unresolved Tracing program.
+// 5.10..5.19 / CAP_BPF-only module targets (from per-pin target_funcs metadata
+// resolved against /sys/kernel/btf/*). FAILS CLOSED (returns an error keeping
+// the WHOLE directory pinned) if ANY Tracing/LSM program in the directory
+// cannot be mapped to its concrete target — one resolved program can NEVER hide
+// an unresolved program in the same directory.
 func (r *graceReaper) inspectDirTrampolineTargets(dirPath string) (dirTargets, error) {
 	out := dirTargets{
 		keyToFunc:   make(map[uint64]string),
@@ -293,17 +322,16 @@ func (r *graceReaper) inspectDirTrampolineTargets(dirPath string) (dirTargets, e
 	if !autoStateStore.isBPFFS(autoStateStore{}, dirPath) {
 		return out, nil
 	}
-	recordedFuncs, rerr := r.store.readTargets(dirPath)
+	recordedEntries, rerr := r.store.readTargets(dirPath)
 	if rerr != nil {
 		return out, fmt.Errorf("read recorded target_funcs in %s: %w", dirPath, rerr)
 	}
+	pinTargets := parsePinTargetMap(recordedEntries)
 
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return out, fmt.Errorf("read dead grace dir %s: %w", dirPath, err)
 	}
-	sawTracingProg := false
-	sawUnresolvedPre60 := false
 	for _, e := range entries {
 		if isMetadataFile(e.Name()) {
 			continue
@@ -322,50 +350,57 @@ func (r *graceReaper) inspectDirTrampolineTargets(dirPath string) (dirTargets, e
 			return out, fmt.Errorf("query prog info %s: %w", pinPath, ierr)
 		}
 		progType := ebpf.ProgramType(info.Type)
-		if progType == ebpf.Tracing || progType == ebpf.LSM {
-			sawTracingProg = true
+		if progType != ebpf.Tracing && progType != ebpf.LSM {
+			continue
 		}
+
 		objID, btfID, fnName, isTramp, pre60, rerr := resolveTrampolineTarget(info)
 		if rerr != nil {
 			return out, fmt.Errorf("resolve trampoline target for %s: %w", pinPath, rerr)
 		}
-		if pre60 {
-			sawUnresolvedPre60 = true
-			continue
-		}
-		if isTramp && fnName != "" {
-			out.funcs[fnName] = struct{}{}
-			for _, k := range trampolineCandidateKeys(objID, btfID) {
-				out.keyToFunc[k] = fnName
-			}
-		}
-	}
-
-	// On pre-6.0 kernels (5.10..5.19) or CAP_BPF-only module targets, use the
-	// target kernel function names recorded at pin time and resolve their BTF
-	// IDs directly against /sys/kernel/btf/*.
-	if sawUnresolvedPre60 || len(recordedFuncs) > 0 {
-		for _, fn := range recordedFuncs {
-			if fn == "" {
-				continue
-			}
-			out.funcs[fn] = struct{}{}
-			if objID, btfID, isMod, ok, berr := resolveFuncNameInBTF(fn); berr == nil && ok {
-				if isMod {
-					out.modIDToFunc[btfID] = fn
-				} else {
-					for _, k := range trampolineCandidateKeys(objID, btfID) {
-						out.keyToFunc[k] = fn
-					}
+		if !pre60 {
+			if isTramp && fnName != "" {
+				out.funcs[fnName] = struct{}{}
+				for _, k := range trampolineCandidateKeys(objID, btfID) {
+					out.keyToFunc[k] = fnName
 				}
 			}
+			continue
 		}
-	}
 
-	// FAIL CLOSED: never report 0 targets when a Tracing/LSM program could not
-	// be mapped to at least one concrete kernel target function.
-	if sawTracingProg && len(out.funcs) == 0 {
-		return out, fmt.Errorf("dead grace dir %s contains Tracing/LSM program(s) with no resolvable target function (failing closed)", dirPath)
+		// Per-program resolution for pre-6.0 kernels and CAP_BPF-only module
+		// targets (6.0+ EPERM): EVERY such pin MUST have its own recorded
+		// target in target_funcs, or we fail closed for the whole directory.
+		recTarget, hasPin := pinTargets[e.Name()]
+		if !hasPin || recTarget == "" {
+			return out, fmt.Errorf("dead grace dir %s contains Tracing/LSM program %s with no recorded per-pin target (failing closed)", dirPath, e.Name())
+		}
+		if recTarget == nonTrampolineTargetSentinel {
+			continue
+		}
+		bObjID, bID, isMod, ok, berr := resolveFuncNameInBTF(recTarget)
+		if berr != nil {
+			return out, fmt.Errorf("resolve recorded target %q for %s in BTF: %w", recTarget, pinPath, berr)
+		}
+		if !ok {
+			if isRawBTFTracepointName(recTarget) {
+				continue
+			}
+			return out, fmt.Errorf("dead grace dir %s contains Tracing/LSM program %s whose recorded target %q is not present in kernel BTF (failing closed)", dirPath, e.Name(), recTarget)
+		}
+		out.funcs[recTarget] = struct{}{}
+		if isMod {
+			out.modIDToFunc[bID] = recTarget
+			if info.AttachBtfObjID > 1 && info.AttachBtfID != 0 {
+				for _, k := range trampolineCandidateKeys(info.AttachBtfObjID, info.AttachBtfID) {
+					out.keyToFunc[k] = recTarget
+				}
+			}
+		} else {
+			for _, k := range trampolineCandidateKeys(bObjID, bID) {
+				out.keyToFunc[k] = recTarget
+			}
+		}
 	}
 	return out, nil
 }

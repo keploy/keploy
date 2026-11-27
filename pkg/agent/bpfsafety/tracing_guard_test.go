@@ -193,19 +193,63 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 			}
 		}
 	}
-	// Enforce that unixconn.go passes the resolved AttachTo target (not the raw
-	// ELF program name) to bpfsafety.AttachTracing (killing M12).
+	// Enforce that unixconn.go passes the resolved AttachTo target obtained
+	// directly from unixFexitAttachTarget(...) to bpfsafety.AttachTracing
+	// (killing both M12 and M12b: direct `name`, closure returning `name`, or
+	// `targetFunc := name`).
 	if rel == "pkg/agent/hooks/linux/unixconn.go" {
+		assignedFromHelper := map[string]bool{}
+		ast.Inspect(file, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+				return true
+			}
+			lhs, ok := as.Lhs[0].(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if ce, ok := as.Rhs[0].(*ast.CallExpr); ok && isIdentOrSel(ce.Fun, "unixFexitAttachTarget") {
+				assignedFromHelper[lhs.Name] = true
+			} else {
+				delete(assignedFromHelper, lhs.Name)
+			}
+			return true
+		})
 		ast.Inspect(file, func(n ast.Node) bool {
 			ce, ok := n.(*ast.CallExpr)
 			if !ok || !isIdentOrSel(ce.Fun, "AttachTracing") || len(ce.Args) < 3 {
 				return true
 			}
-			if id, ok := ce.Args[2].(*ast.Ident); ok && id.Name == "name" {
-				out = append(out, fmt.Sprintf("%s:%d: bpfsafety.AttachTracing must pass kernel AttachTo targetFunc, not raw program name", rel, fset.Position(ce.Pos()).Line))
+			if argCall, ok := ce.Args[2].(*ast.CallExpr); ok && isIdentOrSel(argCall.Fun, "unixFexitAttachTarget") {
+				return true
+			}
+			id, ok := ce.Args[2].(*ast.Ident)
+			if !ok || !assignedFromHelper[id.Name] {
+				out = append(out, fmt.Sprintf("%s:%d: bpfsafety.AttachTracing 3rd arg must be assigned directly from unixFexitAttachTarget(...)", rel, fset.Position(ce.Pos()).Line))
 			}
 			return true
 		})
+	}
+	// Enforce the never-remove-anchor-last-link invariant in anchors_linux.go:
+	// CleanupAnchors / cleanupAnchorsInRoot MUST NEVER load-and-close or unlink
+	// any pinned anchor link or anchor prog (anchors are released only by reboot).
+	if rel == "pkg/agent/bpfsafety/anchors_linux.go" {
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || (fd.Name.Name != "CleanupAnchors" && fd.Name.Name != "cleanupAnchorsInRoot") || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				ce, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if isIdentOrSel(ce.Fun, "LoadPinnedLink") || isIdentOrSel(ce.Fun, "Remove") || isIdentOrSel(ce.Fun, "RemoveAll") || isIdentOrSel(ce.Fun, "Unlink") {
+					out = append(out, fmt.Sprintf("%s:%d (%s): anchor cleanup must never unlink or detach pinned anchor links (released only by reboot)", rel, fset.Position(ce.Pos()).Line, fd.Name.Name))
+				}
+				return true
+			})
+		}
 	}
 	return out
 }
@@ -358,6 +402,33 @@ func AttachTracing(prog any, object, name, role string) (link.Link, error) {
 func (r *graceReaper) forceRebuildTarget(funcName string) error {
 	_, err := attachPinnedReaperNoop(nil)
 	return err
+}`,
+		},
+		{
+			name: "M12_unixconn_passes_prog_name",
+			rel:  "pkg/agent/hooks/linux/unixconn.go",
+			src: `package linux
+func bad(bpfsafety any, name string) {
+	bpfsafety.AttachTracing(nil, "unixconn", name, "p")
+}`,
+		},
+		{
+			name: "M12b_unixconn_reassigns_targetFunc",
+			rel:  "pkg/agent/hooks/linux/unixconn.go",
+			src: `package linux
+func bad(bpfsafety any, name string) {
+	targetFunc := name
+	bpfsafety.AttachTracing(nil, "unixconn", targetFunc, "p")
+}`,
+		},
+		{
+			name: "M21_anchor_cleanup_removes_last_link",
+			rel:  "pkg/agent/bpfsafety/anchors_linux.go",
+			src: `package bpfsafety
+func cleanupAnchorsInRoot(p string) {
+	l, _ := link.LoadPinnedLink(p, nil)
+	_ = os.Remove(p)
+	_ = l.Close()
 }`,
 		},
 	}

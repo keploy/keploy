@@ -42,18 +42,24 @@ Both OSS `keploy` and `enterprise` share a single implementation in `go.keploy.i
 1. **Dedicated host-bpffs grace root (`<host-bpffs>/keploy-grace/grace2-<nonce>/`):**
    - Before every `link.AttachTracing` call (primary hooks, backup hooks, lifecycle, kTLS, standalone netio, classic scope lifecycle, and OSS `unixconn`), `bpfsafety.PinBeforeAttach` pins the `bpf_prog` into a per-process directory under **`keploy-grace/`** on the **host** BPF filesystem: `/run/keploy/host-bpffs/keploy-grace/grace2-<nonce>/` in containers (mounted outside `/sys` by the Helm chart, webhook, replay pod spec, Docker launcher, and Docker Compose hook so private `/sys/fs/bpf` overlays and containerd AppArmor `/sys/fs/[^c]*/**` rules never interfere), or `/sys/fs/bpf/keploy-grace/grace2-<nonce>/` for bare native Linux hosts (auto-mounting `/sys/fs/bpf` only on bare hosts, never inside containers and never remounting read-only mounts).
    - Placing the grace root at `<host-bpffs>/keploy-grace/` keeps grace directories **completely outside** `<host-bpffs>/keploy/`, so `selfupdate.WipeBPFPins` and legacy map-pin cleanups never touch live or cooling grace directories. Using the `grace2-` prefix isolates image-liveness directories from older timer-only `grace-*` reapers during rolling upgrades or mixed-version runner nodes, while the current reaper safely reaps both `grace2-*` and legacy `grace-*` directories.
-   - Each pinned program's kernel target function (`AttachTo`) is persisted in a `target_funcs` pinned BPF array map inside the grace directory so Linux `5.10–5.19` kernels (where `bpf_prog_info` does not populate `attach_btf_id`) resolve targets via `/sys/kernel/btf/*` identically to `6.0+` kernels.
+   - Each pinned program's kernel target function (`AttachTo`) is persisted per pin (`<pinName>=<targetFunc>`) in a `target_funcs` pinned BPF array map inside the grace directory so Linux `5.10–5.19` kernels (where `bpf_prog_info` does not populate `attach_btf_id`) and `CAP_BPF`-only module targets resolve targets per program via `/sys/kernel/btf/*` identically to `6.0+` kernels. `bpfsafety.PinBeforeAttach` refuses (`ErrUnresolvedTarget`) any Tracing/LSM program whose target cannot be resolved, and the reaper fails closed per program (keeping the whole directory pinned if any Tracing/LSM program in it is unresolved).
    - Each live agent holds an exclusive `flock(LOCK_EX)` on its `grace2-<nonce>` directory for its lifetime.
    - `bpfsafety.PinBeforeAttach` **fails closed by construction** (`ErrGraceNotArmed`) if `bpfsafety.Init` was not called.
 
 2. **Pinned Trampoline Anchor Links (`<host-bpffs>/keploy-grace/anchors/<func>-link`):**
    - While Keploy is installed on a node with host bpffs, Keploy pins one tiny 2-instruction no-op `fentry` link (`mov r0, 0; exit`) per hooked kernel function (`vmlinux` and `tls.ko`, e.g., `tls_sw_sendmsg` / `tls_sw_recvmsg`) under `<host-bpffs>/keploy-grace/anchors/<func>-link` (alongside `<func>-prog`) **before** the first real attach on that function.
-   - **Why:** On a DaemonSet or sidecar node, Keploy is usually the only BPF trampoline user on those functions. Keeping one no-op anchor link pinned guarantees the kernel trampoline's refcount never drops to 0 when an agent exits, rolls, self-updates, or is `SIGKILL`ed — preventing Linux 6.12's unrecoverable last-link ftrace UAF and permanent `EBUSY` until reboot, and ensuring any failed `-ENOMEM` unlink is cleanly repaired by the next trampoline update.
-   - **Measured idle overhead (Linux 6.12, 5×200,000 calls):**
-     - `unix_dgram_sendmsg` and `tcp_sendmsg` + `tcp_recvmsg`: **no measurable difference** (`±100 ns` within run-to-run measurement noise).
+   - **Why:** On a DaemonSet or sidecar node, Keploy is usually the only BPF trampoline user on those functions. Keeping one no-op anchor link pinned guarantees the kernel trampoline's refcount never drops to 0 when an agent exits, rolls, self-updates, or is `SIGKILL`ed — preventing Linux 6.0+'s unrecoverable last-link `ftrace_ops_trampoline` UAF and permanent `EBUSY` until reboot, preventing Linux 5.10–5.11's static trampoline page free under `-ENOMEM`, and ensuring any failed `-ENOMEM` unlink is cleanly repaired by the next trampoline update.
+   - **Measured idle overhead (Linux `6.12.63+deb13-amd64`, `PREEMPT_DYNAMIC`, 15 interleaved rounds each):**
+     - `unix_dgram_connect` (15×50,000 calls): baseline median `917.8 ns`, anchored median `963.4 ns`, **delta `+45.6 ns/call`**.
+     - `unix_stream_connect` (15×20,000 calls): baseline median `5140.2 ns`, anchored median `5224.4 ns`, **delta `+84.1 ns/call`**.
+     - `unix_dgram_sendmsg` (15×100,000 calls): baseline median `1796.9 ns`, anchored median `1993.1 ns`, **delta `+196.2 ns/call` (~200 ns/call upper bound)**.
+     - `tcp_sendmsg` + `tcp_recvmsg` (15×50,000 loopback round-trips, 4 hook calls/RT): baseline median `88004.2 ns`, anchored median `84622.2 ns` (within loopback scheduler noise).
      - Memory footprint: **~4 KiB total** across all anchored functions (no maps).
-     - Note for kTLS: anchoring `tls_sw_sendmsg`/`tls_sw_recvmsg` holds a kernel module reference on `tls.ko` while the anchor is installed.
-   - **Lifecycle & removal:** Anchors are **never** removed by an exiting, dying, or `SIGKILL`ed agent. Because detaching an anchor is itself a last-link trampoline unlink (which on Linux `5.10–5.11` frees the static trampoline page under `-ENOMEM` and on `6.0+` can hit `ftrace_ops` UAF under severe memory pressure), **on production nodes prefer rebooting the node to clear anchors** (~4 KiB total, no measurable overhead). When explicit uninstall cleanup is run (`keploy agent cleanup --host-bpffs /sys/fs/bpf`), it refuses while any live agent holds flock or any dead grace directory still holds pinned programs on that function, safely reaps dead grace directories first, refuses anchor detach on Linux `< 5.12` (reboot to clear), and on `5.12+` verifies pre- and post-detach `/proc/kallsyms` clearance before unpinning `-prog` (failing closed and raising the drain-and-reboot alert if any image persists).
+     - Note for kTLS: anchoring `tls_sw_sendmsg`/`tls_sw_recvmsg` holds a kernel module reference on `tls.ko` until reboot.
+   - **Lifecycle & removal (same on every Linux kernel):** **No Keploy path ever removes an anchor's last link on any kernel** — not the reaper, not `CleanupAnchors`, not `keploy agent cleanup`, and not an uninstall hook. Detaching an anchor's last link under memory pressure reaches the kernel's last-link `-ENOMEM` bug on both `5.10–5.11` and `6.0+`, so anchors stay pinned safely until the next node reboot. Running `keploy agent cleanup --host-bpffs /sys/fs/bpf` after stopping all Keploy agents safely reaps any dead `grace2-*`/`grace-*` directories left behind by exited agents and prints:
+     ```text
+     N idle keploy anchors stay until the next reboot (safe; per-call cost 200 ns)
+     ```
 
 3. **Pre-Detach Disarm + First-in-Teardown Fast Link Close:**
    - On shutdown, `bpfsafety.GracefulShutdown` (and enterprise's `GracefulShutdownProgGrace`) runs **first** in process teardown — before TLS uprobe removal, proxyless map cleanup, coverage flushes, Podman shutdown, or noise learning — so tracing links detach in milliseconds, well inside supervisor (`25s`), kubelet (`30s`), and Docker (`10s`) stop deadlines.
@@ -70,7 +76,7 @@ Both OSS `keploy` and `enterprise` share a single implementation in `go.keploy.i
      - **Fallback when `/proc/kallsyms` addresses are hidden** (`bpf_jit_kallsyms=0`, `bpf_jit_harden!=0`, or `kptr_restrict` hides addresses): the reaper forces a rebuild on every resolved target, enables `BPF_ENABLE_STATS(BPF_STATS_RUN_TIME)` for ~2 seconds, and verifies cumulative `run_cnt` across all pinned programs stays flat. If `BPF_ENABLE_STATS` is unavailable, no target was resolved, or `run_cnt` increases, the reaper **fails closed** and keeps the pins indefinitely rather than risking a UAF.
 
 5. **Permanent Last-Link `EBUSY` Stale-Trampoline Alert & Drain-and-Reboot Procedure:**
-   - If any `fentry`/`fexit` attach (agent hook, anchor, or reaper rebuild) returns `EBUSY` — or if calm anchor removal observes a surviving trampoline image — that indicates a permanent last-link stale trampoline on the node.
+   - If any `fentry`/`fexit` attach (agent hook, anchor, or reaper rebuild) returns `EBUSY`, that indicates a permanent last-link stale trampoline on the node.
    - Keploy keeps the affected program pinned until reboot, degrades the affected hook cleanly without crash-looping, sets Prometheus gauge `keploy_bpf_stale_trampoline=1`, logs a loud `WARN` (`"drain and reboot this node"`), and sets `bpf_stale_trampoline: true` in CLI telemetry.
    - **Operator action when `keploy_bpf_stale_trampoline == 1`:** cordon, drain, and reboot the affected node. Do **not** manually delete pinned programs from `/sys/fs/bpf/keploy-grace/` before rebooting.
 
@@ -88,15 +94,15 @@ Both OSS `keploy` and `enterprise` share a single implementation in `go.keploy.i
    - `keploy_bpf_prog_grace_pinned_progs`: total pinned BPF programs held across grace directories.
    - `keploy_bpf_anchor_links`: number of pinned no-op trampoline anchor links under `<host-bpffs>/keploy-grace/anchors/`.
    - `keploy_bpf_unprotected_trampolines`: `1` when running without host-bpffs protection, `0` otherwise.
-   - `keploy_bpf_stale_trampoline`: `1` when a permanent stale trampoline (`EBUSY` / surviving image) requires draining and rebooting the node, `0` otherwise.
+   - `keploy_bpf_stale_trampoline`: `1` when a permanent stale trampoline (`EBUSY`) requires draining and rebooting the node, `0` otherwise.
    - `keploy_bpf_grace_mode{mode="host-bpffs"|"unprotected"}`: `1` on the active grace mode label, `0` on the inactive label.
    - CLI telemetry super-properties: `bpf_unprotected_trampolines: true` and `bpf_stale_trampoline: true` (omitted when false).
 
 8. **Kernel Memory Cost and Steady-State Bounds:**
    - A pinned `bpf_prog` holds references to its `aux->used_maps` (`~185 MiB` at default 1 GiB container / 64 MiB ringbuf; `~377 MiB` at 256 MiB ringbuf; `~4–5 MiB` for OSS `unixconn` alone) only until its trampoline image disappears from `/proc/kallsyms`.
    - Because `/proc/kallsyms` image-liveness reaping runs every `15s` and kernel trampoline images normally free within `~1s` after link close, a dead directory from a rollout, self-update swap, or crash is typically reaped within **15–30 seconds** (rather than sitting for 15+ minutes).
-   - Anchor links hold **no maps** (`~4 KiB` total across the node).
-   - On an uninstalled node with no successor agent, the last exited agent's `grace2-*` directory is safely reaped by `keploy agent cleanup` (which runs the zero-timer image-liveness reaper before touching anchors) or cleared automatically on node reboot.
+   - Anchor links hold **no maps** (`~4 KiB` total across the node) and remain pinned until the next node reboot.
+   - On an uninstalled node with no successor agent, the last exited agent's `grace2-*` directory is safely reaped by `keploy agent cleanup` (which runs the zero-timer image-liveness / `BPF_ENABLE_STATS` reaper and leaves idle anchors untouched until reboot) or cleared automatically on node reboot.
 
 9. **Cold Start-Up Probe (`pkg/kernelcap`):**
    - `ProbeTracingAttach` attaches to `bpf_fentry_test1` (invoked only by `BPF_PROG_TEST_RUN`, never by live workload traffic) instead of `tcp_close`, eliminating the start-time detach race on `tcp_close`.
@@ -106,13 +112,13 @@ Both OSS `keploy` and `enterprise` share a single implementation in `go.keploy.i
 - **Upgrade coupling:** Upgrade the `k8s-proxy` chart and the fixed enterprise agent **together** (re-rendering GitOps manifests if using `helm template`). Replacing a pre-fix agent performs one final pre-fix detach per node because the running pre-fix binary did not pin its programs or anchors.
 - **Policy preconditions:** DaemonSet pods, webhook sidecars, and `replay.stackMode` DinD stack pods mount hostPath `/sys/fs/bpf` at `/run/keploy/host-bpffs` (clusters with Gatekeeper/Kyverno `allowedHostPaths` must permit `/sys/fs/bpf`), and nodes must have `bpffs` mounted at `/sys/fs/bpf`.
 - **NEVER `rm -rf` `/sys/fs/bpf/keploy-grace/` while any Keploy agent is running (or if `keploy_bpf_stale_trampoline=1`):** Unpinning a live program or a program referenced by a stale trampoline image exposes the node to a kernel panic.
-- **Removing anchor links on uninstall:** Stop all Keploy agents on the node, then run:
+- **Cleaning up exited grace directories on uninstall:** Stop all Keploy agents on the node, then run:
 
 ```sh
 keploy agent cleanup --host-bpffs /sys/fs/bpf
 ```
 
-`keploy agent cleanup` refuses to run while any live Keploy agent holds a grace lock, snapshots `/proc/kallsyms` before detaching each anchor, verifies the trampoline image is freed before unpinning the anchor program, and alerts if a node requires a reboot.
+`keploy agent cleanup` refuses to run while any live Keploy agent holds a grace lock, safely reaps any dead `grace2-*`/`grace-*` directories left behind by exited agents, never detaches any anchor link, and prints how many idle anchors remain until the next node reboot (`N idle keploy anchors stay until the next reboot (safe; per-call cost 200 ns)`).
 
 ## Third-Party eBPF Tools Sharing Trampolines
 

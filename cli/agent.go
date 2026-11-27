@@ -357,10 +357,10 @@ func agentCleanupCmd(ctx context.Context, logger *zap.Logger) *cobra.Command {
 	var hostBPFFS string
 	cleanupCmd := &cobra.Command{
 		Use:   "cleanup",
-		Short: "calmly remove pinned eBPF trampoline anchor links when no Keploy agent is running",
+		Short: "safely reap exited Keploy grace directories and report idle trampoline anchors",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := bpfsafety.CleanupAnchors(ctx, logger, hostBPFFS); err != nil {
-				utils.LogError(logger, err, "failed to clean up eBPF trampoline anchors")
+				utils.LogError(logger, err, "failed to clean up exited eBPF grace directories")
 				utils.SetExitCodeOnce(utils.ExitKeployError)
 				return nil
 			}

@@ -22,10 +22,11 @@ const (
 	targetFuncsFileName      = "target_funcs"
 	legacyStampFileName      = "first_free_boottime"
 
-	maxSnapshotEntries   = 512
-	maxTargetFuncEntries = 128
-	targetFuncSlotSize   = 64
-	kallsymsPath         = "/proc/kallsyms"
+	maxSnapshotEntries          = 512
+	maxTargetFuncEntries        = 256
+	targetFuncSlotSize          = 128
+	nonTrampolineTargetSentinel = "<non-trampoline>"
+	kallsymsPath                = "/proc/kallsyms"
 
 	stateCleanSnapshot  uint64 = 1 << 0
 	stateDeadPass1      uint64 = 1 << 1
@@ -340,10 +341,16 @@ func (a autoStateStore) writeTargets(dir string, funcs []string) error {
 			}
 			created = true
 		}
+		valSize := uint32(targetFuncSlotSize)
+		if info, ierr := m.Info(); ierr == nil && info.ValueSize > 0 {
+			valSize = info.ValueSize
+		}
 		for i, fn := range funcs {
-			var slot [targetFuncSlotSize]byte
-			copy(slot[:targetFuncSlotSize-1], fn)
-			if uerr := m.Update(uint32(i), slot[:], ebpf.UpdateAny); uerr != nil {
+			slot := make([]byte, valSize)
+			if valSize > 1 {
+				copy(slot[:valSize-1], fn)
+			}
+			if uerr := m.Update(uint32(i), slot, ebpf.UpdateAny); uerr != nil {
 				_ = m.Close()
 				return uerr
 			}
@@ -370,10 +377,20 @@ func (a autoStateStore) readTargets(dir string) ([]string, error) {
 			return nil, err
 		}
 		defer func() { _ = m.Close() }()
+		valSize := uint32(targetFuncSlotSize)
+		maxEntries := uint32(maxTargetFuncEntries)
+		if info, ierr := m.Info(); ierr == nil {
+			if info.ValueSize > 0 {
+				valSize = info.ValueSize
+			}
+			if info.MaxEntries > 0 {
+				maxEntries = info.MaxEntries
+			}
+		}
+		slot := make([]byte, valSize)
 		var out []string
-		for i := uint32(0); i < maxTargetFuncEntries; i++ {
-			var slot [targetFuncSlotSize]byte
-			if err := m.Lookup(i, &slot); err != nil {
+		for i := uint32(0); i < maxEntries; i++ {
+			if err := m.Lookup(i, slot); err != nil {
 				return nil, err
 			}
 			if slot[0] == 0 {

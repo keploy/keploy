@@ -24,7 +24,7 @@ if [ -z "${QEMU_ACCEL:-}" ]; then
 fi
 QEMU_MEM="${QEMU_MEM:-1536}"
 VM_TIMEOUT="${VM_TIMEOUT:-300}"
-TEST_REGEX="${TEST_REGEX:-^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCalmRemovalDetectsStaleAfterENOMEM|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|ModuleTargetDeadOwnerENOMEM)$}"
+TEST_REGEX="${TEST_REGEX:-^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$}"
 
 if [ "$#" -gt 0 ]; then
   KERNELS=("$@")
@@ -75,7 +75,7 @@ func main() {
 
 	regex := os.Getenv("TEST_REGEX")
 	if regex == "" {
-		regex = "^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCalmRemovalDetectsStaleAfterENOMEM|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|ModuleTargetDeadOwnerENOMEM)$"
+		regex = "^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$"
 	}
 	cmd := exec.Command("/bpfsafety.test", "-test.v", "-test.count=1", "-test.timeout=240s", "-test.run="+regex)
 	cmd.Stdout = os.Stdout
@@ -139,6 +139,37 @@ for K in "${KERNELS[@]}"; do
     echo "FAIL [${K}]: kernel fault/KASAN/panic observed in console log!"
     BAD=1
   fi
+  # Enforce that every required test for this kernel actually PASSED and NONE skipped.
+  REQ_TESTS=(
+    TestOnKernelReaperSurvivesENOMEMUnlinkViaForceRebuild
+    TestOnKernelAnchorPreventsLastLinkENOMEM
+    TestOnKernelAnchorCleanupNeverDetachesLastLinkUnderFailslab
+    TestOnKernelCleanSnapshotRace
+    TestOnKernelCleanSnapshotTwoProgsSameFunc
+    TestOnKernelCleanupAnchorsIdleWithDeadDirAndOtherLink
+    TestOnKernelSlotReuseConvergence
+  )
+  case "$K" in
+    5.10|5.15|5.19)
+      REQ_TESTS+=(
+        TestOnKernelUnresolvedNameFailsClosed
+        TestOnKernelMixedDirUnresolvedProgDead
+        TestOnKernelMixedDirUnresolvedProgClean
+      )
+      ;;
+  esac
+  if [ -f "$KERNEL_DIR/tls-${K}.ko" ]; then
+    REQ_TESTS+=(TestOnKernelModuleTargetDeadOwnerENOMEM)
+  fi
+  for T in "${REQ_TESTS[@]}"; do
+    if grep -q "^--- SKIP: ${T} " "$CLEAN_LOG"; then
+      echo "FAIL [${K}]: required test ${T} was SKIPPED!"
+      BAD=1
+    elif ! grep -q "^--- PASS: ${T} " "$CLEAN_LOG"; then
+      echo "FAIL [${K}]: required test ${T} did not PASS!"
+      BAD=1
+    fi
+  done
   if [ "$BAD" -ne 0 ]; then
     echo "--- Tail of ${K} log ---"
     tail -n 80 "$CLEAN_LOG"

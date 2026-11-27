@@ -30,9 +30,10 @@ const (
 )
 
 var (
-	ErrGraceNotArmed = errors.New("bpf trampoline grace pinning is not armed")
-	ErrShuttingDown  = errors.New("bpf trampoline safety gate is closed for shutdown")
-	ErrPinFailed     = errors.New("bpf trampoline grace pin failed")
+	ErrGraceNotArmed    = errors.New("bpf trampoline grace pinning is not armed")
+	ErrShuttingDown     = errors.New("bpf trampoline safety gate is closed for shutdown")
+	ErrPinFailed        = errors.New("bpf trampoline grace pin failed")
+	ErrUnresolvedTarget = errors.New("bpf tracing program target function could not be resolved")
 )
 
 type Mode string

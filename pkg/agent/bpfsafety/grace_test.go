@@ -1129,20 +1129,162 @@ func TestWarnOnceForUnresolvableDeadDir(t *testing.T) {
 	}
 }
 
-func TestCleanupAnchorsRefusesOnPre512(t *testing.T) {
+func TestCleanupAnchorsNeverRemovesAnchorLinksOnAnyKernel(t *testing.T) {
 	resetStateForTest(t)
 	root := t.TempDir()
 	anchorsDir := filepath.Join(root, AnchorsSubdir)
 	if err := os.MkdirAll(anchorsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(anchorsDir, "unix_dgram_sendmsg"+anchorLinkSuffix), []byte("l"), 0o600); err != nil {
+	linkPath := filepath.Join(anchorsDir, "unix_dgram_sendmsg"+anchorLinkSuffix)
+	progPath := filepath.Join(anchorsDir, "unix_dgram_sendmsg"+anchorProgSuffix)
+	if err := os.WriteFile(linkPath, []byte("l"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, time.Second, &anchorCleanupHooks{
-		dynamicTrampImageFn: func() bool { return false },
+	if err := os.WriteFile(progPath, []byte("p"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, dyn := range []bool{false, true} {
+		core, logs := observer.New(zapcore.InfoLevel)
+		err := cleanupAnchorsInRoot(context.Background(), zap.New(core), root, time.Second, &anchorCleanupHooks{
+			dynamicTrampImageFn: func() bool { return dyn },
+		})
+		if err != nil {
+			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) = %v, want nil", dyn, err)
+		}
+		if StaleTrampolineDetected() {
+			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) wrongly raised StaleTrampolineDetected", dyn)
+		}
+		if _, serr := os.Stat(linkPath); serr != nil {
+			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) removed anchor link %s (MUST stay until reboot!): %v", dyn, linkPath, serr)
+		}
+		if _, serr := os.Stat(progPath); serr != nil {
+			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) removed anchor prog %s (MUST stay until reboot!): %v", dyn, progPath, serr)
+		}
+		foundMsg := false
+		for _, e := range logs.All() {
+			if strings.Contains(e.Message, "1 idle keploy anchors stay until the next reboot") && strings.Contains(e.Message, "per-call cost") {
+				foundMsg = true
+				break
+			}
+		}
+		if !foundMsg {
+			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) missing clear reboot/cost summary line, logs=%+v", dyn, logs.All())
+		}
+	}
+}
+
+func TestParsePinTargetMapRequiresPerPinKey(t *testing.T) {
+	m := parsePinTargetMap([]string{
+		"000001-review-unix_dgram_sendmsg-p=unix_dgram_sendmsg",
+		"000002-lifecycle-sched_process_exit-p=<non-trampoline>",
+		"unix_stream_connect", // legacy dir-level entry without pinName= MUST NOT populate per-pin map
 	})
-	if err == nil || !strings.Contains(err.Error(), "Linux <5.12") {
-		t.Fatalf("cleanupAnchorsInRoot on <5.12 = %v, want explicit refusal error", err)
+	if got := m["000001-review-unix_dgram_sendmsg-p"]; got != "unix_dgram_sendmsg" {
+		t.Fatalf("pin 1 target = %q, want unix_dgram_sendmsg", got)
+	}
+	if got := m["000002-lifecycle-sched_process_exit-p"]; got != nonTrampolineTargetSentinel {
+		t.Fatalf("pin 2 target = %q, want %q", got, nonTrampolineTargetSentinel)
+	}
+	if len(m) != 2 {
+		t.Fatalf("parsePinTargetMap length = %d (%v), want 2 (legacy un-keyed entry must be ignored)", len(m), m)
+	}
+}
+
+func TestReaperSlotReuseBreaksLivelockViaStatsFallback(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	deadDir := filepath.Join(root, GraceDirPrefix+"slot-reuse")
+	if err := os.Mkdir(deadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deadDir, "000001-p"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const key = uint64(6442555249)
+	const reusedAddr = uint64(0xffffffffc031a300) // stays identical on 6.12 bpf_prog_pack slot reuse
+
+	now := uint64(1000 * time.Second)
+	rebuilds := 0
+	statsCalls := 0
+	runCntDelta := uint64(3) // still running on first fallback -> MUST fail closed
+
+	r := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.NewNop())
+	r.bootNowNs = func() uint64 { return now }
+	r.statsProbeWait = time.Millisecond
+	r.dynamicTrampImageFn = func() bool { return true }
+	r.kallsymsSysctlFn = func() bool { return true }
+	r.readKallsymsFn = func() (map[uint64][]uint64, bool, error) {
+		return map[uint64][]uint64{key: {reusedAddr}}, true, nil
+	}
+	r.inspectTargetsFn = func(string) (dirTargets, error) {
+		return dirTargets{
+			keyToFunc: map[uint64]string{key: "unix_dgram_sendmsg"},
+			funcs:     map[string]struct{}{"unix_dgram_sendmsg": {}},
+		}, nil
+	}
+	r.rebuildTargetFn = func(string) error {
+		rebuilds++
+		return nil
+	}
+	r.enableStatsFn = func() (io.Closer, error) {
+		statsCalls++
+		return nopCloser{}, nil
+	}
+	r.runCntFn = func(string) (uint64, error) {
+		if runCntDelta > 0 {
+			d := runCntDelta
+			runCntDelta = 0
+			return 50 + d, nil
+		}
+		return 50, nil
+	}
+
+	// Pass 1: stateDeadPass1
+	r.round()
+	// Pass 2: snapshots reusedAddr + forces rebuild #1 (sets stateForcedRebuild)
+	now += uint64(300 * time.Millisecond)
+	r.round()
+	if rebuilds != 1 {
+		t.Fatalf("after pass 2: rebuilds=%d, want 1", rebuilds)
+	}
+	// Within 2s settle window (every 300ms): MUST wait calmly without thrashing rebuilds or resetting LastProbeBootNs!
+	for i := 0; i < 5; i++ {
+		now += uint64(300 * time.Millisecond)
+		r.round()
+	}
+	if rebuilds != 1 || statsCalls != 0 {
+		t.Fatalf("during 2s post-rebuild settle: rebuilds=%d statsCalls=%d, want 1/0", rebuilds, statsCalls)
+	}
+
+	// At >= 2s after pass-2 rebuild: reusedAddr still present -> enters stats fallback.
+	// First check sees run_cnt changing -> MUST keep pinned!
+	runCntSeq := 0
+	r.runCntFn = func(string) (uint64, error) {
+		runCntSeq++
+		if runCntSeq == 1 {
+			return 100, nil
+		}
+		if runCntSeq == 2 {
+			return 105, nil // still executing!
+		}
+		return 105, nil // flat on next attempt
+	}
+	now += uint64(600 * time.Millisecond)
+	r.round()
+	if statsCalls != 1 {
+		t.Fatalf("expected stats fallback after >=2s slot reuse, got statsCalls=%d", statsCalls)
+	}
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("reaped deadDir despite run_cnt increasing in stats fallback: %v", err)
+	}
+
+	// Next check >= 2s later: run_cnt is flat (105 -> 105) -> breaks livelock and reaps cleanly!
+	now += uint64(2500 * time.Millisecond)
+	r.round()
+	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
+		t.Fatalf("deadDir still livelocked after stats fallback confirmed flat run_cnt: err=%v", err)
 	}
 }

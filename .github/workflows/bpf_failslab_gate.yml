@@ -3,6 +3,8 @@ name: BPF Failslab 4-Kernel VM Gate
 on:
   pull_request:
     paths:
+      - 'go.mod'
+      - 'go.sum'
       - 'pkg/agent/bpfsafety/**'
       - 'pkg/agent/hooks/linux/**'
       - 'scripts/bpf-failslab-vm-gate.sh'
@@ -118,4 +120,7 @@ jobs:
 
       - name: Run 4-kernel failslab debug VM gate
         run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
           KERNEL_DIR=/tmp/debug-kernels ./scripts/bpf-failslab-vm-gate.sh 5.10 5.15 5.19 6.12

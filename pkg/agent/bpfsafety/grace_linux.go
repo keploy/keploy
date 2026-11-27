@@ -169,6 +169,12 @@ var ErrShuttingDown = errors.New("bpf trampoline safety gate is closed for shutd
 // link.AttachTracing failures (e.g. missing trampoline support).
 var ErrPinFailed = errors.New("bpf trampoline grace pin failed")
 
+// ErrUnresolvedTarget is returned by PinBeforeAttach when a Tracing/LSM
+// program's kernel target function cannot be resolved (caller must pass
+// ProgramSpec.AttachTo so Linux 5.10..5.19 and CAP_BPF-only module targets
+// can be anchored and safely reaped per program).
+var ErrUnresolvedTarget = errors.New("bpf tracing program target function could not be resolved")
+
 // MetricsObserver receives updated host-bpffs grace counts, anchor link count,
 // unprotected status, and permanent stale-trampoline status (EBUSY last-link failure).
 type MetricsObserver func(dirsPresent, pinnedProgs, anchorLinks int, unprotected, staleTrampoline bool)
@@ -895,87 +901,113 @@ func hasMountInfoBPFFS(mountinfoPath, target string) (bool, error) {
 }
 
 type graceOwner struct {
-	root              string
-	dir               string
-	self              string
-	lockFD            int
-	seq               atomic.Uint64
-	keysMu            sync.Mutex
-	attachedKeys      map[uint64]struct{}
-	attachedModBTFIDs map[uint32]struct{}
-	recordedTargets   map[string]bool
-	pinPaths          map[*ebpf.Program]string
-	anchorMu          sync.Mutex
-	anchoredFuncs     map[string]bool
-	logger            *zap.Logger
-	reaper            *graceReaper
-	reaperCancel      context.CancelFunc
+	root               string
+	dir                string
+	self               string
+	lockFD             int
+	seq                atomic.Uint64
+	keysMu             sync.Mutex
+	attachedKeys       map[uint64]struct{}
+	attachedModBTFIDs  map[uint32]struct{}
+	recordedPinTargets map[string]string
+	pinPaths           map[*ebpf.Program]string
+	anchorMu           sync.Mutex
+	anchoredFuncs      map[string]bool
+	logger             *zap.Logger
+	reaper             *graceReaper
+	reaperCancel       context.CancelFunc
 }
 
 func (g *graceOwner) unpinFailed(prog *ebpf.Program) {
 	g.keysMu.Lock()
 	p := g.pinPaths[prog]
 	delete(g.pinPaths, prog)
+	if p != "" && g.recordedPinTargets != nil {
+		delete(g.recordedPinTargets, filepath.Base(p))
+	}
 	g.keysMu.Unlock()
 	if p != "" {
 		_ = os.Remove(p)
 	}
 }
 
-func (g *graceOwner) recordTargetFunc(fnName string) {
-	if fnName == "" {
-		return
+func (g *graceOwner) recordPinTarget(pinName, target string) error {
+	if pinName == "" || target == "" {
+		return nil
 	}
 	g.keysMu.Lock()
-	if g.recordedTargets == nil {
-		g.recordedTargets = make(map[string]bool)
+	if g.recordedPinTargets == nil {
+		g.recordedPinTargets = make(map[string]string)
 	}
-	if g.recordedTargets[fnName] {
-		g.keysMu.Unlock()
-		return
-	}
-	g.recordedTargets[fnName] = true
-	funcs := make([]string, 0, len(g.recordedTargets))
-	for fn := range g.recordedTargets {
-		funcs = append(funcs, fn)
+	g.recordedPinTargets[pinName] = target
+	entries := make([]string, 0, len(g.recordedPinTargets))
+	for pName, fn := range g.recordedPinTargets {
+		entries = append(entries, pName+"="+fn)
 	}
 	g.keysMu.Unlock()
 
 	if g.reaper != nil && g.reaper.store != nil {
-		_ = g.reaper.store.writeTargets(g.dir, funcs)
+		return g.reaper.store.writeTargets(g.dir, entries)
 	}
+	return nil
 }
 
 func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) error {
 	// Resolve target function + candidate trampoline keys BEFORE pinning so:
 	//  1. Already-permanent-EBUSY targets fail immediately without leaking a pin.
-	//  2. Both Linux 6.0+ (attach_btf_id) and Linux 5.10..5.19 (BTF lookup of
-	//     caller-provided AttachTo name) record the exact target function and
-	//     pin an anchor link BEFORE the first real attach.
+	//  2. Both Linux 6.0+ (attach_btf_id) and Linux 5.10..5.19 / CAP_BPF-only
+	//     module targets (BTF lookup of caller-provided AttachTo name) record
+	//     the exact per-pin target function and pin an anchor link BEFORE the
+	//     first real attach.
+	//  3. Any Tracing/LSM program whose kernel target cannot be resolved is
+	//     REFUSED BEFORE PINNING OR ATTACHING (fail closed per program so one
+	//     resolved program in a grace dir can never hide an unresolved one).
 	if object != "bpfsafety_reaper" && isStaleTarget(name) {
 		return fmt.Errorf("stale BPF trampoline on %s (hook unavailable until node reboot; drain and reboot this node): %w", name, unix.EBUSY)
 	}
 
 	var (
-		resolvedFunc string
-		candKeys     []uint64
-		modBTFID     uint32
+		resolvedFunc     string
+		resolvedNonTramp bool
+		candKeys         []uint64
+		modBTFID         uint32
 	)
 	if info, err := queryProgInfo(prog.FD()); err == nil {
-		objID, btfID, fnName, isTramp, pre60, rerr := resolveTrampolineTarget(info)
-		if rerr == nil && isTramp && fnName != "" {
-			resolvedFunc = fnName
-			candKeys = trampolineCandidateKeys(objID, btfID)
-		} else if pre60 && name != "" {
-			if bObjID, bID, isMod, ok, berr := resolveFuncNameInBTF(name); berr == nil && ok {
-				resolvedFunc = name
-				if isMod {
-					modBTFID = bID
-					if info.AttachBtfObjID > 1 {
-						candKeys = trampolineCandidateKeys(info.AttachBtfObjID, bID)
+		progType := ebpf.ProgramType(info.Type)
+		if progType == ebpf.Tracing || progType == ebpf.LSM {
+			objID, btfID, fnName, isTramp, pre60, rerr := resolveTrampolineTarget(info)
+			if rerr != nil {
+				return fmt.Errorf("%w: resolve tracing target for %s (%s): %v", ErrUnresolvedTarget, name, object, rerr)
+			}
+			if isTramp && fnName != "" {
+				resolvedFunc = fnName
+				candKeys = trampolineCandidateKeys(objID, btfID)
+			} else if !pre60 {
+				// Valid non-trampoline Tracing prog (e.g. tp_btf on 6.0+).
+				resolvedNonTramp = true
+			} else {
+				// Linux 5.10..5.19 or CAP_BPF-only 6.0+ module target: resolve
+				// caller-provided AttachTo symbol directly against /sys/kernel/btf/*.
+				bObjID, bID, isMod, ok, berr := resolveFuncNameInBTF(name)
+				if berr != nil {
+					return fmt.Errorf("%w: lookup %q in kernel BTF: %v", ErrUnresolvedTarget, name, berr)
+				}
+				if !ok {
+					if isRawBTFTracepointName(name) {
+						resolvedNonTramp = true
+					} else {
+						return fmt.Errorf("%w: %q (object %s) is not a kernel BTF function or tracepoint; pass ProgramSpec.AttachTo", ErrUnresolvedTarget, name, object)
 					}
 				} else {
-					candKeys = trampolineCandidateKeys(bObjID, bID)
+					resolvedFunc = name
+					if isMod {
+						modBTFID = bID
+						if info.AttachBtfObjID > 1 && info.AttachBtfID != 0 {
+							candKeys = trampolineCandidateKeys(info.AttachBtfObjID, info.AttachBtfID)
+						}
+					} else {
+						candKeys = trampolineCandidateKeys(bObjID, bID)
+					}
 				}
 			}
 		}
@@ -989,6 +1021,19 @@ func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) e
 	pinPath := filepath.Join(g.dir, pinName)
 	if err := prog.Pin(pinPath); err != nil {
 		return fmt.Errorf("%w: pin BPF trampoline program %s (%s) into host bpffs grace dir %s: %w", ErrPinFailed, name, object, pinPath, err)
+	}
+
+	// Record per-pin target metadata BEFORE returning so the reaper can always
+	// map this exact pin on 5.10..5.19 and CAP_BPF-only 6.0+ module paths.
+	pinTargetVal := resolvedFunc
+	if pinTargetVal == "" && resolvedNonTramp {
+		pinTargetVal = nonTrampolineTargetSentinel
+	}
+	if pinTargetVal != "" {
+		if rerr := g.recordPinTarget(pinName, pinTargetVal); rerr != nil {
+			_ = os.Remove(pinPath)
+			return fmt.Errorf("%w: record per-pin target %s for %s: %v", ErrPinFailed, pinTargetVal, pinName, rerr)
+		}
 	}
 
 	g.keysMu.Lock()
@@ -1013,7 +1058,6 @@ func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) e
 	g.keysMu.Unlock()
 
 	if resolvedFunc != "" {
-		g.recordTargetFunc(resolvedFunc)
 		// Pin a no-op anchor link on this function BEFORE the first real
 		// attach (skip for the reaper's own rebuild no-op so we don't recurse).
 		if object != "bpfsafety_reaper" {
@@ -1528,13 +1572,31 @@ func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms 
 		return false
 	}
 
-	// Force a trampoline rebuild for every key whose image is still alive
-	// (replaces any stale image left behind by a prior -ENOMEM unlink failure).
+	// Inspect targets (per-program fail-closed!) before rebuilding.
 	targets, terr := r.inspectTargetsFn(dirPath)
 	if terr != nil {
-		r.logger.Warn("bpf-safety: failed to inspect targets for stuck trampoline images; keeping pins", zap.String("graceDir", dirPath), zap.Error(terr))
+		r.warnOnceUnresolved(dirPath, terr)
 		return false
 	}
+
+	// On Linux 6.12+, bpf_prog_pack allocates trampoline images from first-fit
+	// 64-byte slots, so a freshly rebuilt image can reuse the exact address of
+	// an old snapshotted image. Once we have ALREADY forced a rebuild on an
+	// earlier pass:
+	//   - wait calmly during the 2s RCU-tasks settle window (do not thrash
+	//     rebuilds or reset LastProbeBootNs), and
+	//   - if a snapshotted address is STILL listed after >= 2s, break potential
+	//     slot-reuse livelock cleanly via the fail-closed forced-rebuild +
+	//     BPF_ENABLE_STATS flat run_cnt check.
+	if st.Flags&stateForcedRebuild != 0 {
+		if nowNs >= st.LastProbeBootNs && nowNs-st.LastProbeBootNs < cleanSettleNs {
+			return false
+		}
+		return r.handleStatsFallback(dirPath, progs, targets, st, nowNs)
+	}
+
+	// Force a trampoline rebuild for every key whose image is still alive
+	// (replaces any stale image left behind by a prior -ENOMEM unlink failure).
 	stuckFuncs := make(map[string]struct{})
 	for _, ref := range surviving {
 		if fn, ok := targets.funcForKey(ref.Key); ok && fn != "" {
