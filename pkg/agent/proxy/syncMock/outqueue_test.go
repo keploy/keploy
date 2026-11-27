@@ -352,8 +352,17 @@ func TestAControlFrameDoesNotOvertakeTheQueue(t *testing.T) {
 func TestANewChannelDecidesNothingUnderItsLock(t *testing.T) {
 	old := make(chan *models.Mock, 1)
 	old <- &models.Mock{Name: "filler"}
+	clk := &stall.ManualClock{}
 	m := New(nil)
-	m.outClock, m.outStall = &stall.ManualClock{}, time.Hour
+	m.outClock, m.outStall = clk, time.Hour
+	t.Cleanup(func() {
+		waitClockPending(t, clk)
+		clk.Advance(time.Hour)
+		deadline := time.Now().Add(5 * time.Second)
+		for m.OutQueued() && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+	})
 	m.SetOutputChannel(old)
 	m.send(&models.Mock{Name: "a"}, "", nil) // the drainer's mock in hand
 	decided := make(chan struct{}, 1)

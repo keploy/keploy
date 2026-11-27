@@ -30,6 +30,7 @@ type fakeSpillFactory struct {
 	failPeekAt int // >0 = fail Peek on Nth call
 	onPut      func()
 	onPeek     func()
+	onDiscard  func()
 	lanes      atomic.Int64
 	puts       atomic.Int64
 	discards   atomic.Int64
@@ -105,6 +106,9 @@ func (l *fakeSpillLane) Discard() int {
 	l.items = nil
 	l.closed = true
 	l.factory.discards.Add(1)
+	if l.factory.onDiscard != nil {
+		l.factory.onDiscard()
+	}
 	return n
 }
 
@@ -258,9 +262,12 @@ func TestOutQueueSpill_ExhaustedSpillUsesRAMTailAndFailsClosedPastBound(t *testi
 	// - mocks 3..5 fall back to the RAM tail (~12 KiB, still within bound!)
 	// - mocks 6..11 exceed bound and fail closed via MockDroppedOutputFull.
 	nonSharedBound := outQueueMaxBytes - outQueueSharedRoom
-	reserve := nonSharedBound - 20*1024
-	processOutQueued.Add(reserve)
-	defer processOutQueued.Add(-reserve)
+	baseQueued := processOutQueued.Load()
+	reserve := (nonSharedBound - 20*1024) - baseQueued
+	if reserve > 0 {
+		processOutQueued.Add(reserve)
+		defer processOutQueued.Add(-reserve)
+	}
 
 	spill := &fakeSpillFactory{ramLimit: 1024, maxItems: 2}
 	mgr.SetOutQueueSpill(spill)
@@ -320,6 +327,13 @@ func TestOutQueueSpill_ExhaustedSpillUsesRAMTailAndFailsClosedPastBound(t *testi
 		time.Sleep(5 * time.Millisecond)
 	}
 	mgr.CloseOutChan()
+	wantQueued := baseQueued
+	if reserve > 0 {
+		wantQueued += reserve
+	}
+	if got := processOutQueued.Load(); got != wantQueued {
+		t.Fatalf("processOutQueued after tail drain = %d, want %d (RAM tail accounting leaked)", got, wantQueued)
+	}
 }
 
 // TestOutQueueSpill_RAMLimitClampedToQueueBound kills MR1 (removing rl < ramCap clamp).
@@ -331,9 +345,12 @@ func TestOutQueueSpill_RAMLimitClampedToQueueBound(t *testing.T) {
 	mgr.SetOutputChannel(out)
 
 	nonSharedBound := outQueueMaxBytes - outQueueSharedRoom
-	reserve := nonSharedBound - 8*1024
-	processOutQueued.Add(reserve)
-	defer processOutQueued.Add(-reserve)
+	baseQueued := processOutQueued.Load()
+	reserve := (nonSharedBound - 8*1024) - baseQueued
+	if reserve > 0 {
+		processOutQueued.Add(reserve)
+		defer processOutQueued.Add(-reserve)
+	}
 
 	// RAMLimit > queueBound must clamp to queueBound: once RAM hits queueBound,
 	// subsequent mocks must spill (not exceed queueBound in RAM).
@@ -361,6 +378,7 @@ func TestOutQueueSpill_RAMLimitClampedToQueueBound(t *testing.T) {
 }
 
 func TestOutQueueSpill_ConsumerStallStreamsDropsWithoutSlurp(t *testing.T) {
+	baseQueued := processOutQueued.Load()
 	mgr := New(zap.NewNop())
 	mgr.outStall = 40 * time.Millisecond
 	mgr.outCloseStall = 20 * time.Millisecond
@@ -418,6 +436,9 @@ func TestOutQueueSpill_ConsumerStallStreamsDropsWithoutSlurp(t *testing.T) {
 		}
 	}
 	mgr.CloseOutChan()
+	if got := processOutQueued.Load(); got != baseQueued {
+		t.Fatalf("processOutQueued after stall give-up = %d, want %d (head/tail bytes leaked)", got, baseQueued)
+	}
 }
 
 // TestOutQueueSpill_CorruptPeekFailsClosedWithFullMetadataAndAsyncReusable
@@ -467,12 +488,30 @@ func TestOutQueueSpill_CorruptPeekFailsClosedWithFullMetadataAndAsyncReusable(t 
 			})
 		}
 
+		// Exercise concurrent SetLogger while dropCorruptSpill logs so -race
+		// verifies loggerMu synchronization (dropLogger).
+		stopLogger := make(chan struct{})
+		loggerDone := make(chan struct{})
+		go func() {
+			defer close(loggerDone)
+			for {
+				select {
+				case <-stopLogger:
+					return
+				default:
+					mgr.SetLogger(zap.NewNop())
+				}
+			}
+		}()
+
 		<-out // filler
 		<-out // corrupt-00 (in RAM head)
 		deadline := time.Now().Add(5 * time.Second)
 		for mgr.OutQueued() && time.Now().Before(deadline) {
 			time.Sleep(5 * time.Millisecond)
 		}
+		close(stopLogger)
+		<-loggerDone
 		if doneFalse.Load() == 0 {
 			t.Fatal("expected done(false) callbacks on corrupt spill")
 		}
@@ -633,7 +672,7 @@ func (l *nonRetainingSpillLane) Discard() int {
 // spilled *models.Mock structs are GC-collected while sitting in spill and live
 // heap stays bounded far below burst size.
 func TestOutQueueSpill_SpilledMocksNotPinnedOnHeap(t *testing.T) {
-	for _, via := range []string{"AddMock", "SendConfigMock"} {
+	for _, via := range []string{"AddMock", "SendConfigMock", "sendTaken"} {
 		t.Run(via, func(t *testing.T) {
 			mgr := New(zap.NewNop())
 			mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
@@ -656,10 +695,17 @@ func TestOutQueueSpill_SpilledMocksNotPinnedOnHeap(t *testing.T) {
 				if i >= 5 {
 					ptrs = append(ptrs, weak.Make(m))
 				}
-				if via == "AddMock" {
+				switch via {
+				case "AddMock":
 					mgr.AddMock(m)
-				} else {
+				case "SendConfigMock":
 					mgr.SendConfigMock(m)
+				case "sendTaken":
+					batch := []ownedMock{{mock: m, owner: fmt.Sprintf("tc-%d", i), noted: false}}
+					mgr.mu.Lock()
+					mgr.noteTaken(batch)
+					mgr.mu.Unlock()
+					mgr.sendTaken(batch)
 				}
 			}
 			if !mgr.PendingIn(now, now.Add(time.Second)) {
@@ -773,4 +819,332 @@ func TestOutQueueSpill_SpillIODoesNotHoldOutQueueMu(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	mgr.CloseOutChan()
+
+	// Slow-Peek variant (kills ML2): while the drainer is blocked inside
+	// lane.spill.Peek(), OutQueued() must not block on outQueueMu.
+	t.Run("slow_peek", func(t *testing.T) {
+		mgr := New(zap.NewNop())
+		mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
+		out := make(chan *models.Mock, 1)
+		out <- &models.Mock{Name: "filler"}
+		mgr.SetOutputChannel(out)
+
+		inPeek := make(chan struct{})
+		releasePeek := make(chan struct{})
+		var once sync.Once
+		spill := &fakeSpillFactory{
+			ramLimit: 1024,
+			onPeek: func() {
+				once.Do(func() {
+					close(inPeek)
+					<-releasePeek
+				})
+			},
+		}
+		mgr.SetOutQueueSpill(spill)
+
+		now := time.Now().Add(-time.Second)
+		mgr.send(makeSizedMock("ram-head", 2048, now), "", nil)
+		mgr.send(makeSizedMock("slow-peek", 2048, now.Add(time.Millisecond)), "", nil)
+		<-out // filler
+		<-out // ram-head; drainer now enters Peek() for slow-peek
+		<-inPeek
+
+		checked := make(chan bool, 1)
+		go func() { checked <- mgr.OutQueued() }()
+		select {
+		case q := <-checked:
+			if !q {
+				t.Fatal("OutQueued() returned false while spill Peek was in flight")
+			}
+		case <-time.After(2 * time.Second):
+			close(releasePeek)
+			t.Fatal("OutQueued() blocked on outQueueMu while spill Peek() was executing")
+		}
+		close(releasePeek)
+		if got := <-out; got.Name != "slow-peek" {
+			t.Fatalf("delivered = %q, want slow-peek", got.Name)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for mgr.OutQueued() && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		mgr.CloseOutChan()
+	})
+}
+
+// TestOutQueueSpill_NilHookMidSpillKeepsFIFO proves R2-S1: clearing the spill
+// hook while a lane already holds spilled mocks routes subsequent sends to
+// lane.tail (up to bound) so they never overtake spilled mocks via lane.queue.
+func TestOutQueueSpill_NilHookMidSpillKeepsFIFO(t *testing.T) {
+	SetDefaultOutQueueSpill(nil)
+	mgr := New(zap.NewNop())
+	mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
+	out := make(chan *models.Mock, 1)
+	out <- &models.Mock{Name: "filler"}
+	mgr.SetOutputChannel(out)
+	mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1024})
+
+	now := time.Now().Add(-time.Second)
+	for i := 0; i < 4; i++ {
+		if res := mgr.send(makeSizedMock(fmt.Sprintf("a-%d", i), 2048, now.Add(time.Duration(i)*time.Millisecond)), "", nil); res != MockTaken {
+			t.Fatalf("send(a-%d) = %v, want MockTaken", i, res)
+		}
+	}
+	// Clear hook while a-1..a-3 are spilled; b-0 must stay behind them in FIFO order.
+	mgr.SetOutQueueSpill(nil)
+	if res := mgr.send(makeSizedMock("b-0", 2048, now.Add(10*time.Millisecond)), "", nil); res != MockTaken {
+		t.Fatalf("send(b-0) = %v, want MockTaken", res)
+	}
+
+	<-out // filler
+	want := []string{"a-0", "a-1", "a-2", "a-3", "b-0"}
+	for i, w := range want {
+		select {
+		case got := <-out:
+			if got.Name != w {
+				t.Fatalf("position %d: got %q, want %q (nil hook mid-spill broke FIFO)", i, got.Name, w)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %q at position %d", w, i)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for mgr.OutQueued() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	mgr.CloseOutChan()
+}
+
+type flippingSpillFactory struct {
+	ramLimit int64
+	allow    atomic.Bool
+}
+
+func (f *flippingSpillFactory) RAMLimit() int64 { return f.ramLimit }
+func (f *flippingSpillFactory) NewLane() OutQueueSpillLane {
+	return &flippingSpillLane{factory: f}
+}
+
+type flippingSpillLane struct {
+	factory *flippingSpillFactory
+	items   []fakeSpillItem
+	closed  bool
+}
+
+func (l *flippingSpillLane) Put(mock *models.Mock, owner string, size int64) bool {
+	if l.closed || !l.factory.allow.Load() {
+		return false
+	}
+	l.items = append(l.items, fakeSpillItem{mock: mock, owner: owner, size: size})
+	return true
+}
+func (l *flippingSpillLane) Len() int { return len(l.items) }
+func (l *flippingSpillLane) Peek() (*models.Mock, string, int64, error) {
+	if len(l.items) == 0 {
+		return nil, "", 0, nil
+	}
+	it := l.items[0]
+	return it.mock, it.owner, it.size, nil
+}
+func (l *flippingSpillLane) Pop() {
+	if len(l.items) == 0 {
+		return
+	}
+	l.items[0] = fakeSpillItem{}
+	l.items = l.items[1:]
+}
+func (l *flippingSpillLane) Detach() OutQueueSpillLane {
+	if len(l.items) == 0 {
+		l.closed = true
+		return nil
+	}
+	d := &flippingSpillLane{factory: l.factory, items: l.items}
+	l.items = nil
+	l.closed = true
+	return d
+}
+func (l *flippingSpillLane) Discard() int {
+	n := len(l.items)
+	l.items = nil
+	l.closed = true
+	return n
+}
+
+// TestOutQueueSpill_FlippingBudgetStressExactFIFOAndZeroAccounting kills MT1,
+// MT8, and MT9: while multiple senders push bursts and the spill budget flips
+// repeatedly between open and full (forcing transitions across RAM head, spill,
+// RAM tail, tail promotion, and drainer exit), every sender's sequence arrives
+// exactly once in FIFO order with zero stranded mocks and exact processOutQueued
+// accounting.
+func TestOutQueueSpill_FlippingBudgetStressExactFIFOAndZeroAccounting(t *testing.T) {
+	baseQueued := processOutQueued.Load()
+	mgr := New(zap.NewNop())
+	mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
+	out := make(chan *models.Mock, 4)
+	mgr.SetOutputChannel(out)
+
+	spill := &flippingSpillFactory{ramLimit: 4096}
+	spill.allow.Store(true)
+	mgr.SetOutQueueSpill(spill)
+
+	const senders = 4
+	const perSender = 400
+	const total = senders * perSender
+
+	// Flipper alternates spill budget open/full so sends hit spill, decline
+	// into lane.tail, and later hit len(lane.tail) > 0 while spill is open again.
+	stopFlip := make(chan struct{})
+	flipDone := make(chan struct{})
+	go func() {
+		defer close(flipDone)
+		on := true
+		for {
+			select {
+			case <-stopFlip:
+				return
+			default:
+				on = !on
+				spill.allow.Store(on)
+				time.Sleep(150 * time.Microsecond)
+			}
+		}
+	}()
+
+	gotBySender := make([][]int, senders)
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		for count := 0; count < total; count++ {
+			select {
+			case mk := <-out:
+				var sid, seq int
+				if _, err := fmt.Sscanf(mk.Name, "s%d-%d", &sid, &seq); err != nil {
+					t.Errorf("unexpected mock name %q: %v", mk.Name, err)
+					return
+				}
+				gotBySender[sid] = append(gotBySender[sid], seq)
+				if count%29 == 0 {
+					time.Sleep(200 * time.Microsecond)
+				}
+			case <-time.After(15 * time.Second):
+				t.Errorf("timed out draining flipping-budget stress at %d/%d", count, total)
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	var delivered atomic.Int64
+	now := time.Now().Add(-time.Second)
+	for s := 0; s < senders; s++ {
+		wg.Add(1)
+		go func(sid int) {
+			defer wg.Done()
+			for seq := 0; seq < perSender; seq++ {
+				mk := makeSizedMock(fmt.Sprintf("s%d-%d", sid, seq), 1024, now)
+				if res := mgr.send(mk, "", func(ok bool) {
+					if ok {
+						delivered.Add(1)
+					}
+				}); res != MockTaken {
+					t.Errorf("sender %d seq %d dropped: %v", sid, seq, res)
+					return
+				}
+				if seq%37 == 0 {
+					// Let the drainer drain down to empty so senders race drainer exit (kills MT9).
+					time.Sleep(300 * time.Microsecond)
+				}
+			}
+		}(s)
+	}
+	wg.Wait()
+	close(stopFlip)
+	<-flipDone
+	<-consumerDone
+
+	deadline := time.Now().Add(5 * time.Second)
+	for mgr.OutQueued() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	mgr.CloseOutChan()
+
+	if delivered.Load() != total {
+		t.Fatalf("delivered callbacks = %d, want %d", delivered.Load(), total)
+	}
+	for s := 0; s < senders; s++ {
+		if len(gotBySender[s]) != perSender {
+			t.Fatalf("sender %d received %d mocks, want %d", s, len(gotBySender[s]), perSender)
+		}
+		for seq, got := range gotBySender[s] {
+			if got != seq {
+				t.Fatalf("sender %d position %d: got seq %d, want %d (FIFO violated under flipping budget)", s, seq, got, seq)
+			}
+		}
+	}
+	if got := processOutQueued.Load(); got != baseQueued {
+		t.Fatalf("processOutQueued after flipping-budget stress = %d, want %d", got, baseQueued)
+	}
+}
+
+// TestOutQueueSpill_SendDuringDrainerExitDiscardNotStranded kills MT9
+// deterministically: a mock sent while drainOutQueue has released outQueueMu to
+// Discard an empty spill handle must be observed by the exit re-check and
+// delivered rather than stranded when draining turns false.
+func TestOutQueueSpill_SendDuringDrainerExitDiscardNotStranded(t *testing.T) {
+	baseQueued := processOutQueued.Load()
+	mgr := New(zap.NewNop())
+	mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
+	out := make(chan *models.Mock, 1)
+	out <- &models.Mock{Name: "filler"}
+	mgr.SetOutputChannel(out)
+
+	now := time.Now().Add(-time.Second)
+	var once sync.Once
+	var sentInWindow atomic.Bool
+	spill := &fakeSpillFactory{
+		ramLimit: 1024,
+		onDiscard: func() {
+			once.Do(func() {
+				// Drainer released outQueueMu and holds only spillMu; sending a
+				// RAM-head mock while lane.draining==true enqueues it without
+				// starting a new drainer, so only the exit re-check delivers it.
+				if res := mgr.send(makeSizedMock("during-exit", 512, now.Add(5*time.Millisecond)), "", nil); res != MockTaken {
+					t.Errorf("send during drainer exit Discard = %v, want MockTaken", res)
+					return
+				}
+				sentInWindow.Store(true)
+			})
+		},
+	}
+	mgr.SetOutQueueSpill(spill)
+
+	mgr.send(makeSizedMock("head-0", 2048, now), "", nil)
+	mgr.send(makeSizedMock("spilled-1", 2048, now.Add(time.Millisecond)), "", nil)
+	<-out // filler
+	if got := <-out; got.Name != "head-0" {
+		t.Fatalf("first = %q, want head-0", got.Name)
+	}
+	if got := <-out; got.Name != "spilled-1" {
+		t.Fatalf("second = %q, want spilled-1", got.Name)
+	}
+	select {
+	case got := <-out:
+		if got.Name != "during-exit" {
+			t.Fatalf("third = %q, want during-exit", got.Name)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("mock sent during drainer exit Discard was stranded (exit re-check missing)")
+	}
+	if !sentInWindow.Load() {
+		t.Fatal("onDiscard hook did not fire")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for mgr.OutQueued() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	mgr.CloseOutChan()
+	if got := processOutQueued.Load(); got != baseQueued {
+		t.Fatalf("processOutQueued = %d, want %d", got, baseQueued)
+	}
 }

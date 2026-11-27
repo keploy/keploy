@@ -33,7 +33,8 @@ type OutQueueSpill interface {
 // OutQueueSpillLane is one outLane's FIFO overflow store. All methods except
 // those called on a lane returned by Detach are serialized by the lane's own
 // spill mutex (outside SyncMockManager.outQueueMu so disk I/O and encryption
-// do not block RAM queue operations or OutQueued).
+// do not block RAM queue operations or OutQueued). Put and Peek must be
+// bounded and must never wait on the output channel consumer.
 type OutQueueSpillLane interface {
 	// Put appends (mock, owner, size) to the tail of the lane's spill FIFO.
 	// Returns false if spill capacity is exhausted or unavailable so the

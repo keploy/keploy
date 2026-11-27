@@ -1932,6 +1932,15 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 		if processOutQueued.Load()+size > bound {
 			return dropFullLocked()
 		}
+		if alreadySpilled {
+			lane.tail = append(lane.tail, queuedMock{mock: mock, owner: owner, size: size, done: done})
+			lane.tailBytes += size
+			processOutQueued.Add(size)
+			startDrainerLocked()
+			m.outQueueMu.Unlock()
+			m.outChanMu.RUnlock()
+			return MockTaken
+		}
 	}
 	lane.queue = append(lane.queue, queuedMock{mock: mock, owner: owner, size: size, done: done})
 	lane.bytes += size
@@ -2071,8 +2080,8 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 }
 
 func (m *SyncMockManager) dropCorruptSpill(lostMeta []spillItemMeta, lostCount int, epoch uint64, err error) {
-	if m.logger != nil {
-		m.logger.Warn("syncMock out-queue spill unreadable; dropping spilled mocks and failing closed for affected tests",
+	if lg := m.dropLogger(); lg != nil {
+		lg.Warn("syncMock out-queue spill unreadable; dropping spilled mocks and failing closed for affected tests",
 			zap.Int("spilledCount", lostCount), zap.Int("trackedMeta", len(lostMeta)), zap.Error(err))
 	}
 	for _, meta := range lostMeta {
