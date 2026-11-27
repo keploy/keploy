@@ -23,8 +23,9 @@ const (
 	EnvLaunchMode                  = "KEPLOY_LAUNCH_MODE"
 	EnvAllowUnprotectedTrampolines = "KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES"
 	EnvGraceTestTag                = "KEPLOY_BPF_GRACE_TEST_TAG"
-	GraceDirPrefix                 = "grace-"
-	GraceTestDirPrefix             = "grace-test-"
+	GraceDirPrefix                 = "grace2-"
+	LegacyGraceDirPrefix           = "grace-"
+	GraceTestDirPrefix             = "grace2-test-"
 	DefaultReapInterval            = 15 * time.Second
 )
 

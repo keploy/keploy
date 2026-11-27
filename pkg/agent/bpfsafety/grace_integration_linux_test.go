@@ -308,6 +308,9 @@ func TestOnKernelDockerHostBPFFSPinSurvivesSIGKILL(t *testing.T) {
 	if progID == 0 || dirBase == "" {
 		t.Fatalf("container did not report ready pin; output:\n%s", strings.Join(lines, "\n"))
 	}
+	if !strings.HasPrefix(dirBase, GraceDirPrefix) {
+		t.Fatalf("container grace dir %q does not use %q prefix", dirBase, GraceDirPrefix)
+	}
 
 	hostGraceDir := filepath.Join(DefaultNativeBPFFSPath, GraceRootSubdir, dirBase)
 	t.Cleanup(func() { _ = os.RemoveAll(hostGraceDir) })
@@ -772,13 +775,25 @@ func TestOnKernelReaperSurvivesENOMEMUnlinkViaForceRebuild(t *testing.T) {
 	}()
 
 	reaperOwner.reaper.round() // Pass 1: stateDeadPass1
-	reaperOwner.reaper.round() // Pass 2: snapshots stuck stale address from kallsyms
 	if _, err := os.Stat(owner.dir); err != nil {
-		t.Fatalf("owner.dir reaped prematurely while stale trampoline image was still live: %v", err)
+		t.Fatalf("owner.dir reaped prematurely on pass 1: %v", err)
 	}
 
-	// Pass 3: sees stale address still in kallsyms -> forces rebuild!
+	// Pass 2: snapshots stuck stale address from kallsyms AND immediately forces
+	// trampoline rebuild via a pinned no-op in reaperOwner.dir (kills M3 & M5)!
+	// On Linux 5.12+ (dynamic bpf_tramp_image), owner.dir remains pinned until
+	// the old image clears from /proc/kallsyms; on Linux 5.10..5.11 (static
+	// in-place trampoline), Pass 2 forces a synchronous rebuild + 2s
+	// BPF_ENABLE_STATS flat run_cnt check and may already reap owner.dir.
 	reaperOwner.reaper.round()
+	if kernelHasDynamicTrampImage() {
+		if _, err := os.Stat(owner.dir); err != nil {
+			t.Fatalf("owner.dir reaped prematurely while stale trampoline image was still live: %v", err)
+		}
+	}
+	if got := countPinnedProgs(reaperOwner.dir); got == 0 {
+		t.Fatalf("expected reaper's own no-op program pinned in %s after pass-2 rebuild (kills M3!), found 0", reaperOwner.dir)
+	}
 	time.Sleep(500 * time.Millisecond)
 
 	// Stale trampoline MUST be gone now: hit_count must stop moving!
@@ -804,6 +819,231 @@ func TestOnKernelReaperSurvivesENOMEMUnlinkViaForceRebuild(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify unpinned prog is freed and live traffic runs cleanly with zero panic!
+	if p, err := ebpf.NewProgramFromID(progID); err == nil {
+		_ = p.Close()
+		t.Fatalf("prog %d still loaded after reaper unpinned it", progID)
+	}
+	sendDgrams(100)
+}
+
+// TestOnKernelAnchorPreventsLastLinkENOMEM proves on a real Linux debug kernel
+// (5.10, 5.15, 5.19, 6.12) with CONFIG_FAILSLAB=y that when ONLY ONE real agent
+// program is attached (NO auxiliary keep link — the exact production DaemonSet
+// case!), the automatic host-bpffs anchor link created by PinBeforeAttach BEFORE
+// first attach keeps tr->refcnt >= 1 when failslab injects -ENOMEM on l.Close():
+//  1. Zero KASAN slab-UAF / ftrace_ops_trampoline crash on close(linkFD).
+//  2. The host-bpffs pin keeps prog alive while the stale image still calls it.
+//  3. The production reaper forces a rebuild via its own pinned no-op, replaces
+//     the stale image (hit_count stops moving), waits for kallsyms clearance,
+//     and unpins cleanly with zero panic on subsequent traffic.
+func TestOnKernelAnchorPreventsLastLinkENOMEM(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	failslabDir := "/sys/kernel/debug/failslab"
+	if _, err := os.Stat(failslabDir); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y (%s missing: %v)", failslabDir, err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("RemoveMemlock: %v", err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-lastlink-anchor-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", root, err)
+	}
+	t.Cleanup(func() {
+		_ = cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 5*time.Second, nil)
+		_ = os.RemoveAll(root)
+	})
+
+	hitMap, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name:       "ll_enomem_hits",
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  8,
+		MaxEntries: 1,
+	})
+	if err != nil {
+		t.Fatalf("create hitMap: %v", err)
+	}
+	defer func() { _ = hitMap.Close() }()
+
+	// ONLY ONE real agent program on unix_dgram_sendmsg (no aux progKeep!).
+	progDetach, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Name:       "ll_enomem_det",
+		Type:       ebpf.Tracing,
+		AttachType: ebpf.AttachTraceFExit,
+		AttachTo:   "unix_dgram_sendmsg",
+		License:    "GPL",
+		Instructions: asm.Instructions{
+			asm.StoreImm(asm.RFP, -4, 0, asm.Word),
+			asm.LoadMapPtr(asm.R1, hitMap.FD()),
+			asm.Mov.Reg(asm.R2, asm.RFP),
+			asm.Add.Imm(asm.R2, -4),
+			asm.FnMapLookupElem.Call(),
+			asm.JEq.Imm(asm.R0, 0, "done"),
+			asm.LoadMem(asm.R1, asm.R0, 0, asm.DWord),
+			asm.Add.Imm(asm.R1, 1),
+			asm.StoreMem(asm.R0, 0, asm.R1, asm.DWord),
+			asm.Mov.Imm(asm.R0, 0).WithSymbol("done"),
+			asm.Return(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("load progDetach: %v", err)
+	}
+	info, err := progDetach.Info()
+	if err != nil {
+		_ = progDetach.Close()
+		t.Fatalf("progDetach.Info: %v", err)
+	}
+	progID, ok := info.ID()
+	if !ok {
+		_ = progDetach.Close()
+		t.Fatal("progDetach.Info returned no ID")
+	}
+
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		_ = progDetach.Close()
+		t.Fatalf("openGraceOwnerInRoot: %v", err)
+	}
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	lDetach, err := AttachTracing(progDetach, "ll_anchor_test", "unix_dgram_sendmsg", "p")
+	if err != nil {
+		_ = progDetach.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatalf("AttachTracing: %v", err)
+	}
+
+	// Verify automatic anchor link was pinned BEFORE attach.
+	anchorLink := filepath.Join(root, AnchorsSubdir, "unix_dgram_sendmsg"+anchorLinkSuffix)
+	if _, err := os.Stat(anchorLink); err != nil {
+		t.Fatalf("expected automatic anchor link %s before attach: %v", anchorLink, err)
+	}
+
+	sendDgrams := func(n int) {
+		srv, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+		if err != nil {
+			t.Fatalf("socket srv: %v", err)
+		}
+		defer func() { _ = unix.Close(srv) }()
+		cli, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+		if err != nil {
+			t.Fatalf("socket cli: %v", err)
+		}
+		defer func() { _ = unix.Close(cli) }()
+		sp := filepath.Join(t.TempDir(), "u.sock")
+		sa := &unix.SockaddrUnix{Name: sp}
+		if err := unix.Bind(srv, sa); err != nil {
+			t.Fatalf("bind: %v", err)
+		}
+		buf := make([]byte, 8)
+		for i := 0; i < n; i++ {
+			if err := unix.Sendto(cli, []byte("x"), 0, sa); err != nil {
+				t.Fatalf("sendto: %v", err)
+			}
+			_, _, _ = unix.Recvfrom(srv, buf, 0)
+		}
+	}
+	readHits := func() uint64 {
+		var v uint64
+		if err := hitMap.Lookup(uint32(0), &v); err != nil {
+			t.Fatalf("hitMap.Lookup: %v", err)
+		}
+		return v
+	}
+
+	sendDgrams(10)
+	c0 := readHits()
+	if c0 < 10 {
+		t.Fatalf("before detach hit_count = %d, want >= 10", c0)
+	}
+
+	// Inject failslab -ENOMEM strictly during lDetach.Close()!
+	// Because the automatic anchor link holds tr->refcnt >= 1, this MUST NOT
+	// hit the last-link ftrace_ops KASAN UAF or EBUSY wedge.
+	runtime.LockOSThread()
+	tidFailPath := fmt.Sprintf("/proc/self/task/%d/make-it-fail", unix.Gettid())
+	failFD, err := unix.Open(tidFailPath, unix.O_WRONLY, 0)
+	if err != nil {
+		runtime.UnlockOSThread()
+		t.Fatalf("open %s: %v", tidFailPath, err)
+	}
+	_ = os.WriteFile(filepath.Join(failslabDir, "task-filter"), []byte("Y"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "ignore-gfp-wait"), []byte("N"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("100"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "interval"), []byte("1"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("20"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "space"), []byte("0"), 0o644)
+	_, _ = unix.Pwrite(failFD, []byte("1\n"), 0)
+	_ = lDetach.Close()
+	_, _ = unix.Pwrite(failFD, []byte("0\n"), 0)
+	_ = unix.Close(failFD)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+	runtime.UnlockOSThread()
+
+	// Agent exits cleanly/abruptly: close prog FD and release flock.
+	_ = progDetach.Close()
+	_ = unix.Close(owner.lockFD)
+	stateMu.Lock()
+	activeOwner = nil
+	stateMu.Unlock()
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Confirm stale trampoline STILL calls progDetach (survived thanks to grace pin + anchor!).
+	sendDgrams(50)
+	c1 := readHits()
+	if c1 <= c0 {
+		t.Fatalf("expected stale trampoline to keep calling progDetach after ENOMEM unlink (c0=%d c1=%d)", c0, c1)
+	}
+
+	// Production reaper rebuilds trampoline via pinned no-op and reaps once kallsyms clears!
+	reaperOwner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatalf("openGraceOwnerInRoot(reaper): %v", err)
+	}
+	defer func() {
+		reaperOwner.reaper.closeNoopCache()
+		_ = unix.Close(reaperOwner.lockFD)
+	}()
+
+	reaperOwner.reaper.round() // Pass 1
+	reaperOwner.reaper.round() // Pass 2: snapshot + force-rebuild (succeeds, NO EBUSY!)
+	if got := countPinnedProgs(reaperOwner.dir); got == 0 {
+		t.Fatalf("expected reaper no-op pinned in %s, found 0", reaperOwner.dir)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	sendDgrams(50)
+	c2 := readHits()
+	if c2 != c1 {
+		t.Fatalf("stale trampoline STILL called progDetach after anchor-protected rebuild: c1=%d c2=%d", c1, c2)
+	}
+
+	reapDeadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(reapDeadline) {
+		reaperOwner.reaper.round()
+		if _, err := os.Stat(owner.dir); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if _, err := os.Stat(owner.dir); !os.IsNotExist(err) {
+		t.Fatalf("owner.dir still exists after anchor-protected rebuild + kallsyms clear: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
 	if p, err := ebpf.NewProgramFromID(progID); err == nil {
 		_ = p.Close()
 		t.Fatalf("prog %d still loaded after reaper unpinned it", progID)

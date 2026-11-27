@@ -272,15 +272,25 @@ func cleanupAnchorsInRoot(ctx context.Context, logger *zap.Logger, root string, 
 		linkPath := filepath.Join(anchorsDir, e.Name())
 		progPath := filepath.Join(anchorsDir, funcToken+anchorProgSuffix)
 
-		// Resolve key and function name from the pinned anchor prog if present.
-		var key uint64
+		// Resolve candidate trampoline keys and function name from the pinned
+		// anchor prog (on 6.0+ via attach_btf_id; on 5.10..5.19 via BTF lookup
+		// of the anchor's function name).
+		wantKeys := make(map[uint64]struct{})
 		funcName := funcToken
 		if p, perr := ebpf.LoadPinnedProgram(progPath, nil); perr == nil {
 			if info, ierr := queryProgInfo(p.FD()); ierr == nil {
-				if k, fn, isTramp, _, rerr := resolveTrampolineTarget(info); rerr == nil && isTramp {
-					key = k
+				if objID, btfID, fn, isTramp, pre60, rerr := resolveTrampolineTarget(info); rerr == nil && isTramp {
 					if fn != "" {
 						funcName = fn
+					}
+					for _, k := range trampolineCandidateKeys(objID, btfID) {
+						wantKeys[k] = struct{}{}
+					}
+				} else if pre60 {
+					if objID, btfID, ok, berr := resolveFuncNameInBTF(funcName); berr == nil && ok {
+						for _, k := range trampolineCandidateKeys(objID, btfID) {
+							wantKeys[k] = struct{}{}
+						}
 					}
 				}
 			}
@@ -290,9 +300,9 @@ func cleanupAnchorsInRoot(ctx context.Context, logger *zap.Logger, root string, 
 		// Snapshot /proc/kallsyms BEFORE detaching the anchor link!
 		var snap []trampImageRef
 		useKallsyms := false
-		if key != 0 && ksysctl() {
+		if len(wantKeys) > 0 && ksysctl() {
 			if tramps, vis, kerr := readKsym(); kerr == nil && vis {
-				snap = snapshotKeysFromKallsyms(tramps, map[uint64]struct{}{key: {}})
+				snap = snapshotKeysFromKallsyms(tramps, wantKeys)
 				if len(snap) > 0 {
 					useKallsyms = true
 				}
@@ -390,7 +400,7 @@ func hasAnyLiveGraceDir(root string) (bool, error) {
 		return false, err
 	}
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), GraceDirPrefix) {
+		if !e.IsDir() || !isManagedGraceDirName(e.Name()) {
 			continue
 		}
 		dirPath := filepath.Join(root, e.Name())

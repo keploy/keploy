@@ -97,6 +97,32 @@ func TestTrampolineKeyAndKallsymsParsing(t *testing.T) {
 		t.Fatalf("tramps[6442555249] = %x, want 2 addresses", addrs)
 	}
 
+	// Linux 5.12..6.0 generation-suffixed trampoline symbols (bpf_trampoline_<key>_<gen>),
+	// including same-page address reuse across generations (observed on Linux 5.19).
+	ksGen0 := filepath.Join(t.TempDir(), "kallsyms-gen0")
+	if err := os.WriteFile(ksGen0, []byte("ffffffffc03ac000 t bpf_trampoline_6442572795_0\t[bpf]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ksGen2 := filepath.Join(t.TempDir(), "kallsyms-gen2")
+	if err := os.WriteFile(ksGen2, []byte("ffffffffc03ac000 t bpf_trampoline_6442572795_2\t[bpf]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t0, vis0, err := parseKallsymsTrampolines(ksGen0)
+	if err != nil || !vis0 || len(t0[6442572795]) != 1 {
+		t.Fatalf("parseKallsymsTrampolines(gen0) = (%v, %v, %v), want 1 entry", t0, vis0, err)
+	}
+	t2, vis2, err := parseKallsymsTrampolines(ksGen2)
+	if err != nil || !vis2 || len(t2[6442572795]) != 1 {
+		t.Fatalf("parseKallsymsTrampolines(gen2) = (%v, %v, %v), want 1 entry", t2, vis2, err)
+	}
+	snap0 := snapshotKeysFromKallsyms(t0, map[uint64]struct{}{6442572795: {}})
+	if got := survivingSnapshotKeys(snap0, t0); len(got) != 1 {
+		t.Fatalf("survivingSnapshotKeys(gen0 vs gen0) = %d, want 1", len(got))
+	}
+	if got := survivingSnapshotKeys(snap0, t2); len(got) != 0 {
+		t.Fatalf("same-address gen2 MUST NOT match gen0 snapshot (address reuse on 5.19), got %d surviving", len(got))
+	}
+
 	// kptr_restrict zeroed addresses MUST report visible=false.
 	ksZero := filepath.Join(t.TempDir(), "kallsyms-zero")
 	if err := os.WriteFile(ksZero, []byte("0000000000000000 t bpf_trampoline_6442555249\t[bpf]\n"), 0o600); err != nil {
@@ -271,6 +297,7 @@ func TestTestTagBuildReapsOnlyOwnTestPrefix(t *testing.T) {
 		}
 	}
 
+	owner.reaper.dynamicTrampImageFn = func() bool { return true }
 	owner.reaper.kallsymsSysctlFn = func() bool { return true }
 	owner.reaper.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return map[uint64][]uint64{}, true, nil }
 
@@ -320,6 +347,7 @@ func TestReaperKallsymsCleanExitUnpinsOnlyWhenImageAddressDisappears(t *testing.
 	rebuilds := 0
 	r := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.NewNop())
 	r.bootNowNs = func() uint64 { return now }
+	r.dynamicTrampImageFn = func() bool { return true }
 	r.kallsymsSysctlFn = func() bool { return true }
 	r.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return liveTramps, true, nil }
 	r.inspectTargetsFn = func(string) (dirTargets, error) {
@@ -379,6 +407,7 @@ func TestReaperDeadOwnerSnapshotsOnPass2AndNeverUsesTimer(t *testing.T) {
 
 	r := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.NewNop())
 	r.bootNowNs = func() uint64 { return now }
+	r.dynamicTrampImageFn = func() bool { return true }
 	r.kallsymsSysctlFn = func() bool { return true }
 	r.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return liveTramps, true, nil }
 	r.inspectTargetsFn = func(string) (dirTargets, error) {
@@ -396,12 +425,19 @@ func TestReaperDeadOwnerSnapshotsOnPass2AndNeverUsesTimer(t *testing.T) {
 		t.Fatalf("after pass 1: state=(%+v, %v, %v), want stateDeadPass1 only", st1, ok, err)
 	}
 
-	// Pass 2: snapshots stuckAddr from kallsyms.
+	// Pass 2: snapshots stuckAddr from kallsyms AND attempts forced rebuild right away.
+	// Rebuild returns ENOMEM -> MUST NOT stamp stateDeadSnapshot or unpin!
 	now += uint64(15 * time.Second)
 	r.round()
-	st2, ok, err := r.store.readState(deadDir)
-	if err != nil || !ok || st2.Flags&stateDeadSnapshot == 0 || st2.SnapshotCount != 1 {
-		t.Fatalf("after pass 2: state=(%+v, %v, %v), want stateDeadSnapshot with count=1", st2, ok, err)
+	if rebuilds != 1 {
+		t.Fatalf("expected pass-2 rebuild attempt, got %d", rebuilds)
+	}
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("deadDir reaped when pass-2 rebuild failed with ENOMEM: %v", err)
+	}
+	stFail, _, _ := r.store.readState(deadDir)
+	if stFail.Flags&(stateDeadSnapshot|stateForcedRebuild) != 0 {
+		t.Fatalf("after failed pass-2 rebuild: state flags=%#x must NOT stamp stateDeadSnapshot/stateForcedRebuild (kills M7)", stFail.Flags)
 	}
 
 	// Advance clock by 2 HOURS while stuckAddr remains in kallsyms and rebuild hits ENOMEM:
@@ -413,13 +449,21 @@ func TestReaperDeadOwnerSnapshotsOnPass2AndNeverUsesTimer(t *testing.T) {
 			t.Fatalf("timed unpin violation: deadDir reaped at iter %d while stuckAddr was still in kallsyms!", i)
 		}
 	}
-	if rebuilds != 4 {
-		t.Fatalf("expected 4 rebuild retries, got %d", rebuilds)
+	if rebuilds != 5 {
+		t.Fatalf("expected 5 rebuild attempts (pass 2 + 4 retries), got %d", rebuilds)
 	}
 
-	// Rebuild finally succeeds and old image disappears -> reaps cleanly!
+	// Rebuild finally succeeds on pass -> writes stateDeadSnapshot|stateForcedRebuild,
+	// keeps pinned until stuckAddr actually vanishes from kallsyms, then reaps cleanly!
 	rebuildErr = nil
 	r.round()
+	stSnap, ok, err := r.store.readState(deadDir)
+	if err != nil || !ok || stSnap.Flags&stateDeadSnapshot == 0 || stSnap.SnapshotCount != 1 {
+		t.Fatalf("after successful rebuild: state=(%+v, %v, %v), want stateDeadSnapshot with count=1", stSnap, ok, err)
+	}
+	if _, err := os.Stat(deadDir); err != nil {
+		t.Fatalf("deadDir reaped before stuckAddr disappeared from kallsyms: %v", err)
+	}
 	liveTramps = map[uint64][]uint64{}
 	r.round()
 	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
@@ -446,6 +490,7 @@ func TestReaperEBUSYMarksPermanentStaleTrampolineAndNeverUnpins(t *testing.T) {
 	SetMetricsObserver(func(_, _, _ int, _, stale bool) { obsStale = stale })
 
 	r := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.New(core))
+	r.dynamicTrampImageFn = func() bool { return true }
 	r.kallsymsSysctlFn = func() bool { return true }
 	r.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return map[uint64][]uint64{key: {stuckAddr}}, true, nil }
 	r.inspectTargetsFn = func(string) (dirTargets, error) {
@@ -457,10 +502,9 @@ func TestReaperEBUSYMarksPermanentStaleTrampolineAndNeverUnpins(t *testing.T) {
 		return unix.EBUSY
 	}
 
-	r.round() // Pass 1
-	r.round() // Pass 2: snapshots stuckAddr
-	r.round() // Pass 3: forced rebuild hits EBUSY -> marks permanent stale!
-	r.round() // Pass 4: stays pinned forever and does NOT keep retrying EBUSY!
+	r.round() // Pass 1: stateDeadPass1
+	r.round() // Pass 2: snapshots stuckAddr + forced rebuild hits EBUSY -> marks permanent stale!
+	r.round() // Pass 3: stays pinned forever and does NOT keep retrying EBUSY!
 
 	if _, err := os.Stat(deadDir); err != nil {
 		t.Fatalf("EBUSY stale dir was wrongly reaped: %v", err)
@@ -707,5 +751,234 @@ func TestHasMountInfoBPFFS(t *testing.T) {
 	ok, err = hasMountInfoBPFFS(mi, "/run/keploy/missing")
 	if err != nil || ok {
 		t.Fatalf("hasMountInfoBPFFS(missing) = (%v, %v), want (false, nil)", ok, err)
+	}
+
+	// Host-shared vs container-private bpffs mount propagation detection.
+	shared, err := hasHostSharedBPFFS(mi, DefaultHostBPFFSPath)
+	if err != nil || !shared {
+		t.Fatalf("hasHostSharedBPFFS(shared:12 host-bpffs) = (%v, %v), want (true, nil)", shared, err)
+	}
+	priv, err := hasHostSharedBPFFS(mi, DefaultNativeBPFFSPath)
+	if err != nil || priv {
+		t.Fatalf("hasHostSharedBPFFS(private /sys/fs/bpf) = (%v, %v), want (false, nil)", priv, err)
+	}
+}
+
+func TestAttachTracingFailsClosedWhenUnarmed(t *testing.T) {
+	resetStateForTest(t)
+	var dummy ebpf.Program
+	if _, err := AttachTracing(&dummy, "unixconn", "unix_dgram_sendmsg", "p"); !errors.Is(err, ErrGraceNotArmed) {
+		t.Fatalf("AttachTracing unarmed = %v, want ErrGraceNotArmed (kills M2)", err)
+	}
+}
+
+func TestMixedVersionGrace2IsolationAndLegacyReap(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatalf("openGraceOwnerInRoot: %v", err)
+	}
+	defer func() { _ = unix.Close(owner.lockFD) }()
+
+	// New directories MUST use GraceDirPrefix ("grace2-") so v3.7.27's timer-only
+	// reaper (which only scans strings.HasPrefix(name, "grace-")) skips them.
+	if !strings.HasPrefix(owner.self, GraceDirPrefix) {
+		t.Fatalf("owner.self = %q, want prefix %q", owner.self, GraceDirPrefix)
+	}
+	if strings.HasPrefix(owner.self, LegacyGraceDirPrefix) {
+		t.Fatalf("owner.self = %q MUST NOT match legacy prefix %q", owner.self, LegacyGraceDirPrefix)
+	}
+
+	// v3.7.28 reaper MUST safely reap BOTH grace2-* and legacy grace-* dead dirs
+	// while skipping grace-test-* / grace2-test-* dirs.
+	newDead := filepath.Join(root, GraceDirPrefix+"dead-new")
+	legacyDead := filepath.Join(root, LegacyGraceDirPrefix+"dead-v3727")
+	testDead := filepath.Join(root, "grace-test-other")
+	for _, d := range []string{newDead, legacyDead, testDead} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "000001-p"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := newGraceReaper(root, owner.self, DefaultReapInterval, zap.NewNop())
+	r.dynamicTrampImageFn = func() bool { return true }
+	r.kallsymsSysctlFn = func() bool { return true }
+	r.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return map[uint64][]uint64{}, true, nil }
+	r.inspectTargetsFn = func(string) (dirTargets, error) {
+		return dirTargets{
+			keyToFunc: map[uint64]string{6442555249: "unix_dgram_sendmsg"},
+			funcs:     map[string]struct{}{"unix_dgram_sendmsg": {}},
+		}, nil
+	}
+
+	r.round() // Pass 1
+	r.round() // Pass 2: kallsyms empty -> reaps both newDead and legacyDead
+
+	if _, err := os.Stat(newDead); !os.IsNotExist(err) {
+		t.Fatalf("newDead (%s) not reaped: err=%v", newDead, err)
+	}
+	if _, err := os.Stat(legacyDead); !os.IsNotExist(err) {
+		t.Fatalf("legacyDead (%s) not reaped: err=%v", legacyDead, err)
+	}
+	if _, err := os.Stat(testDead); err != nil {
+		t.Fatalf("production reaper wrongly touched test dir %s: %v", testDead, err)
+	}
+}
+
+func TestReaperFailsClosedOnUnresolvedTargetsAndDeduplicatesRebuilds(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+
+	// 1. Unresolved target inspection error MUST fail closed (kills M6).
+	unresDir := filepath.Join(root, GraceDirPrefix+"unresolved")
+	if err := os.Mkdir(unresDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unresDir, "000001-p"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rUnres := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.NewNop())
+	rUnres.dynamicTrampImageFn = func() bool { return true }
+	rUnres.kallsymsSysctlFn = func() bool { return true }
+	rUnres.readKallsymsFn = func() (map[uint64][]uint64, bool, error) { return map[uint64][]uint64{}, true, nil }
+	rUnres.inspectTargetsFn = func(string) (dirTargets, error) {
+		return dirTargets{}, errors.New("unresolved tracing program target")
+	}
+	rUnres.round()
+	rUnres.round()
+	rUnres.round()
+	if _, err := os.Stat(unresDir); err != nil {
+		t.Fatalf("reaper unpinned directory despite unresolved tracing target (M6 violation!): %v", err)
+	}
+
+	// 2. Two dead directories targeting the same function deduplicate rebuilds per round.
+	root2 := t.TempDir()
+	for _, n := range []string{"d1", "d2"} {
+		d := filepath.Join(root2, GraceDirPrefix+n)
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "000001-p"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const key = uint64(6442555249)
+	const addr = uint64(0xffffffffc031a300)
+	rebuilds := 0
+	r2 := newGraceReaper(root2, GraceDirPrefix+"self", DefaultReapInterval, zap.NewNop())
+	r2.dynamicTrampImageFn = func() bool { return true }
+	r2.kallsymsSysctlFn = func() bool { return true }
+	r2.readKallsymsFn = func() (map[uint64][]uint64, bool, error) {
+		return map[uint64][]uint64{key: {addr}}, true, nil
+	}
+	r2.inspectTargetsFn = func(string) (dirTargets, error) {
+		return dirTargets{
+			keyToFunc: map[uint64]string{key: "unix_dgram_sendmsg"},
+			funcs:     map[string]struct{}{"unix_dgram_sendmsg": {}},
+		}, nil
+	}
+	r2.rebuildTargetFn = func(string) error {
+		rebuilds++
+		return nil
+	}
+	r2.round() // Pass 1
+	r2.round() // Pass 2: both dirs need rebuild of unix_dgram_sendmsg -> called ONCE!
+	if rebuilds != 1 {
+		t.Fatalf("expected 1 deduplicated rebuild across 2 dead dirs in one round, got %d", rebuilds)
+	}
+}
+
+func TestStaleTargetBlocksRepeatedPinLeaks(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(owner.lockFD) }()
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	ReportStaleTrampoline(zap.NewNop(), "unix_dgram_sendmsg", unix.EBUSY)
+	var dummy ebpf.Program
+	err = PinBeforeAttach(&dummy, "unixconn", "unix_dgram_sendmsg", "p")
+	if !errors.Is(err, unix.EBUSY) {
+		t.Fatalf("PinBeforeAttach on known-stale EBUSY target = %v, want EBUSY", err)
+	}
+	if got := countPinnedProgs(owner.dir); got != 0 {
+		t.Fatalf("expected 0 leaked pins after stale target rejection, got %d", got)
+	}
+}
+
+func TestNativeInContainerDoesNotSelfMountPrivateBPFFS(t *testing.T) {
+	resetStateForTest(t)
+	prevInContainer := runningInContainerFn
+	runningInContainerFn = func() bool { return true }
+	t.Cleanup(func() { runningInContainerFn = prevInContainer })
+
+	t.Setenv(EnvHostBPFFS, t.TempDir()) // non-bpffs override ensures we hit honest unprotected mode
+	t.Setenv(EnvAllowUnprotectedTrampolines, "")
+	if err := Init(context.Background(), zap.NewNop(), ModeNative); err != nil {
+		t.Fatalf("Init(ModeNative) inside container = %v, want nil (honest unprotected)", err)
+	}
+	if Armed() || !UnprotectedTrampolinesActive() {
+		t.Fatalf("inside container without host bpffs: Armed=%v Unprotected=%v, want false/true", Armed(), UnprotectedTrampolinesActive())
+	}
+}
+
+func TestTargetFuncsStoreRoundTripAndMultiVersionCandidateKeys(t *testing.T) {
+	dir := t.TempDir()
+	store := autoStateStore{}
+	if err := store.writeTargets(dir, []string{"unix_dgram_sendmsg", "unix_stream_connect", "unix_dgram_sendmsg"}); err != nil {
+		t.Fatalf("writeTargets: %v", err)
+	}
+	got, err := store.readTargets(dir)
+	if err != nil {
+		t.Fatalf("readTargets: %v", err)
+	}
+	if len(got) != 2 || got[0] != "unix_dgram_sendmsg" || got[1] != "unix_stream_connect" {
+		t.Fatalf("readTargets = %v, want [unix_dgram_sendmsg unix_stream_connect]", got)
+	}
+
+	keys := trampolineCandidateKeys(1, 104305)
+	if len(keys) < 2 {
+		t.Fatalf("expected multiple candidate keys across kernel versions, got %v", keys)
+	}
+	has6x := false
+	has5x := false
+	for _, k := range keys {
+		if k == 6442555249 {
+			has6x = true
+		}
+		if k == 104305 {
+			has5x = true
+		}
+	}
+	if !has6x || !has5x {
+		t.Fatalf("trampolineCandidateKeys(1, 104305) = %v, want both 6.x (6442555249) and 5.x (104305) keys", keys)
+	}
+}
+
+func TestResolveTrampolineTargetKillsM6(t *testing.T) {
+	// Pre-6.0 Tracing prog (AttachBtfID == 0) MUST signal pre60Unknown=true so
+	// inspectDirTrampolineTargets resolves via target_funcs or fails closed (kills M6).
+	_, _, _, isTramp, pre60, err := resolveTrampolineTarget(uapiProgInfo{
+		Type:        uint32(ebpf.Tracing),
+		AttachBtfID: 0,
+	})
+	if err != nil || isTramp || !pre60 {
+		t.Fatalf("resolveTrampolineTarget(Tracing, AttachBtfID=0) = (isTramp=%v, pre60=%v, err=%v), want (false, true, nil)", isTramp, pre60, err)
+	}
+	// Non-tracing prog (e.g. Kprobe) MUST return isTramp=false, pre60=false, err=nil.
+	_, _, _, isTramp, pre60, err = resolveTrampolineTarget(uapiProgInfo{
+		Type: uint32(ebpf.Kprobe),
+	})
+	if err != nil || isTramp || pre60 {
+		t.Fatalf("resolveTrampolineTarget(Kprobe) = (isTramp=%v, pre60=%v, err=%v), want (false, false, nil)", isTramp, pre60, err)
 	}
 }

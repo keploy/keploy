@@ -316,6 +316,14 @@ func start(ctx context.Context) {
 		utils.ErrCode = finalExitCode(err, utils.ErrCode, cmd.CommandPath(), os.Stderr)
 	}
 
+	// Disarm targeting maps and detach BPF tracing links FIRST and fast upon
+	// command completion (before chown/profile/temp-file teardown) so shutdown
+	// deadlines or SIGKILL never catch a tracing link mid-close. The safety
+	// defer registered above remains as a backstop for panic/early-return paths.
+	if bpfsafety.HasActiveWork() {
+		bpfsafety.GracefulShutdown(context.Background(), logger)
+	}
+
 	// Restore keploy folder ownership if running under sudo (for Docker mode)
 	// so the next native run does not hit permission issues.
 	//

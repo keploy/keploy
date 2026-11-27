@@ -127,6 +127,20 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 					(fnName == "AttachTracing" || fnName == "attachPinnedReaperNoop" || fnName == "attachPinnedAnchorNoop")
 				if !allowed {
 					out = append(out, fmt.Sprintf("%s:%d (%s): direct link.%s outside bpfsafety choke point", rel, fset.Position(x.Pos()).Line, fnName, name))
+				} else if fnName == "AttachTracing" && (encl == nil || !hasCallBeforePos(encl.Body, "PinBeforeAttach", x.Pos())) {
+					out = append(out, fmt.Sprintf("%s:%d (%s): link.AttachTracing without preceding PinBeforeAttach", rel, fset.Position(x.Pos()).Line, fnName))
+				}
+				return
+			}
+			if isIdentOrSel(x.Fun, "attachPinnedReaperNoop") {
+				if rel != "pkg/agent/bpfsafety/rebuild_linux.go" || fnName != "forceRebuildTarget" || encl == nil || !hasCallBeforePos(encl.Body, "pinNoop", x.Pos()) {
+					out = append(out, fmt.Sprintf("%s:%d (%s): attachPinnedReaperNoop without preceding pinNoop", rel, fset.Position(x.Pos()).Line, fnName))
+				}
+				return
+			}
+			if isIdentOrSel(x.Fun, "attachPinnedAnchorNoop") {
+				if rel != "pkg/agent/bpfsafety/anchors_linux.go" || fnName != "ensureAnchor" || encl == nil || !hasCallBeforePos(encl.Body, "Pin", x.Pos()) {
+					out = append(out, fmt.Sprintf("%s:%d (%s): attachPinnedAnchorNoop without preceding prog.Pin", rel, fset.Position(x.Pos()).Line, fnName))
 				}
 				return
 			}
@@ -165,6 +179,19 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 	}
 	for _, decl := range file.Decls {
 		walk(decl, nil)
+	}
+	// Enforce that forceRebuildTarget actually invokes attachPinnedReaperNoop
+	// (killing M5: a no-op rebuild loop that returns nil without updating the trampoline).
+	if rel == "pkg/agent/bpfsafety/rebuild_linux.go" {
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Name.Name != "forceRebuildTarget" || fd.Body == nil {
+				continue
+			}
+			if !hasCallBeforePos(fd.Body, "attachPinnedReaperNoop", fd.Body.End()) {
+				out = append(out, fmt.Sprintf("%s:%d (forceRebuildTarget): missing attachPinnedReaperNoop call (rebuild loop cannot be a no-op)", rel, fset.Position(fd.Pos()).Line))
+			}
+		}
 	}
 	return out
 }
@@ -223,6 +250,28 @@ func isIdentOrSel(e ast.Expr, name string) bool {
 	}
 }
 
+func hasCallBeforePos(body *ast.BlockStmt, fnName string, before token.Pos) bool {
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		ce, ok := n.(*ast.CallExpr)
+		if !ok || ce.Pos() >= before {
+			return true
+		}
+		if isIdentOrSel(ce.Fun, fnName) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 func TestOSSTracingGuardRejectsDirectAttachAndBypasses(t *testing.T) {
 	cases := []struct {
 		name string
@@ -277,6 +326,25 @@ func bad() { link.AttachRawLink(link.RawLinkOptions{}) }`,
 			src: `package hooks
 import "github.com/cilium/ebpf/link"
 func bad() { link.AttachRawTracepoint(link.RawTracepointOptions{Name: ""}) }`,
+		},
+		{
+			name: "M2_choke_point_drops_PinBeforeAttach",
+			rel:  "pkg/agent/bpfsafety/grace_linux.go",
+			src: `package bpfsafety
+import "github.com/cilium/ebpf/link"
+func AttachTracing(prog any, object, name, role string) (link.Link, error) {
+	_ = PinBeforeAttach
+	return link.AttachTracing(link.TracingOptions{})
+}`,
+		},
+		{
+			name: "M3_reaper_noop_unpinned",
+			rel:  "pkg/agent/bpfsafety/rebuild_linux.go",
+			src: `package bpfsafety
+func (r *graceReaper) forceRebuildTarget(funcName string) error {
+	_, err := attachPinnedReaperNoop(nil)
+	return err
+}`,
 		},
 	}
 

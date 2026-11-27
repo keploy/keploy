@@ -19,10 +19,13 @@ import (
 const (
 	reaperStateFileName      = "reaper_state"
 	kallsymsSnapshotFileName = "kallsyms_snapshot"
+	targetFuncsFileName      = "target_funcs"
 	legacyStampFileName      = "first_free_boottime"
 
-	maxSnapshotEntries = 512
-	kallsymsPath       = "/proc/kallsyms"
+	maxSnapshotEntries   = 512
+	maxTargetFuncEntries = 128
+	targetFuncSlotSize   = 64
+	kallsymsPath         = "/proc/kallsyms"
 
 	stateCleanSnapshot  uint64 = 1 << 0
 	stateDeadPass1      uint64 = 1 << 1
@@ -31,7 +34,7 @@ const (
 	stateForcedRebuild  uint64 = 1 << 4
 )
 
-// trampolineKey computes Linux's bpf_trampoline_compute_key value for a
+// trampolineKey computes Linux's 6.0+ bpf_trampoline_compute_key value for a
 // tracing/LSM attachment: (btf_obj_id << 32) | 0x80000000 | btf_id.
 // For vmlinux targets on Linux 6.0+, btf_obj_id is 1.
 func trampolineKey(btfObjID, btfID uint32) uint64 {
@@ -43,6 +46,37 @@ func trampolineKey(btfObjID, btfID uint32) uint64 {
 		obj = 1
 	}
 	return (uint64(obj) << 32) | 0x80000000 | uint64(btfID)
+}
+
+// trampolineCandidateKeys returns all Linux kernel bpf_trampoline_compute_key
+// encodings across 5.10..7.x for a (btfObjID, btfID) target so /proc/kallsyms
+// matching works uniformly across 5.10, 5.15, 5.19, 6.x, and 7.x:
+//   - Linux 5.12+/6.x+: (obj<<32)|0x80000000|btfID (with obj=1 for vmlinux on 5.13+, obj=0 on 5.12)
+//   - Linux 5.10..5.11: (obj<<32)|btfID and bare btfID for vmlinux
+func trampolineCandidateKeys(btfObjID, btfID uint32) []uint64 {
+	if btfID == 0 {
+		return nil
+	}
+	seen := make(map[uint64]struct{}, 4)
+	var out []uint64
+	add := func(k uint64) {
+		if k == 0 {
+			return
+		}
+		if _, ok := seen[k]; !ok {
+			seen[k] = struct{}{}
+			out = append(out, k)
+		}
+	}
+	add(trampolineKey(btfObjID, btfID))
+	if btfObjID <= 1 {
+		add(0x80000000 | uint64(btfID))
+		add(uint64(btfID))
+		add((uint64(1) << 32) | uint64(btfID))
+	} else {
+		add((uint64(btfObjID) << 32) | uint64(btfID))
+	}
+	return out
 }
 
 type trampImageRef struct {
@@ -78,18 +112,23 @@ func decodeReaperState(b []byte) reaperState {
 }
 
 func isMetadataFile(name string) bool {
-	return name == reaperStateFileName || name == kallsymsSnapshotFileName || name == legacyStampFileName
+	return name == reaperStateFileName ||
+		name == kallsymsSnapshotFileName ||
+		name == targetFuncsFileName ||
+		name == legacyStampFileName
 }
 
-// stateStore persists reaperState and kallsyms snapshots inside a grace
-// directory. On real bpffs (BPF_FS_MAGIC), it uses pinned BPF_MAP_TYPE_ARRAY
-// maps so no extra host filesystem mount is required. On non-bpffs test
-// directories (t.TempDir()), it uses regular files.
+// stateStore persists reaperState, kallsyms snapshots, and recorded target
+// function names inside a grace directory. On real bpffs (BPF_FS_MAGIC), it
+// uses pinned BPF_MAP_TYPE_ARRAY maps so no extra host filesystem mount is
+// required. On non-bpffs test directories (t.TempDir()), it uses regular files.
 type stateStore interface {
 	readState(dir string) (reaperState, bool, error)
 	writeState(dir string, s reaperState) error
 	readSnapshot(dir string, count uint64) ([]trampImageRef, error)
 	writeSnapshot(dir string, refs []trampImageRef) error
+	readTargets(dir string) ([]string, error)
+	writeTargets(dir string, funcs []string) error
 }
 
 type autoStateStore struct{}
@@ -263,6 +302,109 @@ func (a autoStateStore) readSnapshot(dir string, count uint64) ([]trampImageRef,
 	return out, nil
 }
 
+func (a autoStateStore) writeTargets(dir string, funcs []string) error {
+	seen := make(map[string]struct{}, len(funcs))
+	uniq := make([]string, 0, len(funcs))
+	for _, fn := range funcs {
+		fn = strings.TrimSpace(fn)
+		if fn == "" {
+			continue
+		}
+		if _, dup := seen[fn]; dup {
+			continue
+		}
+		seen[fn] = struct{}{}
+		uniq = append(uniq, fn)
+	}
+	funcs = uniq
+	if len(funcs) > maxTargetFuncEntries {
+		return fmt.Errorf("target function list exceeds cap (%d > %d)", len(funcs), maxTargetFuncEntries)
+	}
+	p := filepath.Join(dir, targetFuncsFileName)
+	if a.isBPFFS(dir) {
+		m, err := ebpf.LoadPinnedMap(p, nil)
+		created := false
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			m, err = ebpf.NewMap(&ebpf.MapSpec{
+				Name:       "grace_targets",
+				Type:       ebpf.Array,
+				KeySize:    4,
+				ValueSize:  targetFuncSlotSize,
+				MaxEntries: maxTargetFuncEntries,
+			})
+			if err != nil {
+				return err
+			}
+			created = true
+		}
+		for i, fn := range funcs {
+			var slot [targetFuncSlotSize]byte
+			copy(slot[:targetFuncSlotSize-1], fn)
+			if uerr := m.Update(uint32(i), slot[:], ebpf.UpdateAny); uerr != nil {
+				_ = m.Close()
+				return uerr
+			}
+		}
+		if created {
+			if perr := m.Pin(p); perr != nil {
+				_ = m.Close()
+				return perr
+			}
+		}
+		return m.Close()
+	}
+	return os.WriteFile(p, []byte(strings.Join(funcs, "\n")), 0o600)
+}
+
+func (a autoStateStore) readTargets(dir string) ([]string, error) {
+	p := filepath.Join(dir, targetFuncsFileName)
+	if a.isBPFFS(dir) {
+		m, err := ebpf.LoadPinnedMap(p, nil)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		defer func() { _ = m.Close() }()
+		var out []string
+		for i := uint32(0); i < maxTargetFuncEntries; i++ {
+			var slot [targetFuncSlotSize]byte
+			if err := m.Lookup(i, &slot); err != nil {
+				return nil, err
+			}
+			if slot[0] == 0 {
+				continue
+			}
+			end := 0
+			for end < len(slot) && slot[end] != 0 {
+				end++
+			}
+			if fn := strings.TrimSpace(string(slot[:end])); fn != "" {
+				out = append(out, fn)
+			}
+		}
+		return out, nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if fn := strings.TrimSpace(line); fn != "" {
+			out = append(out, fn)
+		}
+	}
+	return out, nil
+}
+
 // kallsymsSysctlAllowsJIT reports whether kernel sysctls confirm BPF JIT
 // trampoline symbols are exported to /proc/kallsyms. Returns false (triggering
 // BPF_ENABLE_STATS fallback or fail-closed) if bpf_jit_kallsyms != 1 or
@@ -308,23 +450,64 @@ func parseKallsymsTrampolines(path string) (tramps map[uint64][]uint64, addrsVis
 		if addr != 0 {
 			addrsVisible = true
 		}
-		if len(fields) >= 4 && fields[3] == "[bpf]" && strings.HasPrefix(fields[2], "bpf_trampoline_") {
+		if strings.HasPrefix(fields[2], "bpf_trampoline_") && (len(fields) == 3 || fields[3] == "[bpf]") {
 			if addr == 0 {
 				// kptr_restrict is hiding BPF trampoline addresses.
 				return nil, false, nil
 			}
-			keyStr := strings.TrimPrefix(fields[2], "bpf_trampoline_")
-			key, kerr := strconv.ParseUint(keyStr, 10, 64)
-			if kerr != nil || key == 0 {
+			key, token, ok := parseTrampolineSymbol(fields[2], addr)
+			if !ok {
 				continue
 			}
-			tramps[key] = append(tramps[key], addr)
+			tramps[key] = append(tramps[key], token)
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, false, err
 	}
 	return tramps, addrsVisible, nil
+}
+
+// parseTrampolineSymbol parses both Linux 6.1+ `bpf_trampoline_<key>` and
+// Linux 5.12..6.0 `bpf_trampoline_<key>_<gen>` kallsyms symbol names.
+//
+// When a generation suffix `_<gen>` is present (Linux 5.12..6.0), the returned
+// image token mixes (addr, gen) so that if the kernel frees an old trampoline
+// page and later reuses the exact same vmalloc/JIT page address for a newer
+// generation (observed on Linux 5.19), the newer image gets a distinct token
+// and the old generation is accurately detected as freed.
+func parseTrampolineSymbol(sym string, addr uint64) (key uint64, token uint64, ok bool) {
+	rest := strings.TrimPrefix(sym, "bpf_trampoline_")
+	if rest == sym || rest == "" {
+		return 0, 0, false
+	}
+	if idx := strings.IndexByte(rest, '_'); idx >= 0 {
+		keyPart := rest[:idx]
+		genPart := rest[idx+1:]
+		k, kerr := strconv.ParseUint(keyPart, 10, 64)
+		g, gerr := strconv.ParseUint(genPart, 10, 64)
+		if kerr != nil || gerr != nil || k == 0 {
+			return 0, 0, false
+		}
+		// FNV-1a 64-bit mix of addr and gen (always non-zero).
+		h := uint64(14695981039346656037)
+		var buf [16]byte
+		binary.LittleEndian.PutUint64(buf[0:8], addr)
+		binary.LittleEndian.PutUint64(buf[8:16], g+1)
+		for _, b := range buf {
+			h ^= uint64(b)
+			h *= 1099511628211
+		}
+		if h == 0 {
+			h = 1
+		}
+		return k, h, true
+	}
+	k, kerr := strconv.ParseUint(rest, 10, 64)
+	if kerr != nil || k == 0 {
+		return 0, 0, false
+	}
+	return k, addr, true
 }
 
 // snapshotKeysFromKallsyms collects every (key, addr) entry in tramps whose key

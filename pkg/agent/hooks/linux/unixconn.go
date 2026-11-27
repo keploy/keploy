@@ -256,10 +256,14 @@ func loadUnixConnWith(logger *zap.Logger, objs *bpfObjects, fallback bool) (*uni
 			return nil, fmt.Errorf("arm trampoline grace pinning for unixconn fexit: %w", initErr)
 		}
 		for _, name := range unixFexitPrograms {
+			targetFunc := name
+			if ps := spec.Programs[name]; ps != nil && ps.AttachTo != "" {
+				targetFunc = ps.AttachTo
+			}
 			var l link.Link
 			err := watchedCall(logger, "attach of fexit program "+name+" via bpfsafety", func() error {
 				var aerr error
-				l, aerr = bpfsafety.AttachTracing(coll.Programs[name], "unixconn", name, "p")
+				l, aerr = bpfsafety.AttachTracing(coll.Programs[name], "unixconn", targetFunc, "p")
 				return aerr
 			})
 			if err != nil {
@@ -522,20 +526,58 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 	// Its programs' skipped runs are read with the hooks' (skipwatch.go):
 	// the counts as it closes stay counted.
 	h.skipsWatch(u.coll.Programs)
+	disarm := func() {
+		h.objectsMutex.RLock()
+		mapsToClear := []*ebpf.Map{
+			h.objects.TargetNamespacePids,
+			h.objects.KeployClientKernelPidMap,
+			h.objects.KeployAgentKernelPidMap,
+			h.objects.KeployClientRegistrationMap,
+			h.objects.KeployAgentRegistrationMap,
+		}
+		h.objectsMutex.RUnlock()
+		for _, m := range mapsToClear {
+			clearBPFMapAllKeys(m)
+		}
+	}
 	var closeOnce sync.Once
 	detach := func() {
 		closeOnce.Do(func() {
+			disarm()
 			h.skipsForget(u.coll.Programs)
 			u.close()
 		})
 	}
 	if !u.fallback {
+		bpfsafety.RegisterDisarmHook(disarm)
 		bpfsafety.RegisterDetachHook(detach)
 	}
 	go func() {
 		<-ctx.Done()
 		detach()
 	}()
+}
+
+func clearBPFMapAllKeys(m *ebpf.Map) {
+	if m == nil {
+		return
+	}
+	info, err := m.Info()
+	if err != nil || info.KeySize == 0 || info.ValueSize == 0 {
+		return
+	}
+	keyBuf := make([]byte, info.KeySize)
+	valBuf := make([]byte, info.ValueSize)
+	var keys [][]byte
+	iter := m.Iterate()
+	for iter.Next(&keyBuf, &valBuf) {
+		kcopy := make([]byte, len(keyBuf))
+		copy(kcopy, keyBuf)
+		keys = append(keys, kcopy)
+	}
+	for _, k := range keys {
+		_ = m.Delete(k)
+	}
 }
 
 func unixFallbackReason(why string) string {

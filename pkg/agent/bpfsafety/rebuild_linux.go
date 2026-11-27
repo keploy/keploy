@@ -102,82 +102,172 @@ func loadKernelBTF() (*btf.Spec, error) {
 	return kernelBTFSpec, kernelBTFErr
 }
 
+var (
+	dynamicTrampImageOnce sync.Once
+	dynamicTrampImageVal  bool
+)
+
+// kernelHasDynamicTrampImage reports whether this kernel allocates a distinct
+// `struct bpf_tramp_image` per trampoline update (Linux 5.12+, or any distro
+// kernel carrying that commit). On Linux 5.10..5.11, a single static trampoline
+// page is rewritten in place at the same /proc/kallsyms address for the life of
+// the trampoline while any anchor or neighbor link remains attached, so
+// kallsyms address changes cannot distinguish old vs rebuilt trampolines there;
+// the reaper instead forces a synchronous rebuild + BPF_ENABLE_STATS run_cnt
+// verification on those kernels.
+func kernelHasDynamicTrampImage() bool {
+	dynamicTrampImageOnce.Do(func() {
+		spec, err := loadKernelBTF()
+		if err != nil {
+			dynamicTrampImageVal = false
+			return
+		}
+		_, err = spec.AnyTypeByName("bpf_tramp_image")
+		dynamicTrampImageVal = (err == nil)
+	})
+	return dynamicTrampImageVal
+}
+
 // resolveTrampolineTarget resolves a tracing/LSM program's (attach_btf_obj_id,
-// attach_btf_id) to its trampoline key and kernel function name.
+// attach_btf_id) to its (btfObjID, btfID, funcName).
+//
+// For vmlinux targets (AttachBtfObjID <= 1), uses the loaded vmlinux BTF spec
+// directly without calling btf.NewHandleFromID (BPF_BTF_GET_FD_BY_ID requires
+// CAP_SYS_ADMIN, whereas CAP_BPF + CAP_PERFMON agents can read /sys/kernel/btf/vmlinux).
 //
 // Returns:
-//   - (key, funcName, true, false, nil) for trampoline-attached functions (BTF_KIND_FUNC) on Linux 6.0+
-//   - (0, "", false, true, nil) on pre-6.0 kernels where bpf_prog_info omits attach_btf_id
-//   - (0, "", false, false, nil) for non-trampoline programs (e.g. tp_btf / unloaded modules)
+//   - (objID, btfID, funcName, true, false, nil) for trampoline-attached functions on Linux 6.0+
+//   - (0, 0, "", false, true, nil) on pre-6.0 kernels where bpf_prog_info omits attach_btf_id
+//   - (0, 0, "", false, false, nil) for non-trampoline programs (e.g. tp_btf / unloaded modules)
 //   - error if BTF inspection failed (fail closed).
-func resolveTrampolineTarget(info uapiProgInfo) (key uint64, funcName string, isTramp bool, pre60Unknown bool, err error) {
+func resolveTrampolineTarget(info uapiProgInfo) (btfObjID, btfID uint32, funcName string, isTramp bool, pre60Unknown bool, err error) {
 	progType := ebpf.ProgramType(info.Type)
 	if progType != ebpf.Tracing && progType != ebpf.LSM {
-		return 0, "", false, false, nil
+		return 0, 0, "", false, false, nil
 	}
 	if info.AttachBtfID == 0 {
 		// Linux 5.10..5.19 do not populate attach_btf_id in bpf_prog_info.
-		return 0, "", false, true, nil
+		return 0, 0, "", false, true, nil
 	}
 
 	vmlinux, err := loadKernelBTF()
 	if err != nil {
-		return 0, "", false, false, fmt.Errorf("load kernel BTF: %w", err)
+		return 0, 0, "", false, false, fmt.Errorf("load kernel BTF: %w", err)
 	}
 
 	spec := vmlinux
-	if info.AttachBtfObjID != 0 {
-		h, herr := btf.NewHandleFromID(btf.ID(info.AttachBtfObjID))
+	objID := info.AttachBtfObjID
+	if objID > 1 {
+		h, herr := btf.NewHandleFromID(btf.ID(objID))
 		if herr != nil {
 			if errors.Is(herr, os.ErrNotExist) {
 				// Kernel module was unloaded; its trampoline cannot exist anymore.
-				return 0, "", false, false, nil
+				return 0, 0, "", false, false, nil
 			}
-			return 0, "", false, false, fmt.Errorf("open BTF handle %d: %w", info.AttachBtfObjID, herr)
+			return 0, 0, "", false, false, fmt.Errorf("open BTF handle %d: %w", objID, herr)
 		}
 		defer func() { _ = h.Close() }()
 
 		hi, ierr := h.Info()
 		if ierr != nil {
-			return 0, "", false, false, fmt.Errorf("inspect BTF handle %d: %w", info.AttachBtfObjID, ierr)
+			return 0, 0, "", false, false, fmt.Errorf("inspect BTF handle %d: %w", objID, ierr)
 		}
 		if hi.IsModule() {
 			modSpec, serr := h.Spec(vmlinux)
 			if serr != nil {
-				return 0, "", false, false, fmt.Errorf("load module BTF %q: %w", hi.Name, serr)
+				return 0, 0, "", false, false, fmt.Errorf("load module BTF %q: %w", hi.Name, serr)
 			}
 			spec = modSpec
 		}
+	} else if objID == 0 {
+		objID = 1
 	}
 
 	typ, err := spec.TypeByID(btf.TypeID(info.AttachBtfID))
 	if err != nil {
-		return 0, "", false, false, fmt.Errorf("resolve BTF type %d (obj %d): %w", info.AttachBtfID, info.AttachBtfObjID, err)
+		return 0, 0, "", false, false, fmt.Errorf("resolve BTF type %d (obj %d): %w", info.AttachBtfID, objID, err)
 	}
 	fn, ok := typ.(*btf.Func)
 	if !ok {
 		// e.g. tp_btf attaches to btf_trace_* typedef, not a bpf_trampoline.
-		return 0, "", false, false, nil
+		return 0, 0, "", false, false, nil
 	}
-	return trampolineKey(info.AttachBtfObjID, info.AttachBtfID), fn.Name, true, false, nil
+	return objID, info.AttachBtfID, fn.Name, true, false, nil
+}
+
+// resolveFuncNameInBTF resolves a kernel function name (vmlinux or loaded kernel
+// module such as tls.ko) to its (btfObjID, btfID) using /sys/kernel/btf/*.
+// Used on Linux 5.10..5.19 where bpf_prog_info omits attach_btf_id.
+func resolveFuncNameInBTF(funcName string) (btfObjID, btfID uint32, ok bool, err error) {
+	if funcName == "" {
+		return 0, 0, false, nil
+	}
+	vmlinux, err := loadKernelBTF()
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("load kernel BTF: %w", err)
+	}
+	var fn *btf.Func
+	if err := vmlinux.TypeByName(funcName, &fn); err == nil && fn != nil {
+		if id, ierr := vmlinux.TypeID(fn); ierr == nil && id != 0 {
+			return 1, uint32(id), true, nil
+		}
+	}
+	// Check loaded kernel modules (e.g. tls.ko for tls_sw_sendmsg/recvmsg).
+	entries, rerr := os.ReadDir("/sys/kernel/btf")
+	if rerr != nil {
+		return 0, 0, false, nil
+	}
+	for _, e := range entries {
+		modName := e.Name()
+		if modName == "vmlinux" || e.IsDir() {
+			continue
+		}
+		modSpec, merr := btf.LoadKernelModuleSpec(modName)
+		if merr != nil {
+			continue
+		}
+		var mfn *btf.Func
+		if err := modSpec.TypeByName(funcName, &mfn); err == nil && mfn != nil {
+			if id, ierr := modSpec.TypeID(mfn); ierr == nil && id != 0 {
+				return 0, uint32(id), true, nil
+			}
+		}
+	}
+	return 0, 0, false, nil
 }
 
 type dirTargets struct {
-	keyToFunc    map[uint64]string
-	hasUnknown5x bool
+	keyToFunc map[uint64]string
+	funcs     map[string]struct{}
 }
 
 // inspectDirTrampolineTargets scans every pinned program in a dead grace
-// directory and returns the unique trampoline key -> kernel function name map.
+// directory and returns its resolved trampoline keys and kernel function names.
+//
+// Works on BOTH Linux 6.0+ (from bpf_prog_info.attach_btf_id) and Linux
+// 5.10..5.19 (from the pin-time target_funcs metadata resolved against kernel
+// BTF). FAILS CLOSED (returns an error) if ANY Tracing/LSM program is present
+// whose target function cannot be resolved — never returns an empty target set
+// for an unresolved Tracing program.
 func (r *graceReaper) inspectDirTrampolineTargets(dirPath string) (dirTargets, error) {
-	out := dirTargets{keyToFunc: make(map[uint64]string)}
+	out := dirTargets{
+		keyToFunc: make(map[uint64]string),
+		funcs:     make(map[string]struct{}),
+	}
 	if !autoStateStore.isBPFFS(autoStateStore{}, dirPath) {
 		return out, nil
 	}
+	recordedFuncs, rerr := r.store.readTargets(dirPath)
+	if rerr != nil {
+		return out, fmt.Errorf("read recorded target_funcs in %s: %w", dirPath, rerr)
+	}
+
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return out, fmt.Errorf("read dead grace dir %s: %w", dirPath, err)
 	}
+	sawTracingProg := false
+	sawUnresolvedPre60 := false
 	for _, e := range entries {
 		if isMetadataFile(e.Name()) {
 			continue
@@ -195,17 +285,47 @@ func (r *graceReaper) inspectDirTrampolineTargets(dirPath string) (dirTargets, e
 		if ierr != nil {
 			return out, fmt.Errorf("query prog info %s: %w", pinPath, ierr)
 		}
-		key, fnName, isTramp, pre60, rerr := resolveTrampolineTarget(info)
+		progType := ebpf.ProgramType(info.Type)
+		if progType == ebpf.Tracing || progType == ebpf.LSM {
+			sawTracingProg = true
+		}
+		objID, btfID, fnName, isTramp, pre60, rerr := resolveTrampolineTarget(info)
 		if rerr != nil {
 			return out, fmt.Errorf("resolve trampoline target for %s: %w", pinPath, rerr)
 		}
 		if pre60 {
-			out.hasUnknown5x = true
+			sawUnresolvedPre60 = true
 			continue
 		}
-		if isTramp && key != 0 && fnName != "" {
-			out.keyToFunc[key] = fnName
+		if isTramp && fnName != "" {
+			out.funcs[fnName] = struct{}{}
+			for _, k := range trampolineCandidateKeys(objID, btfID) {
+				out.keyToFunc[k] = fnName
+			}
 		}
+	}
+
+	// On pre-6.0 kernels (5.10..5.19), bpf_prog_info omits attach_btf_id. Use
+	// the target kernel function names recorded at pin time and resolve their
+	// BTF IDs directly against /sys/kernel/btf/*.
+	if sawUnresolvedPre60 || len(recordedFuncs) > 0 {
+		for _, fn := range recordedFuncs {
+			if fn == "" {
+				continue
+			}
+			out.funcs[fn] = struct{}{}
+			if objID, btfID, ok, berr := resolveFuncNameInBTF(fn); berr == nil && ok {
+				for _, k := range trampolineCandidateKeys(objID, btfID) {
+					out.keyToFunc[k] = fn
+				}
+			}
+		}
+	}
+
+	// FAIL CLOSED: never report 0 targets when a Tracing/LSM program could not
+	// be mapped to at least one concrete kernel target function.
+	if sawTracingProg && len(out.funcs) == 0 {
+		return out, fmt.Errorf("dead grace dir %s contains Tracing/LSM program(s) with no resolvable target function (failing closed)", dirPath)
 	}
 	return out, nil
 }
@@ -307,15 +427,19 @@ func defaultEnableStats() (io.Closer, error) {
 
 // checkReapViaStatsFallback is the fallback liveness verifier when
 // /proc/kallsyms addresses are unavailable (bpf_jit_kallsyms=0,
-// bpf_jit_harden!=0, kptr_restrict hides addresses, or pre-6.0 kernel without
-// attach_btf_id in bpf_prog_info):
-//  1. Forces a trampoline rebuild for every known target function in targets
+// bpf_jit_harden!=0, or kptr_restrict hides addresses):
+//  1. Requires at least one resolved target function (failing closed if empty).
+//  2. Forces a trampoline rebuild for EVERY target function in targets.funcs
 //     (detecting permanent last-link EBUSY and failing closed on transient errors).
-//  2. Enables BPF_ENABLE_STATS(BPF_STATS_RUN_TIME) for r.statsProbeWait (~2s)
+//  3. Enables BPF_ENABLE_STATS(BPF_STATS_RUN_TIME) for r.statsProbeWait (~2s)
 //     and verifies cumulative run_cnt across all pinned programs stays flat.
-//  3. If BPF_ENABLE_STATS fails or run_cnt increases, fails closed (keeps pins).
+//  4. If BPF_ENABLE_STATS fails or run_cnt increases, fails closed (keeps pins).
 func (r *graceReaper) checkReapViaStatsFallback(dirPath string, targets dirTargets) (safeToUnpin bool, permanentEBUSY bool, ebusyFunc string, err error) {
-	for _, fnName := range targets.keyToFunc {
+	fnSet := targets.allFuncs()
+	if len(fnSet) == 0 {
+		return false, false, "", errors.New("cannot run stats fallback with 0 resolved trampoline targets (failing closed)")
+	}
+	for fnName := range fnSet {
 		if rerr := r.rebuildTargetFn(fnName); rerr != nil {
 			if errors.Is(rerr, unix.EBUSY) {
 				return false, true, fnName, rerr
@@ -352,4 +476,19 @@ func (r *graceReaper) checkReapViaStatsFallback(dirPath string, targets dirTarge
 		return false, false, "", nil
 	}
 	return true, false, "", nil
+}
+
+func (t dirTargets) allFuncs() map[string]struct{} {
+	out := make(map[string]struct{}, len(t.funcs)+len(t.keyToFunc))
+	for fn := range t.funcs {
+		if fn != "" {
+			out[fn] = struct{}{}
+		}
+	}
+	for _, fn := range t.keyToFunc {
+		if fn != "" {
+			out[fn] = struct{}{}
+		}
+	}
+	return out
 }

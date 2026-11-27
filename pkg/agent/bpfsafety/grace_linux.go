@@ -115,11 +115,18 @@ const (
 	// another lane's or production agent's grace-* directories.
 	EnvGraceTestTag = "KEPLOY_BPF_GRACE_TEST_TAG"
 
-	// GraceDirPrefix names production grace directories under <host-bpffs>/keploy-grace/.
-	GraceDirPrefix = "grace-"
+	// GraceDirPrefix names v3.7.28+ grace directories under
+	// <host-bpffs>/keploy-grace/. Using a distinct prefix ("grace2-") ensures
+	// older v3.7.27 timer-only reapers (which only scan "grace-") never touch
+	// or prematurely unpin v3.7.28+ directories during mixed-version rollouts.
+	GraceDirPrefix = "grace2-"
+
+	// LegacyGraceDirPrefix is the v3.7.27 directory prefix, which the v3.7.28+
+	// reaper still scans and safely reaps via kallsyms + forced rebuild.
+	LegacyGraceDirPrefix = "grace-"
 
 	// GraceTestDirPrefix names isolated test directories.
-	GraceTestDirPrefix = "grace-test-"
+	GraceTestDirPrefix = "grace2-test-"
 
 	// DefaultReapInterval controls how often the cross-process reaper scans
 	// <host-bpffs>/keploy-grace/ for dead directories whose trampoline images
@@ -174,6 +181,7 @@ var (
 	detachHooks             []func()
 	unpinnedLockFDs         []int
 	privateOverlayDevs      = map[uint64]bool{}
+	staleTargets            = map[string]bool{}
 	metricsObserver         MetricsObserver
 	unprotectedTrampolines  atomic.Bool
 	unprotectedWarned       atomic.Bool
@@ -257,16 +265,32 @@ func StaleTrampolineDetected() bool {
 }
 
 // ReportStaleTrampoline records a permanent stale-trampoline condition (EBUSY
-// from an fentry/fexit attach on a kernel function), logs a clear warning
-// instructing the operator to drain and reboot the node, and updates metrics.
+// from an fentry/fexit attach on a kernel function), blocks further grace-pin
+// leaks on funcName until reboot, logs a clear warning instructing the operator
+// to drain and reboot the node, and updates metrics.
 func ReportStaleTrampoline(logger *zap.Logger, funcName string, err error) {
 	staleTrampolineDetected.Store(true)
+	if funcName != "" {
+		stateMu.Lock()
+		staleTargets[funcName] = true
+		staleTargets[sanitizeToken(funcName)] = true
+		stateMu.Unlock()
+	}
 	notifyMetrics(0, 0, 0)
 	if logger != nil {
 		logger.Warn("bpf-safety: permanent stale BPF trampoline detected (EBUSY on tracing attach — hook unavailable until node reboot; drain and reboot this node)",
 			zap.String("function", funcName),
 			zap.Error(err))
 	}
+}
+
+func isStaleTarget(funcName string) bool {
+	if funcName == "" {
+		return false
+	}
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return staleTargets[funcName] || staleTargets[sanitizeToken(funcName)]
 }
 
 // ActiveGraceMode returns GraceModeHostBPFFS when host-bpffs grace pinning is
@@ -364,17 +388,25 @@ func ResetShutdownForTest(tb TestCleaner) {
 	tb.Cleanup(func() { shuttingDown.Store(prev) })
 }
 
-// ResetUnprotectedForTest resets the unprotected-mode, stale-trampoline, and
-// warn-once flags for the duration of a test and restores them on cleanup.
+// ResetUnprotectedForTest resets the unprotected-mode, stale-trampoline,
+// stale-target set, and warn-once flags for the duration of a test and restores
+// them on cleanup.
 func ResetUnprotectedForTest(tb TestCleaner) {
 	tb.Helper()
 	prevUnprot := unprotectedTrampolines.Swap(false)
 	prevWarned := unprotectedWarned.Swap(false)
 	prevStale := staleTrampolineDetected.Swap(false)
+	stateMu.Lock()
+	prevTargets := staleTargets
+	staleTargets = map[string]bool{}
+	stateMu.Unlock()
 	tb.Cleanup(func() {
 		unprotectedTrampolines.Store(prevUnprot)
 		unprotectedWarned.Store(prevWarned)
 		staleTrampolineDetected.Store(prevStale)
+		stateMu.Lock()
+		staleTargets = prevTargets
+		stateMu.Unlock()
 	})
 }
 
@@ -541,24 +573,45 @@ func PinBeforeAttach(prog *ebpf.Program, object, name, role string) error {
 }
 
 // AttachTracing pins prog into the armed host-bpffs grace directory and then
-// attaches it via link.AttachTracing. If the kernel returns EBUSY (indicating
-// a permanent last-link stale trampoline until reboot), it raises
-// ReportStaleTrampoline before returning the error.
+// attaches it via link.AttachTracing. If link.AttachTracing fails, prog was
+// never attached to any trampoline so its unused pin is immediately removed
+// (preventing pin/map leaks on repeated EBUSY/ENOENT attempts). If the kernel
+// returns EBUSY, it raises ReportStaleTrampoline before returning the error.
 func AttachTracing(prog *ebpf.Program, object, name, role string) (link.Link, error) {
 	if err := PinBeforeAttach(prog, object, name, role); err != nil {
 		return nil, err
 	}
 	l, err := link.AttachTracing(link.TracingOptions{Program: prog})
-	if err != nil && errors.Is(err, unix.EBUSY) {
-		stateMu.Lock()
-		var logger *zap.Logger
-		if activeOwner != nil {
-			logger = activeOwner.logger
+	if err != nil {
+		UnpinFailedAttach(prog)
+		if errors.Is(err, unix.EBUSY) {
+			stateMu.Lock()
+			var logger *zap.Logger
+			if activeOwner != nil {
+				logger = activeOwner.logger
+			}
+			stateMu.Unlock()
+			ReportStaleTrampoline(logger, name, err)
 		}
-		stateMu.Unlock()
-		ReportStaleTrampoline(logger, name, err)
 	}
 	return l, err
+}
+
+// UnpinFailedAttach removes the host-bpffs grace pin created by PinBeforeAttach
+// for prog when the subsequent link.AttachTracing call FAILED (meaning prog was
+// never attached to any kernel trampoline image). Never call this for a program
+// whose attach succeeded.
+func UnpinFailedAttach(prog *ebpf.Program) {
+	if prog == nil {
+		return
+	}
+	stateMu.Lock()
+	owner := activeOwner
+	stateMu.Unlock()
+	if owner == nil {
+		return
+	}
+	owner.unpinFailed(prog)
 }
 
 // attachPinnedReaperNoop attaches a cached reaper no-op program that was
@@ -632,14 +685,48 @@ func GracefulShutdown(_ context.Context, logger *zap.Logger) {
 	utils.TeardownStep()
 }
 
-// ensureNativeBPFFS mounts bpffs at /sys/fs/bpf on native Linux hosts when it
-// is not yet mounted (or remounts read-write if mounted read-only).
+// runningInContainerFn detects whether the current process is executing inside
+// a container mount namespace (Docker, Podman, containerd, CRI-O, Kubernetes).
+// Swappable in unit tests.
+var runningInContainerFn = runningInContainer
+
+func runningInContainer() bool {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("KEPLOY_INDOCKER")), "true") {
+		return true
+	}
+	if strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" {
+		return true
+	}
+	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(marker); err == nil {
+			return true
+		}
+	}
+	if b, err := os.ReadFile("/proc/1/cgroup"); err == nil {
+		s := string(b)
+		for _, tok := range []string{"docker", "kubepods", "containerd", "crio", "libpod"} {
+			if strings.Contains(s, tok) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ensureNativeBPFFS mounts bpffs at /sys/fs/bpf ONLY on bare native Linux hosts
+// where /sys/fs/bpf is not yet mounted.
+//
+// Invariants:
+//   - NEVER mounts a container-private bpffs when running inside a container
+//     (pins inside a private mount namespace die with the container, giving
+//     false protection).
+//   - NEVER remounts an operator's read-only bpffs mount read-write.
 func ensureNativeBPFFS() {
+	if runningInContainerFn() {
+		return
+	}
 	var stfs unix.Statfs_t
 	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err == nil && stfs.Type == unix.BPF_FS_MAGIC {
-		if stfs.Flags&unix.ST_RDONLY != 0 {
-			_ = unix.Mount("bpf", DefaultNativeBPFFSPath, "bpf", uintptr(unix.MS_REMOUNT), "")
-		}
 		return
 	}
 	_ = os.MkdirAll(DefaultNativeBPFFSPath, 0o755)
@@ -648,29 +735,76 @@ func ensureNativeBPFFS() {
 
 // resolveHostBPFFSMount locates and validates the host bpffs mount point for mode.
 func resolveHostBPFFSMount(mode Mode) (string, error) {
-	containerMode := mode != ModeNative
+	inContainer := mode != ModeNative || runningInContainerFn()
 	if override := strings.TrimSpace(os.Getenv(EnvHostBPFFS)); override != "" {
-		if err := ValidateHostBPFFSPath(override, containerMode); err != nil {
+		if err := ValidateHostBPFFSPath(override, inContainer); err != nil {
 			return "", fmt.Errorf("%s=%s: %w", EnvHostBPFFS, override, err)
 		}
 		return override, nil
 	}
 
-	if containerMode {
+	if mode != ModeNative {
 		if err := ValidateHostBPFFSPath(DefaultHostBPFFSPath, true); err != nil {
 			return "", fmt.Errorf("host bpffs mount %s unavailable: %w", DefaultHostBPFFSPath, err)
 		}
 		return DefaultHostBPFFSPath, nil
 	}
 
-	if err := ValidateHostBPFFSPath(DefaultHostBPFFSPath, false); err == nil {
+	// Native mode (including native CLI inside a CI container):
+	// prefer /run/keploy/host-bpffs if mounted.
+	if err := ValidateHostBPFFSPath(DefaultHostBPFFSPath, inContainer); err == nil {
 		return DefaultHostBPFFSPath, nil
+	}
+	if inContainer {
+		// Inside a container without /run/keploy/host-bpffs: NEVER self-mount a
+		// private bpffs. Only accept /sys/fs/bpf if it is already an explicit
+		// writable host-shared bpffs mount in mountinfo.
+		if err := ValidateHostBPFFSPath(DefaultNativeBPFFSPath, true); err != nil {
+			return "", fmt.Errorf("host bpffs mount unavailable in container: %w", err)
+		}
+		if ok, merr := hasHostSharedBPFFS("/proc/self/mountinfo", DefaultNativeBPFFSPath); merr != nil || !ok {
+			return "", fmt.Errorf("%s inside container is not a host-shared bpffs mount", DefaultNativeBPFFSPath)
+		}
+		return DefaultNativeBPFFSPath, nil
 	}
 	ensureNativeBPFFS()
 	if err := ValidateHostBPFFSPath(DefaultNativeBPFFSPath, false); err != nil {
 		return "", fmt.Errorf("host bpffs mount %s unavailable: %w", DefaultNativeBPFFSPath, err)
 	}
 	return DefaultNativeBPFFSPath, nil
+}
+
+// hasHostSharedBPFFS reports whether target in /proc/self/mountinfo is a bpffs
+// mount that carries mount propagation (shared: or master:), distinguishing a
+// host bind-mounted /sys/fs/bpf from a container-private `mount -t bpf` instance.
+func hasHostSharedBPFFS(mountinfoPath, target string) (bool, error) {
+	f, err := os.Open(mountinfoPath)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		sep := strings.Index(line, " - ")
+		if sep < 0 {
+			continue
+		}
+		left := strings.Fields(line[:sep])
+		right := strings.Fields(line[sep+3:])
+		if len(left) < 6 || len(right) < 1 {
+			continue
+		}
+		if left[4] != target || right[0] != "bpf" || left[3] != "/" {
+			continue
+		}
+		for _, opt := range left[6:] {
+			if strings.HasPrefix(opt, "shared:") || strings.HasPrefix(opt, "master:") {
+				return true, nil
+			}
+		}
+	}
+	return false, sc.Err()
 }
 
 // ValidateHostBPFFSPath checks that path is a writable BPF_FS_MAGIC filesystem,
@@ -745,40 +879,114 @@ func hasMountInfoBPFFS(mountinfoPath, target string) (bool, error) {
 }
 
 type graceOwner struct {
-	root          string
-	dir           string
-	self          string
-	lockFD        int
-	seq           atomic.Uint64
-	keysMu        sync.Mutex
-	attachedKeys  map[uint64]struct{}
-	anchorMu      sync.Mutex
-	anchoredFuncs map[string]bool
-	logger        *zap.Logger
-	reaper        *graceReaper
-	reaperCancel  context.CancelFunc
+	root            string
+	dir             string
+	self            string
+	lockFD          int
+	seq             atomic.Uint64
+	keysMu          sync.Mutex
+	attachedKeys    map[uint64]struct{}
+	recordedTargets map[string]bool
+	pinPaths        map[*ebpf.Program]string
+	anchorMu        sync.Mutex
+	anchoredFuncs   map[string]bool
+	logger          *zap.Logger
+	reaper          *graceReaper
+	reaperCancel    context.CancelFunc
+}
+
+func (g *graceOwner) unpinFailed(prog *ebpf.Program) {
+	g.keysMu.Lock()
+	p := g.pinPaths[prog]
+	delete(g.pinPaths, prog)
+	g.keysMu.Unlock()
+	if p != "" {
+		_ = os.Remove(p)
+	}
+}
+
+func (g *graceOwner) recordTargetFunc(fnName string) {
+	if fnName == "" {
+		return
+	}
+	g.keysMu.Lock()
+	if g.recordedTargets == nil {
+		g.recordedTargets = make(map[string]bool)
+	}
+	if g.recordedTargets[fnName] {
+		g.keysMu.Unlock()
+		return
+	}
+	g.recordedTargets[fnName] = true
+	funcs := make([]string, 0, len(g.recordedTargets))
+	for fn := range g.recordedTargets {
+		funcs = append(funcs, fn)
+	}
+	g.keysMu.Unlock()
+
+	if g.reaper != nil && g.reaper.store != nil {
+		_ = g.reaper.store.writeTargets(g.dir, funcs)
+	}
 }
 
 func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) error {
+	// Resolve target function + candidate trampoline keys BEFORE pinning so:
+	//  1. Already-permanent-EBUSY targets fail immediately without leaking a pin.
+	//  2. Both Linux 6.0+ (attach_btf_id) and Linux 5.10..5.19 (BTF lookup of
+	//     caller-provided AttachTo name) record the exact target function and
+	//     pin an anchor link BEFORE the first real attach.
+	if object != "bpfsafety_reaper" && isStaleTarget(name) {
+		return fmt.Errorf("stale BPF trampoline on %s (hook unavailable until node reboot; drain and reboot this node): %w", name, unix.EBUSY)
+	}
+
+	var (
+		resolvedFunc string
+		candKeys     []uint64
+	)
+	if info, err := queryProgInfo(prog.FD()); err == nil {
+		objID, btfID, fnName, isTramp, pre60, rerr := resolveTrampolineTarget(info)
+		if rerr == nil && isTramp && fnName != "" {
+			resolvedFunc = fnName
+			candKeys = trampolineCandidateKeys(objID, btfID)
+		} else if pre60 && name != "" {
+			if objID, btfID, ok, berr := resolveFuncNameInBTF(name); berr == nil && ok {
+				resolvedFunc = name
+				candKeys = trampolineCandidateKeys(objID, btfID)
+			}
+		}
+	}
+	if object != "bpfsafety_reaper" && resolvedFunc != "" && isStaleTarget(resolvedFunc) {
+		return fmt.Errorf("stale BPF trampoline on %s (hook unavailable until node reboot; drain and reboot this node): %w", resolvedFunc, unix.EBUSY)
+	}
+
 	seq := g.seq.Add(1)
 	pinName := fmt.Sprintf("%06d-%s-%s-%s", seq, sanitizeToken(object), sanitizeToken(name), role)
 	pinPath := filepath.Join(g.dir, pinName)
 	if err := prog.Pin(pinPath); err != nil {
 		return fmt.Errorf("%w: pin BPF trampoline program %s (%s) into host bpffs grace dir %s: %w", ErrPinFailed, name, object, pinPath, err)
 	}
-	if info, err := queryProgInfo(prog.FD()); err == nil {
-		if key, fnName, isTramp, _, rerr := resolveTrampolineTarget(info); rerr == nil && isTramp && key != 0 {
-			g.keysMu.Lock()
-			if g.attachedKeys == nil {
-				g.attachedKeys = make(map[uint64]struct{})
-			}
-			g.attachedKeys[key] = struct{}{}
-			g.keysMu.Unlock()
-			// Pin a no-op anchor link on this function BEFORE the first real
-			// attach (skip for the reaper's own rebuild no-op so we don't recurse).
-			if fnName != "" && object != "bpfsafety_reaper" {
-				g.ensureAnchor(fnName, g.logger)
-			}
+
+	g.keysMu.Lock()
+	if g.pinPaths == nil {
+		g.pinPaths = make(map[*ebpf.Program]string)
+	}
+	g.pinPaths[prog] = pinPath
+	if len(candKeys) > 0 {
+		if g.attachedKeys == nil {
+			g.attachedKeys = make(map[uint64]struct{})
+		}
+		for _, k := range candKeys {
+			g.attachedKeys[k] = struct{}{}
+		}
+	}
+	g.keysMu.Unlock()
+
+	if resolvedFunc != "" {
+		g.recordTargetFunc(resolvedFunc)
+		// Pin a no-op anchor link on this function BEFORE the first real
+		// attach (skip for the reaper's own rebuild no-op so we don't recurse).
+		if object != "bpfsafety_reaper" {
+			g.ensureAnchor(resolvedFunc, g.logger)
 		}
 	}
 	return nil
@@ -792,6 +1000,9 @@ func (g *graceOwner) snapshotBeforeDetach(logger *zap.Logger) {
 	}
 	g.keysMu.Unlock()
 	if len(keys) == 0 || g.reaper == nil {
+		return
+	}
+	if g.reaper.dynamicTrampImageFn != nil && !g.reaper.dynamicTrampImageFn() {
 		return
 	}
 	if !g.reaper.kallsymsSysctlFn() {
@@ -896,7 +1107,7 @@ func openGraceOwnerInRoot(root string, logger *zap.Logger) (*graceOwner, error) 
 		return nil, fmt.Errorf("flock grace directory %s: %w", finalDir, err)
 	}
 	// Clear any transient metadata written between Mkdir and Flock(LOCK_EX).
-	for _, meta := range []string{reaperStateFileName, kallsymsSnapshotFileName, legacyStampFileName} {
+	for _, meta := range []string{reaperStateFileName, kallsymsSnapshotFileName, targetFuncsFileName, legacyStampFileName} {
 		if err := os.Remove(filepath.Join(finalDir, meta)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			_ = unix.Close(fd)
 			_ = os.RemoveAll(finalDir)
@@ -942,23 +1153,24 @@ func clockBoottimeNs() uint64 {
 // call their programs has been freed in /proc/kallsyms (or confirmed idle via
 // forced rebuild + BPF_ENABLE_STATS fallback). Never uses a blind timer.
 type graceReaper struct {
-	root             string
-	self             string
-	reapPrefix       string
-	reapInterval     time.Duration
-	statsProbeWait   time.Duration
-	logger           *zap.Logger
-	bootNowNs        func() uint64
-	store            stateStore
-	pinNoop          func(prog *ebpf.Program, funcName string) error
-	inspectTargetsFn func(dirPath string) (dirTargets, error)
-	rebuildTargetFn  func(funcName string) error
-	runCntFn         func(dirPath string) (uint64, error)
-	enableStatsFn    func() (io.Closer, error)
-	kallsymsSysctlFn func() bool
-	readKallsymsFn   func() (map[uint64][]uint64, bool, error)
-	noopMu           sync.Mutex
-	noopCache        map[string]*ebpf.Program
+	root                string
+	self                string
+	reapPrefix          string
+	reapInterval        time.Duration
+	statsProbeWait      time.Duration
+	logger              *zap.Logger
+	bootNowNs           func() uint64
+	store               stateStore
+	pinNoop             func(prog *ebpf.Program, funcName string) error
+	inspectTargetsFn    func(dirPath string) (dirTargets, error)
+	rebuildTargetFn     func(funcName string) error
+	runCntFn            func(dirPath string) (uint64, error)
+	enableStatsFn       func() (io.Closer, error)
+	dynamicTrampImageFn func() bool
+	kallsymsSysctlFn    func() bool
+	readKallsymsFn      func() (map[uint64][]uint64, bool, error)
+	noopMu              sync.Mutex
+	noopCache           map[string]*ebpf.Program
 }
 
 func newGraceReaper(root, self string, reapInterval time.Duration, logger *zap.Logger) *graceReaper {
@@ -969,17 +1181,18 @@ func newGraceReaper(root, self string, reapInterval time.Duration, logger *zap.L
 		reapInterval = DefaultReapInterval
 	}
 	r := &graceReaper{
-		root:             root,
-		self:             self,
-		reapPrefix:       GraceDirPrefix,
-		reapInterval:     reapInterval,
-		statsProbeWait:   defaultStatsProbeWait,
-		logger:           logger,
-		bootNowNs:        clockBoottimeNs,
-		store:            autoStateStore{},
-		enableStatsFn:    defaultEnableStats,
-		kallsymsSysctlFn: kallsymsSysctlAllowsJIT,
-		readKallsymsFn:   func() (map[uint64][]uint64, bool, error) { return parseKallsymsTrampolines(kallsymsPath) },
+		root:                root,
+		self:                self,
+		reapPrefix:          GraceDirPrefix,
+		reapInterval:        reapInterval,
+		statsProbeWait:      defaultStatsProbeWait,
+		logger:              logger,
+		bootNowNs:           clockBoottimeNs,
+		store:               autoStateStore{},
+		enableStatsFn:       defaultEnableStats,
+		dynamicTrampImageFn: kernelHasDynamicTrampImage,
+		kallsymsSysctlFn:    kallsymsSysctlAllowsJIT,
+		readKallsymsFn:      func() (map[uint64][]uint64, bool, error) { return parseKallsymsTrampolines(kallsymsPath) },
 	}
 	r.inspectTargetsFn = r.inspectDirTrampolineTargets
 	r.rebuildTargetFn = r.forceRebuildTarget
@@ -988,8 +1201,8 @@ func newGraceReaper(root, self string, reapInterval time.Duration, logger *zap.L
 }
 
 func (r *graceReaper) start(ctx context.Context) {
-	r.round()
 	go func() {
+		r.round()
 		tick := time.NewTicker(r.reapInterval)
 		defer tick.Stop()
 		for {
@@ -1001,6 +1214,23 @@ func (r *graceReaper) start(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// isManagedGraceDirName reports whether a directory entry under keploy-grace/
+// is a production or test grace directory (either v3.7.28+ grace2-* or legacy
+// v3.7.27 grace-*).
+func isManagedGraceDirName(name string) bool {
+	return strings.HasPrefix(name, GraceDirPrefix) || strings.HasPrefix(name, LegacyGraceDirPrefix)
+}
+
+func matchesReapScope(name, reapPrefix string) bool {
+	if reapPrefix == GraceDirPrefix {
+		if strings.HasPrefix(name, GraceTestDirPrefix) || strings.HasPrefix(name, "grace-test-") {
+			return false
+		}
+		return strings.HasPrefix(name, GraceDirPrefix) || strings.HasPrefix(name, LegacyGraceDirPrefix)
+	}
+	return strings.HasPrefix(name, reapPrefix)
 }
 
 // round executes one image-liveness reaper scan and notifies the metrics observer.
@@ -1024,6 +1254,10 @@ func (r *graceReaper) round() (dirsPresent, pinnedProgs int) {
 			return currentTramps, kallsymsOK
 		}
 		kallsymsChecked = true
+		if r.dynamicTrampImageFn != nil && !r.dynamicTrampImageFn() {
+			kallsymsOK = false
+			return nil, false
+		}
 		if !r.kallsymsSysctlFn() {
 			kallsymsOK = false
 			return nil, false
@@ -1038,13 +1272,26 @@ func (r *graceReaper) round() (dirsPresent, pinnedProgs int) {
 		return currentTramps, true
 	}
 
+	// Deduplicate forced trampoline rebuilds per kernel function within a single
+	// round so N dead grace directories targeting the same function only perform
+	// one trampoline update per round.
+	rebuiltThisRound := make(map[string]error)
+	rebuildOnce := func(fn string) error {
+		if err, done := rebuiltThisRound[fn]; done {
+			return err
+		}
+		err := r.rebuildTargetFn(fn)
+		rebuiltThisRound[fn] = err
+		return err
+	}
+
 	for _, e := range entries {
 		name := e.Name()
-		if !e.IsDir() || !strings.HasPrefix(name, GraceDirPrefix) {
+		if !e.IsDir() || !isManagedGraceDirName(name) {
 			continue
 		}
 		dirPath := filepath.Join(r.root, name)
-		if name == r.self || !strings.HasPrefix(name, prefix) {
+		if name == r.self || !matchesReapScope(name, prefix) {
 			dirsPresent++
 			pinnedProgs += countPinnedProgs(dirPath)
 			continue
@@ -1061,7 +1308,7 @@ func (r *graceReaper) round() (dirsPresent, pinnedProgs int) {
 			continue
 		}
 
-		reaped := r.processDeadDir(dirPath, nowNs, loadKallsyms)
+		reaped := r.processDeadDir(dirPath, nowNs, loadKallsyms, rebuildOnce)
 		_ = unix.Close(fd)
 		if !reaped {
 			dirsPresent++
@@ -1073,7 +1320,7 @@ func (r *graceReaper) round() (dirsPresent, pinnedProgs int) {
 	return dirsPresent, pinnedProgs
 }
 
-func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms func() (map[uint64][]uint64, bool)) (reaped bool) {
+func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms func() (map[uint64][]uint64, bool), rebuildOnce func(string) error) (reaped bool) {
 	st, ok, serr := r.store.readState(dirPath)
 	if serr != nil {
 		r.logger.Warn("bpf-safety: failed to read grace dir reaper state; keeping pins", zap.String("graceDir", dirPath), zap.Error(serr))
@@ -1094,7 +1341,8 @@ func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms 
 	// Case 1: Dead owner with no snapshot yet (SIGKILL / OOM / legacy dir).
 	if !ok || st.Flags&(stateCleanSnapshot|stateDeadSnapshot) == 0 {
 		// Pass 1: record dead observation and wait one pass so any in-flight
-		// do_exit -> exit_files link closes finish before snapshotting.
+		// do_exit -> close_files LIFO task_work link closes finish before
+		// snapshotting and rebuilding.
 		if !ok || st.Flags&stateDeadPass1 == 0 {
 			if werr := r.store.writeState(dirPath, reaperState{
 				Flags:           stateDeadPass1,
@@ -1105,18 +1353,20 @@ func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms 
 			return false
 		}
 
-		// Pass 2+: dead owner is confirmed gone. Inspect pinned program targets.
+		// Pass 2+: dead owner is confirmed gone. Inspect pinned program targets
+		// (fails closed if any Tracing/LSM program has no resolvable target).
 		targets, terr := r.inspectTargetsFn(dirPath)
 		if terr != nil {
 			r.logger.Warn("bpf-safety: failed to inspect dead grace dir targets; keeping pins", zap.String("graceDir", dirPath), zap.Error(terr))
 			return false
 		}
-		if len(targets.keyToFunc) == 0 && !targets.hasUnknown5x {
+		fnSet := targets.allFuncs()
+		if len(fnSet) == 0 {
 			return r.reapDir(dirPath, progs, "no active trampoline targets")
 		}
 
 		tramps, kOK := loadKallsyms()
-		if kOK && !targets.hasUnknown5x {
+		if kOK && len(targets.keyToFunc) > 0 {
 			wantKeys := make(map[uint64]struct{}, len(targets.keyToFunc))
 			for k := range targets.keyToFunc {
 				wantKeys[k] = struct{}{}
@@ -1136,7 +1386,21 @@ func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms 
 				r.logger.Warn("bpf-safety: failed to persist pass-2 kallsyms snapshot", zap.String("graceDir", dirPath), zap.Error(werr))
 				return false
 			}
-			st.Flags |= stateDeadSnapshot
+			// Force a trampoline rebuild for every target on pass 2 so any
+			// stale image left by a SIGKILL/-ENOMEM unlink is replaced immediately
+			// and its old address disappears from /proc/kallsyms before pass 3.
+			for fn := range fnSet {
+				if rerr := rebuildOnce(fn); rerr != nil {
+					if errors.Is(rerr, unix.EBUSY) {
+						r.markPermanentStale(dirPath, fn, st, rerr)
+						return false
+					}
+					r.logger.Warn("bpf-safety: pass-2 forced trampoline rebuild failed; keeping pins and retrying",
+						zap.String("graceDir", dirPath), zap.String("function", fn), zap.Error(rerr))
+					return false
+				}
+			}
+			st.Flags |= stateDeadSnapshot | stateForcedRebuild
 			st.SnapshotCount = uint64(len(snap))
 			st.LastProbeBootNs = nowNs
 			if werr := r.store.writeState(dirPath, st); werr != nil {
@@ -1145,8 +1409,8 @@ func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms 
 			return false
 		}
 
-		// Kallsyms unavailable (or pre-6.0 kernel without attach_btf_id):
-		// fall back to forced rebuild + BPF_ENABLE_STATS (~2s) + flat run_cnt.
+		// Kallsyms unavailable or key mapping unavailable: fall back to forced
+		// rebuild on every resolved target + BPF_ENABLE_STATS (~2s) flat run_cnt.
 		return r.handleStatsFallback(dirPath, progs, targets, st, nowNs)
 	}
 
@@ -1199,7 +1463,7 @@ func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms 
 		return false
 	}
 	for fn := range stuckFuncs {
-		if err := r.rebuildTargetFn(fn); err != nil {
+		if err := rebuildOnce(fn); err != nil {
 			if errors.Is(err, unix.EBUSY) {
 				r.markPermanentStale(dirPath, fn, st, err)
 				return false

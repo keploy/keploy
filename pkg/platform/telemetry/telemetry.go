@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/bpfsafety"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -298,6 +299,12 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 	if why := InternalWhy(tel.KeployVersion); why != "" {
 		event.Meta["internal"] = true
 		event.Meta["internal_why"] = why
+	}
+	if bpfsafety.UnprotectedTrampolinesActive() {
+		event.Meta["bpf_unprotected_trampolines"] = true
+	}
+	if bpfsafety.StaleTrampolineDetected() {
+		event.Meta["bpf_stale_trampoline"] = true
 	}
 
 	event.InstallationID = tel.InstallationID
