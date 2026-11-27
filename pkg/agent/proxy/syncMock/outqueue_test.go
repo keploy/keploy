@@ -362,6 +362,9 @@ func TestANewChannelDecidesNothingUnderItsLock(t *testing.T) {
 		for m.OutQueued() && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
 		}
+		if m.OutQueued() {
+			t.Errorf("abandoned lane still queued after stall give-up")
+		}
 	})
 	m.SetOutputChannel(old)
 	m.send(&models.Mock{Name: "a"}, "", nil) // the drainer's mock in hand

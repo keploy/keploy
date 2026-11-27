@@ -61,6 +61,9 @@ func TestAStartUpReadInAWindowThatBecameNoTestCaseIsOneAnyTestMayNeed(t *testing
 				for m.OutQueued() && time.Now().Before(deadline) {
 					time.Sleep(time.Millisecond)
 				}
+				if m.OutQueued() {
+					t.Errorf("abandoned lane still queued after stall give-up")
+				}
 			})
 			t0 := time.Now().Add(-time.Minute)
 			m.StartRecordSession()
@@ -364,6 +367,9 @@ func TestAStartUpReadInAFilteredProbesWindowIsKeptOrSaid(t *testing.T) {
 		deadline := time.Now().Add(5 * time.Second)
 		for m.OutQueued() && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
+		}
+		if m.OutQueued() {
+			t.Errorf("abandoned lane still queued after stall give-up")
 		}
 	})
 	t0 := time.Now().Add(-time.Minute)

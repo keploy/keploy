@@ -884,6 +884,7 @@ func TestOutQueueSpill_NilHookMidSpillKeepsFIFO(t *testing.T) {
 	out <- &models.Mock{Name: "filler"}
 	mgr.SetOutputChannel(out)
 	mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1024})
+	base := processOutQueued.Load()
 
 	now := time.Now().Add(-time.Second)
 	for i := 0; i < 4; i++ {
@@ -909,9 +910,149 @@ func TestOutQueueSpill_NilHookMidSpillKeepsFIFO(t *testing.T) {
 			t.Fatalf("timed out waiting for %q at position %d", w, i)
 		}
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for mgr.OutQueued() && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	waitOutQueue(t, mgr)
+	if delta := processOutQueued.Load() - base; delta != 0 {
+		t.Fatalf("processOutQueued off by %d after nil-hook mid-spill drain", delta)
+	}
+	mgr.CloseOutChan()
+}
+
+// TestOutQueueSpill_StallWithNilHookTail verifies that when head, spill, and a
+// nil-hook RAM tail all hold mocks and the consumer stalls, every mock gets
+// done(false) once, OnDrop and WasMockDroppedForTC record every drop,
+// processOutQueued returns to its start (killing MS3 and MS2), and a mock sent
+// after give-up is delivered cleanly.
+func TestOutQueueSpill_StallWithNilHookTail(t *testing.T) {
+	SetDefaultOutQueueSpill(nil)
+	ch := make(chan *models.Mock, 1)
+	ch <- &models.Mock{Name: "filler"}
+	clk := &stall.ManualClock{}
+	mgr := New(zap.NewNop())
+	mgr.outClock, mgr.outStall = clk, time.Hour
+	mgr.SetOutputChannel(ch)
+	mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1024})
+	var told atomic.Int64
+	mgr.OnDrop(func(*models.Mock) { told.Add(1) })
+	base := processOutQueued.Load()
+	now := time.Now().Add(-time.Minute)
+
+	var mu sync.Mutex
+	outcome := map[string]int{}
+	var names []string
+	sendOne := func(name string) {
+		names = append(names, name)
+		if d := mgr.send(makeSizedMock(name, 2048, now.Add(time.Duration(len(names))*time.Millisecond)), "tc-"+name, func(ok bool) {
+			mu.Lock()
+			if ok {
+				outcome[name]++
+			} else {
+				outcome[name] += 100
+			}
+			mu.Unlock()
+		}); d != MockTaken {
+			t.Fatalf("%s: send = %v, want MockTaken", name, d)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		sendOne(fmt.Sprintf("a-%d", i))
+	}
+	mgr.SetOutQueueSpill(nil)
+	for i := 0; i < 5; i++ {
+		sendOne(fmt.Sprintf("b-%d", i))
+	}
+
+	waitClockPending(t, clk)
+	clk.Advance(time.Hour)
+	waitOutQueue(t, mgr)
+
+	mu.Lock()
+	for _, n := range names {
+		if outcome[n] != 100 {
+			t.Errorf("%s outcome = %d, want 100 (done(false) once)", n, outcome[n])
+		}
+		if !mgr.WasMockDroppedForTC("tc-" + n) {
+			t.Errorf("tc-%s not recorded as dropped", n)
+		}
+	}
+	mu.Unlock()
+	if got := told.Load(); got != int64(len(names)) {
+		t.Errorf("OnDrop told %d, want %d", got, len(names))
+	}
+	if delta := processOutQueued.Load() - base; delta != 0 {
+		t.Fatalf("processOutQueued leaked %d after a stall with a nil-hook tail", delta)
+	}
+	if mgr.OutQueued() {
+		t.Fatal("OutQueued still true after give-up")
+	}
+
+	<-ch // filler
+	if d := mgr.send(makeSizedMock("c-0", 2048, now.Add(time.Second)), "", nil); d != MockTaken {
+		t.Fatalf("c-0 after give-up = %v, want MockTaken", d)
+	}
+	select {
+	case got := <-ch:
+		if got.Name != "c-0" {
+			t.Fatalf("got %q after give-up, want c-0", got.Name)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for c-0 after give-up")
+	}
+	waitOutQueue(t, mgr)
+	if delta := processOutQueued.Load() - base; delta != 0 {
+		t.Fatalf("processOutQueued off by %d after follow-up delivery", delta)
+	}
+	mgr.CloseOutChan()
+}
+
+// TestOutQueueSpill_NilHookMidSpillEnforcesBound verifies that the first mock
+// entering a nil-hook tail behind spilled mocks still respects the per-class
+// byte bound (killing MS4).
+func TestOutQueueSpill_NilHookMidSpillEnforcesBound(t *testing.T) {
+	SetDefaultOutQueueSpill(nil)
+	ch := make(chan *models.Mock, 1)
+	ch <- &models.Mock{Name: "filler"}
+	mgr := New(zap.NewNop())
+	mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
+	mgr.SetOutputChannel(ch)
+	mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1024})
+	var told atomic.Int64
+	mgr.OnDrop(func(*models.Mock) { told.Add(1) })
+	base := processOutQueued.Load()
+	now := time.Now().Add(-time.Minute)
+
+	for i := 0; i < 4; i++ {
+		if d := mgr.send(makeSizedMock(fmt.Sprintf("a-%d", i), 2048, now.Add(time.Duration(i)*time.Millisecond)), "", nil); d != MockTaken {
+			t.Fatalf("a-%d: %v", i, d)
+		}
+	}
+	mgr.SetOutQueueSpill(nil)
+
+	nonShared := outQueueMaxBytes - outQueueSharedRoom
+	reserve := nonShared - processOutQueued.Load()
+	processOutQueued.Add(reserve)
+	defer processOutQueued.Add(-reserve)
+
+	if d := mgr.send(makeSizedMock("b-0", 1<<20, now.Add(time.Second)), "tc-b0", nil); d != MockDroppedOutputFull {
+		t.Fatalf("first nil-hook tail mock with no room = %v, want MockDroppedOutputFull", d)
+	}
+	if !mgr.WasMockDroppedForTC("tc-b0") || told.Load() != 1 {
+		t.Fatalf("dropped=%v told=%d, want true and 1", mgr.WasMockDroppedForTC("tc-b0"), told.Load())
+	}
+
+	<-ch // filler
+	for i := 0; i < 4; i++ {
+		select {
+		case got := <-ch:
+			if want := fmt.Sprintf("a-%d", i); got.Name != want {
+				t.Fatalf("pos %d: got %q want %q", i, got.Name, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out draining a-%d", i)
+		}
+	}
+	waitOutQueue(t, mgr)
+	if delta := processOutQueued.Load() - base - reserve; delta != 0 {
+		t.Fatalf("processOutQueued off by %d", delta)
 	}
 	mgr.CloseOutChan()
 }
