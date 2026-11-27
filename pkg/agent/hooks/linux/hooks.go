@@ -106,6 +106,9 @@ type Hooks struct {
 	// SetInstance (instance.go); instanceMu guards it.
 	instanceMu   sync.Mutex
 	instanceFork link.Link
+	// scopedMu serialises AddScopedPID and sweepScopedPIDs so a concurrent
+	// sweep cannot delete an entry just inserted for a reused PID.
+	scopedMu sync.Mutex
 	// instanceLock holds this agent's cross-PID-namespace flock ownership
 	// claim for the lifetime of loaded eBPF hooks.
 	instanceLock *instanceLock
@@ -357,6 +360,9 @@ func (h *Hooks) sendFinalAgentInfo(info structs.AgentInfo, start func(*structs.A
 	if err := send(info); err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
+	}
+	if info.IsDocker == 0 && (info.Flags&structs.FlagScopedPids) != 0 {
+		h.logger.Info("eBPF native scoped_pids mode active: only opted-in processes and their descendants will be intercepted")
 	}
 	h.sayBindFallback(info.Flags)
 	// The bind hooks steer from here (the flags are sent): a restarted

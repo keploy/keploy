@@ -54,6 +54,7 @@ const (
 	bpfMapReadySeen                   = "ready_seen"
 	bpfMapReadySocks                  = "ready_socks"
 	bpfMapRedirectProxyMap            = "redirect_proxy_map"
+	bpfMapScopedPids                  = "scoped_pids"
 	bpfMapSocketClassifyFailures      = "socket_classify_failures"
 	bpfMapStopSignals                 = "stop_signals"
 	bpfMapTargetNamespacePids         = "target_namespace_pids"
@@ -214,6 +215,7 @@ type bpfMapSpecs struct {
 	ReadySeen                   *ebpf.MapSpec `ebpf:"ready_seen"`
 	ReadySocks                  *ebpf.MapSpec `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
+	ScopedPids                  *ebpf.MapSpec `ebpf:"scoped_pids"`
 	SocketClassifyFailures      *ebpf.MapSpec `ebpf:"socket_classify_failures"`
 	StopSignals                 *ebpf.MapSpec `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
@@ -290,6 +292,7 @@ type bpfMaps struct {
 	ReadySeen                   *ebpf.Map `ebpf:"ready_seen"`
 	ReadySocks                  *ebpf.Map `ebpf:"ready_socks"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
+	ScopedPids                  *ebpf.Map `ebpf:"scoped_pids"`
 	SocketClassifyFailures      *ebpf.Map `ebpf:"socket_classify_failures"`
 	StopSignals                 *ebpf.Map `ebpf:"stop_signals"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
@@ -342,6 +345,7 @@ func (m *bpfMaps) Close() error {
 		m.ReadySeen,
 		m.ReadySocks,
 		m.RedirectProxyMap,
+		m.ScopedPids,
 		m.SocketClassifyFailures,
 		m.StopSignals,
 		m.TargetNamespacePids,

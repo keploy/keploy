@@ -58,6 +58,16 @@ const (
 	// sockets stands between the application and its callers, so the
 	// agent's death leaves the application's port to the application.
 	FlagIngressSteer uint32 = 1 << 6
+	// FlagScopedPids (bit 7; KEPLOY_FLAG_SCOPED_PIDS in headers/k_helpers.h):
+	// in native mode (!IsDocker), pid_filter matches a process in the client's
+	// tree only when the process itself or an ancestor below the client has
+	// its agent-namespace TGID and matching start_boottime ticks
+	// (/proc/<pid>/stat field 22) in scoped_pids (added via
+	// Hooks.AddScopedPID), exempting the outer build toolchain from
+	// interception while keeping compiled test binaries and their real_parent
+	// descendants isolated. Applies to pid_filter only; k_process_exit removes
+	// root entries on thread-group exit.
+	FlagScopedPids uint32 = 1 << 7
 )
 
 type BpfSpinLock struct{ Val uint32 }

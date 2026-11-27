@@ -534,6 +534,49 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	return nil
 }
 
+// ScopePID opts caller (in the agent's PID namespace, read from the HTTP
+// connection) and every descendant in its real_parent tree into interception
+// when the hooks were loaded with structs.FlagScopedPids. Returns (false, nil)
+// as a clean no-op when the hooks do not implement PIDScoper or FlagScopedPids
+// is inactive (e.g. Docker mode or non-Linux). Returns 422 ScopeErrNotInRun
+// when caller is not a live process in this keploy run, and 500
+// ScopeErrInternal when the kernel map update fails.
+func (a *Agent) ScopePID(_ context.Context, caller int) (bool, *models.ScopeError) {
+	h, ok := a.Hooks.(coreAgent.PIDScoper)
+	if !ok || !h.ScopedPidsActive() {
+		return false, nil
+	}
+	root, why := a.clientRoot()
+	if root <= 0 {
+		msg := fmt.Sprintf("cannot scope process %d: keploy did not start its command natively", caller)
+		if why != "" {
+			msg = fmt.Sprintf("cannot scope process %d: keploy's agent cannot tell its CLI's process (%s)", caller, why)
+		}
+		return false, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun, msg, "run the test command through keploy")
+	}
+	if caller == agentPID {
+		return false, scopeErr(http.StatusInternalServerError, models.ScopeErrNoCaller,
+			fmt.Sprintf("cannot scope process %d: agent read itself as caller", caller),
+			"run the test command on the machine keploy's agent runs on")
+	}
+	start, alive := procStart(caller)
+	if caller <= 0 || !alive {
+		return false, scopeErr(http.StatusInternalServerError, models.ScopeErrNoCaller,
+			"keploy's agent could not tell which process called it",
+			"run the test command natively, on the machine the agent runs on")
+	}
+	if !a.inRun(caller, start, root) {
+		return false, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
+			fmt.Sprintf("process %d is not part of this keploy run", caller),
+			"run the test command through keploy")
+	}
+	if err := h.AddScopedPID(uint32(caller), start); err != nil {
+		return false, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy could not add the test process to scoped_pids: "+err.Error(), "check the agent's log")
+	}
+	return true, nil
+}
+
 // ClaimInstance claims the run for caller (a process ID in the agent's PID
 // namespace, read from the connection), or for the child it names
 // (req.Child): a running process the caller started, its parent read from
@@ -691,6 +734,12 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		// still running, is in the counts its first test is counted from.
 		if h, ok := a.Hooks.(coreAgent.ShimReporter); ok {
 			h.ShimClaimedBy(caller)
+		}
+		if h, ok := a.Hooks.(coreAgent.PIDScoper); ok && h.ScopedPidsActive() {
+			if err := h.AddScopedPID(uint32(caller), start); err != nil {
+				return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+					"keploy could not add the test process to scoped_pids: "+err.Error(), "check the agent's log")
+			}
 		}
 		// A close of this process's connection is its open test's from
 		// here, at the epoch the test began at, and the run's in the gap

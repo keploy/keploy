@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 )
 
 // Keploy instances (agent.InstanceStamper): a test worker's processes,
@@ -32,6 +33,47 @@ type instanceLost struct {
 }
 
 var _ agent.InstanceStamper = (*Hooks)(nil)
+var _ agent.PIDScoper = (*Hooks)(nil)
+
+// ScopedPidsActive reports whether these hooks were loaded with
+// structs.FlagScopedPids active in native mode.
+func (h *Hooks) ScopedPidsActive() bool {
+	h.agentInfoMu.Lock()
+	defer h.agentInfoMu.Unlock()
+	return h.agentInfoSent && h.agentInfo.IsDocker == 0 && (h.agentInfo.Flags&structs.FlagScopedPids) != 0
+}
+
+// AddScopedPID opts the process nsTgid (in the agent's PID namespace, with
+// startTicks from /proc/<pid>/stat field 22) and every descendant in its
+// real_parent tree into interception when structs.FlagScopedPids is active.
+// Unlike SetInstance, scoped_pids is keyed by the agent's own PID namespace
+// TGID and checked during pid_filter's existing ancestry walk, so it works in
+// both host and container PID namespaces without attaching k_instance_fork.
+func (h *Hooks) AddScopedPID(nsTgid uint32, startTicks uint64) error {
+	if nsTgid == 0 || nsTgid > math.MaxInt32 {
+		return fmt.Errorf("%d is not a process's TGID", nsTgid)
+	}
+	if startTicks == 0 {
+		return fmt.Errorf("missing start time for process %d", nsTgid)
+	}
+	h.objectsMutex.RLock()
+	defer h.objectsMutex.RUnlock()
+	scoped := h.objects.ScopedPids
+	if scoped == nil {
+		return errors.New("the hooks are not loaded: scoped_pids is not open")
+	}
+	h.scopedMu.Lock()
+	defer h.scopedMu.Unlock()
+	if err := scoped.Update(nsTgid, startTicks, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("put process %d in scoped_pids: %w", nsTgid, err)
+	}
+	curStart, ok := scopedProcStartTicks(nsTgid)
+	if gone(nsTgid) || !ok || curStart != startTicks {
+		_ = scoped.Delete(nsTgid)
+		return fmt.Errorf("process %d exited before it could be added to scoped_pids", nsTgid)
+	}
+	return nil
+}
 
 // SetInstance puts the process tgid (a kernel TGID) in the instance of value
 // v (agent.InstanceValue), and every process it forks from then on
@@ -209,9 +251,10 @@ func hostPIDs() error {
 	return nil
 }
 
-// gone says the process tgid (initial PID namespace) has exited: reaped
-// (kill says ESRCH), or a zombie with no thread left, whose exit the kernel
-// has already run.
+// gone says the process tgid (in the caller's PID namespace — the initial PID
+// namespace for SetInstance, or the agent's own namespace for AddScopedPID)
+// has exited: reaped (kill says ESRCH), or a zombie with no thread left, whose
+// exit the kernel has already run.
 func gone(tgid uint32) bool {
 	return errors.Is(unix.Kill(int(tgid), 0), unix.ESRCH) || zombieProcess(tgid)
 }

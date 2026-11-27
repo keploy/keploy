@@ -683,10 +683,10 @@ func sweepGonePIDs(targets, excluded, starts, instances *ebpf.Map, only []uint32
 	return cleared, zombies, nil
 }
 
-// zombieProcess says the process tgid (initial PID namespace) has exited and
-// waits to be reaped: its leader is a zombie and has no thread left. A
-// leader that exited while other threads of its process live is a zombie
-// too, but the process is not: that one keeps no sweep going.
+// zombieProcess says the process tgid (in the caller's PID namespace) has
+// exited and waits to be reaped: its leader is a zombie and has no thread
+// left. A leader that exited while other threads of its process live is a
+// zombie too, but the process is not: that one keeps no sweep going.
 func zombieProcess(tgid uint32) bool {
 	if processState(tgid) != 'Z' {
 		return false
@@ -695,7 +695,7 @@ func zombieProcess(tgid uint32) bool {
 	return err == nil && len(tasks) == 1
 }
 
-// processState is the state letter of the process tgid (initial PID
+// processState is the state letter of the process tgid (in the caller's PID
 // namespace) in /proc/<tgid>/stat, 0 when it cannot be read.
 func processState(tgid uint32) byte {
 	b, err := os.ReadFile("/proc/" + strconv.FormatUint(uint64(tgid), 10) + "/stat")
@@ -707,6 +707,28 @@ func processState(tgid uint32) byte {
 		return 0
 	}
 	return b[i+2]
+}
+
+// scopedProcStartTicks reads field 22 (start_boottime in USER_HZ=100 ticks) of
+// /proc/<tgid>/stat in the caller's PID namespace.
+func scopedProcStartTicks(tgid uint32) (uint64, bool) {
+	b, err := os.ReadFile("/proc/" + strconv.FormatUint(uint64(tgid), 10) + "/stat")
+	if err != nil {
+		return 0, false
+	}
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 || i+2 >= len(b) {
+		return 0, false
+	}
+	fields := strings.Fields(string(b[i+2:]))
+	if len(fields) <= 19 {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil || v == 0 {
+		return 0, false
+	}
+	return v, true
 }
 
 // sweepIfExitsSkipped sweeps the PID maps (sweepGonePIDs) when k_process_exit
@@ -724,6 +746,11 @@ func (h *Hooks) sweepIfExitsSkipped() {
 		return
 	}
 	n, zombies, err := sweepPIDs(h.objects.TargetNamespacePids, h.objects.ExcludedPids, h.objects.PidStartTimes, h.objects.InstanceOfTgid, only)
+	// scoped_pids is keyed by agent-namespace TGID, so dead/recycled entries
+	// can be swept in any PID namespace (even when sweepPIDs returns errNotHostPIDs).
+	if scopedErr := sweepScopedPIDs(h.objects.ScopedPids, &h.scopedMu); scopedErr != nil {
+		h.skips.sweepAgain()
+	}
 	switch {
 	case err != nil && !errors.Is(err, errNotHostPIDs):
 		// A sweep a map's churn cut short (an iteration aborted): the
@@ -810,4 +837,40 @@ func classifyFlag(flags uint32, classifies bool) uint32 {
 		flags |= structs.FlagClassifies
 	}
 	return flags
+}
+
+// sweepScopedPIDs deletes exited or recycled agent-namespace TGIDs from
+// scoped_pids (left behind if k_process_exit was skipped). Because scoped_pids
+// is keyed by the agent's own PID namespace TGID and stores start_boottime
+// ticks, this works in both host and container PID namespaces. Holding mu and
+// re-checking the stored start ticks before Delete prevents deleting an entry
+// freshly inserted by AddScopedPID for a reused PID.
+func sweepScopedPIDs(scoped *ebpf.Map, mu *sync.Mutex) error {
+	if scoped == nil {
+		return nil
+	}
+	stale := map[uint32]uint64{}
+	var k uint32
+	var v uint64
+	it := scoped.Iterate()
+	for it.Next(&k, &v) {
+		curStart, ok := scopedProcStartTicks(k)
+		if gone(k) || !ok || curStart != v {
+			stale[k] = v
+		}
+	}
+	iterErr := it.Err()
+	if len(stale) > 0 {
+		if mu != nil {
+			mu.Lock()
+			defer mu.Unlock()
+		}
+		for k, oldStart := range stale {
+			var cur uint64
+			if err := scoped.Lookup(k, &cur); err == nil && cur == oldStart {
+				_ = scoped.Delete(k)
+			}
+		}
+	}
+	return iterErr
 }

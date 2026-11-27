@@ -326,6 +326,22 @@ type InstanceStamper interface {
 	InstanceRefusal() error
 }
 
+// PIDScoper is the optional extension implemented by hooks that support
+// opt-in per-process subtree interception (structs.FlagScopedPids): when
+// active, only processes whose agent-namespace TGID and start_boottime ticks
+// (/proc/<pid>/stat field 22) were added via AddScopedPID — and descendants
+// below them in the real_parent tree — are matched by pid_filter, leaving an
+// outer build toolchain outside interception.
+type PIDScoper interface {
+	// AddScopedPID opts the process nsTgid (in the agent's PID namespace) with
+	// startTicks (/proc/<pid>/stat field 22) and its real_parent descendants
+	// into interception.
+	AddScopedPID(nsTgid uint32, startTicks uint64) error
+	// ScopedPidsActive reports whether these hooks were loaded with
+	// structs.FlagScopedPids active in native mode.
+	ScopedPidsActive() bool
+}
+
 // InstanceLoss counts the processes an instance forked that the kernel
 // could not put in it (its membership map was full, or it could not read the
 // new process), so their connections carry no instance.
