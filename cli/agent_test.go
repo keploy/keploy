@@ -457,3 +457,36 @@ func ignoredSignals(t *testing.T, pid int) uint64 {
 	t.Fatalf("pid %d's status has no SigIgn line:\n%s", pid, b)
 	return 0
 }
+
+type errServiceFactory struct{ err error }
+
+func (f errServiceFactory) GetService(context.Context, string) (interface{}, error) {
+	return nil, f.err
+}
+
+type noopCmdConfigurator struct{}
+
+func (noopCmdConfigurator) AddFlags(*cobra.Command) error                       { return nil }
+func (noopCmdConfigurator) ValidateFlags(context.Context, *cobra.Command) error { return nil }
+func (noopCmdConfigurator) Validate(context.Context, *cobra.Command) error      { return nil }
+
+func TestAgentGetServiceErrorPreservesExitCode(t *testing.T) {
+	prev := utils.ErrCode
+	t.Cleanup(func() { utils.ErrCode = prev })
+	utils.ErrCode = 0
+
+	cmd := Agent(
+		context.Background(),
+		zap.NewNop(),
+		config.New(),
+		errServiceFactory{err: fmt.Errorf("low-latency preflight: %w", utils.ErrEnvironmentUnsupported)},
+		noopCmdConfigurator{},
+	)
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if utils.ErrCode != utils.ExitEnvironmentUnsupported {
+		t.Fatalf("utils.ErrCode = %d, want %d (ExitEnvironmentUnsupported)", utils.ErrCode, utils.ExitEnvironmentUnsupported)
+	}
+}

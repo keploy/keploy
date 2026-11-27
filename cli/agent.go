@@ -189,7 +189,7 @@ func Agent(ctx context.Context, logger *zap.Logger, conf *config.Config, service
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
-				utils.SetExitCodeOnce(utils.ExitKeployError)
+				utils.SetExitCodeOnce(utils.ExitCodeFor(err))
 				return nil
 			}
 
