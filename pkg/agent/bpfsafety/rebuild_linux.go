@@ -164,6 +164,12 @@ func resolveTrampolineTarget(info uapiProgInfo) (btfObjID, btfID uint32, funcNam
 				// Kernel module was unloaded; its trampoline cannot exist anymore.
 				return 0, 0, "", false, false, nil
 			}
+			if errors.Is(herr, unix.EPERM) || errors.Is(herr, unix.EACCES) {
+				// CAP_BPF-only agent (without CAP_SYS_ADMIN) cannot call
+				// BPF_BTF_GET_FD_BY_ID; signal fallback to world-readable
+				// /sys/kernel/btf/<mod> using pin-time target_funcs.
+				return objID, info.AttachBtfID, "", false, true, nil
+			}
 			return 0, 0, "", false, false, fmt.Errorf("open BTF handle %d: %w", objID, herr)
 		}
 		defer func() { _ = h.Close() }()
@@ -196,26 +202,27 @@ func resolveTrampolineTarget(info uapiProgInfo) (btfObjID, btfID uint32, funcNam
 }
 
 // resolveFuncNameInBTF resolves a kernel function name (vmlinux or loaded kernel
-// module such as tls.ko) to its (btfObjID, btfID) using /sys/kernel/btf/*.
-// Used on Linux 5.10..5.19 where bpf_prog_info omits attach_btf_id.
-func resolveFuncNameInBTF(funcName string) (btfObjID, btfID uint32, ok bool, err error) {
+// module such as tls.ko) to its (btfObjID, btfID, isModule) using
+// /sys/kernel/btf/*. Used on Linux 5.10..5.19 (where bpf_prog_info omits
+// attach_btf_id) and for CAP_BPF-only agents inspecting module targets on 6.0+.
+func resolveFuncNameInBTF(funcName string) (btfObjID, btfID uint32, isModule, ok bool, err error) {
 	if funcName == "" {
-		return 0, 0, false, nil
+		return 0, 0, false, false, nil
 	}
 	vmlinux, err := loadKernelBTF()
 	if err != nil {
-		return 0, 0, false, fmt.Errorf("load kernel BTF: %w", err)
+		return 0, 0, false, false, fmt.Errorf("load kernel BTF: %w", err)
 	}
 	var fn *btf.Func
 	if err := vmlinux.TypeByName(funcName, &fn); err == nil && fn != nil {
 		if id, ierr := vmlinux.TypeID(fn); ierr == nil && id != 0 {
-			return 1, uint32(id), true, nil
+			return 1, uint32(id), false, true, nil
 		}
 	}
-	// Check loaded kernel modules (e.g. tls.ko for tls_sw_sendmsg/recvmsg).
+	// Check loaded kernel modules (e.g. tls.ko for tls_sw_sendmsg/recvmsg/tls_init).
 	entries, rerr := os.ReadDir("/sys/kernel/btf")
 	if rerr != nil {
-		return 0, 0, false, nil
+		return 0, 0, false, false, nil
 	}
 	for _, e := range entries {
 		modName := e.Name()
@@ -229,16 +236,44 @@ func resolveFuncNameInBTF(funcName string) (btfObjID, btfID uint32, ok bool, err
 		var mfn *btf.Func
 		if err := modSpec.TypeByName(funcName, &mfn); err == nil && mfn != nil {
 			if id, ierr := modSpec.TypeID(mfn); ierr == nil && id != 0 {
-				return 0, uint32(id), true, nil
+				return 0, uint32(id), true, true, nil
 			}
 		}
 	}
-	return 0, 0, false, nil
+	return 0, 0, false, false, nil
 }
 
 type dirTargets struct {
-	keyToFunc map[uint64]string
-	funcs     map[string]struct{}
+	keyToFunc   map[uint64]string
+	modIDToFunc map[uint32]string // module BTF type ID -> funcName (matches any module obj>=2 in kallsyms)
+	funcs       map[string]struct{}
+}
+
+func (d dirTargets) modBTFIDSet() map[uint32]struct{} {
+	if len(d.modIDToFunc) == 0 {
+		return nil
+	}
+	out := make(map[uint32]struct{}, len(d.modIDToFunc))
+	for id := range d.modIDToFunc {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+func (d dirTargets) funcForKey(k uint64) (string, bool) {
+	if fn, ok := d.keyToFunc[k]; ok && fn != "" {
+		return fn, true
+	}
+	if len(d.modIDToFunc) > 0 && (k>>32) != 1 {
+		if fn, ok := d.modIDToFunc[uint32(k&0x7fffffff)]; ok && fn != "" {
+			return fn, true
+		}
+	}
+	return "", false
+}
+
+func (d dirTargets) hasKallsymsMatchers() bool {
+	return len(d.keyToFunc) > 0 || len(d.modIDToFunc) > 0
 }
 
 // inspectDirTrampolineTargets scans every pinned program in a dead grace
@@ -251,8 +286,9 @@ type dirTargets struct {
 // for an unresolved Tracing program.
 func (r *graceReaper) inspectDirTrampolineTargets(dirPath string) (dirTargets, error) {
 	out := dirTargets{
-		keyToFunc: make(map[uint64]string),
-		funcs:     make(map[string]struct{}),
+		keyToFunc:   make(map[uint64]string),
+		modIDToFunc: make(map[uint32]string),
+		funcs:       make(map[string]struct{}),
 	}
 	if !autoStateStore.isBPFFS(autoStateStore{}, dirPath) {
 		return out, nil
@@ -305,18 +341,22 @@ func (r *graceReaper) inspectDirTrampolineTargets(dirPath string) (dirTargets, e
 		}
 	}
 
-	// On pre-6.0 kernels (5.10..5.19), bpf_prog_info omits attach_btf_id. Use
-	// the target kernel function names recorded at pin time and resolve their
-	// BTF IDs directly against /sys/kernel/btf/*.
+	// On pre-6.0 kernels (5.10..5.19) or CAP_BPF-only module targets, use the
+	// target kernel function names recorded at pin time and resolve their BTF
+	// IDs directly against /sys/kernel/btf/*.
 	if sawUnresolvedPre60 || len(recordedFuncs) > 0 {
 		for _, fn := range recordedFuncs {
 			if fn == "" {
 				continue
 			}
 			out.funcs[fn] = struct{}{}
-			if objID, btfID, ok, berr := resolveFuncNameInBTF(fn); berr == nil && ok {
-				for _, k := range trampolineCandidateKeys(objID, btfID) {
-					out.keyToFunc[k] = fn
+			if objID, btfID, isMod, ok, berr := resolveFuncNameInBTF(fn); berr == nil && ok {
+				if isMod {
+					out.modIDToFunc[btfID] = fn
+				} else {
+					for _, k := range trampolineCandidateKeys(objID, btfID) {
+						out.keyToFunc[k] = fn
+					}
 				}
 			}
 		}
@@ -372,9 +412,15 @@ func (r *graceReaper) forceRebuildTarget(funcName string) error {
 		noop = p
 	}
 
+	if r.onBeforeNoopAttach != nil {
+		r.onBeforeNoopAttach()
+	}
 	l, err := attachPinnedReaperNoop(noop)
 	if err != nil {
 		return fmt.Errorf("attach noop fentry/%s: %w", funcName, err)
+	}
+	if r.onBeforeNoopClose != nil {
+		r.onBeforeNoopClose()
 	}
 	_ = l.Close()
 	return nil

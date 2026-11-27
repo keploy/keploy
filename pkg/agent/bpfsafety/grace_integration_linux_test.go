@@ -5,6 +5,7 @@ package bpfsafety
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -525,6 +526,11 @@ func TestOnKernelAnchorCalmRemovalDetectsStaleAfterENOMEM(t *testing.T) {
 	var failFD int
 	hooks := &anchorCleanupHooks{
 		beforeLinkClose: func(funcName string) {
+			// On Linux 5.18+, bpffs frees unlinked pin inodes via RCU; wait
+			// 1.5s so the pin's reference drops FIRST and l.Close() on this
+			// failslab-armed thread deterministically drops the final link ref
+			// under both KVM and TCG.
+			time.Sleep(1500 * time.Millisecond)
 			runtime.LockOSThread()
 			tidFailPath := fmt.Sprintf("/proc/self/task/%d/make-it-fail", unix.Gettid())
 			fd, oerr := unix.Open(tidFailPath, unix.O_WRONLY, 0)
@@ -552,6 +558,17 @@ func TestOnKernelAnchorCalmRemovalDetectsStaleAfterENOMEM(t *testing.T) {
 	}
 
 	err = cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 3*time.Second, hooks)
+	if !kernelHasDynamicTrampImage() {
+		// On Linux <5.12 (static trampoline page), CleanupAnchors MUST refuse
+		// to detach anchors on a running node and keep both link + prog pinned.
+		if err == nil || !strings.Contains(err.Error(), "Linux <5.12") {
+			t.Fatalf("expected Linux <5.12 refusal on static trampoline kernel, got %v", err)
+		}
+		if _, serr := os.Stat(progPath); serr != nil {
+			t.Fatalf("anchor prog %s was UNPINNED on <5.12: %v", progPath, serr)
+		}
+		return
+	}
 	if err == nil || !strings.Contains(err.Error(), "drain and reboot") {
 		t.Fatalf("expected drain-and-reboot stale error when anchor detach hits ENOMEM, got %v", err)
 	}
@@ -1049,6 +1066,570 @@ func TestOnKernelAnchorPreventsLastLinkENOMEM(t *testing.T) {
 		t.Fatalf("prog %d still loaded after reaper unpinned it", progID)
 	}
 	sendDgrams(100)
+}
+
+func injectFailslabClose(t *testing.T, fn func()) {
+	t.Helper()
+	failslabDir := "/sys/kernel/debug/failslab"
+	if _, err := os.Stat(failslabDir); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y (%s missing: %v)", failslabDir, err)
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	tidFailPath := fmt.Sprintf("/proc/self/task/%d/make-it-fail", unix.Gettid())
+	failFD, err := unix.Open(tidFailPath, unix.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", tidFailPath, err)
+	}
+	_ = os.WriteFile(filepath.Join(failslabDir, "task-filter"), []byte("Y"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "ignore-gfp-wait"), []byte("N"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("100"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "interval"), []byte("1"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("20"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "space"), []byte("0"), 0o644)
+	_, _ = unix.Pwrite(failFD, []byte("1\n"), 0)
+	fn()
+	_, _ = unix.Pwrite(failFD, []byte("0\n"), 0)
+	_ = unix.Close(failFD)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+}
+
+func makeCountingFexitProg(t *testing.T, name, target string, hitMap *ebpf.Map) *ebpf.Program {
+	t.Helper()
+	ins := asm.Instructions{asm.Mov.Imm(asm.R0, 0), asm.Return()}
+	if hitMap != nil {
+		ins = asm.Instructions{
+			asm.StoreImm(asm.RFP, -4, 0, asm.Word),
+			asm.LoadMapPtr(asm.R1, hitMap.FD()),
+			asm.Mov.Reg(asm.R2, asm.RFP),
+			asm.Add.Imm(asm.R2, -4),
+			asm.FnMapLookupElem.Call(),
+			asm.JEq.Imm(asm.R0, 0, "done"),
+			asm.LoadMem(asm.R1, asm.R0, 0, asm.DWord),
+			asm.Add.Imm(asm.R1, 1),
+			asm.StoreMem(asm.R0, 0, asm.R1, asm.DWord),
+			asm.Mov.Imm(asm.R0, 0).WithSymbol("done"),
+			asm.Return(),
+		}
+	}
+	p, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Name: name, Type: ebpf.Tracing, AttachType: ebpf.AttachTraceFExit,
+		AttachTo: target, License: "GPL", Instructions: ins,
+	})
+	if err != nil {
+		t.Fatalf("load fexit/%s: %v", target, err)
+	}
+	return p
+}
+
+func sendUnixDgramsHelper(t *testing.T, n int) {
+	t.Helper()
+	srv, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("socket srv: %v", err)
+	}
+	defer func() { _ = unix.Close(srv) }()
+	cli, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatalf("socket cli: %v", err)
+	}
+	defer func() { _ = unix.Close(cli) }()
+	sp := filepath.Join(t.TempDir(), "u.sock")
+	sa := &unix.SockaddrUnix{Name: sp}
+	if err := unix.Bind(srv, sa); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	buf := make([]byte, 8)
+	for i := 0; i < n; i++ {
+		if err := unix.Sendto(cli, []byte("x"), 0, sa); err != nil {
+			t.Fatalf("sendto: %v", err)
+		}
+		_, _, _ = unix.Recvfrom(srv, buf, 0)
+	}
+}
+
+func releaseShutdownLockFDs() {
+	stateMu.Lock()
+	for _, fd := range unpinnedLockFDs {
+		_ = unix.Close(fd)
+	}
+	unpinnedLockFDs = nil
+	stateMu.Unlock()
+}
+
+// TestOnKernelCleanSnapshotRace reproduces a concurrent agent attaching on the
+// same kernel function during GracefulShutdown while this agent's link close
+// hits -ENOMEM. Because GracefulShutdown snapshots AFTER all detach hooks
+// (union of pre and post), the newly built stale image IS captured, the reaper
+// forces a rebuild instead of prematurely unpinning, and subsequent traffic
+// completes with zero panic across 5.10, 5.15, 5.19, and 6.12.
+func TestOnKernelCleanSnapshotRace(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if _, err := os.Stat("/sys/kernel/debug/failslab"); err != nil {
+		t.Skip("requires CONFIG_FAILSLAB=y")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-cleanrace-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 5*time.Second, nil)
+		_ = os.RemoveAll(root)
+	})
+
+	hitMap, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hitMap.Close() }()
+
+	p := makeCountingFexitProg(t, "cr_prog", "unix_dgram_sendmsg", hitMap)
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		_ = p.Close()
+		t.Fatal(err)
+	}
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	l, err := AttachTracing(p, "cleanrace", "unix_dgram_sendmsg", "p")
+	if err != nil {
+		_ = p.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatal(err)
+	}
+
+	other := makeCountingFexitProg(t, "cr_other", "unix_dgram_sendmsg", nil)
+	defer func() { _ = other.Close() }()
+	var lo link.Link
+	defer func() {
+		if lo != nil {
+			_ = lo.Close()
+		}
+	}()
+
+	RegisterDetachHook(func() {
+		// Concurrent surge agent attaches on the same function right BEFORE our
+		// link close fails with -ENOMEM!
+		var aerr error
+		lo, aerr = link.AttachTracing(link.TracingOptions{Program: other})
+		if aerr != nil {
+			t.Errorf("concurrent attach: %v", aerr)
+		}
+		injectFailslabClose(t, func() { _ = l.Close() })
+	})
+
+	sendUnixDgramsHelper(t, 10)
+	var c0 uint64
+	_ = hitMap.Lookup(uint32(0), &c0)
+
+	GracefulShutdown(context.Background(), zap.NewNop())
+	_ = p.Close()
+	releaseShutdownLockFDs()
+
+	time.Sleep(300 * time.Millisecond)
+	sendUnixDgramsHelper(t, 50)
+	var c1 uint64
+	_ = hitMap.Lookup(uint32(0), &c1)
+	if c1 <= c0 {
+		t.Fatalf("expected stale image to keep calling prog after ENOMEM close (c0=%d c1=%d)", c0, c1)
+	}
+
+	// Wait past the 2s clean settle window so the reaper forces a rebuild for
+	// the surviving post-detach image and reaps only once the stale image clears.
+	time.Sleep(2500 * time.Millisecond)
+	ro, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { ro.reaper.closeNoopCache(); _ = unix.Close(ro.lockFD) }()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		ro.reaper.round()
+		if _, err := os.Stat(owner.dir); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if _, err := os.Stat(owner.dir); !os.IsNotExist(err) {
+		t.Fatalf("owner.dir still exists after clean-race forced rebuild + reap")
+	}
+	time.Sleep(500 * time.Millisecond)
+	sendUnixDgramsHelper(t, 200)
+}
+
+// TestOnKernelCleanSnapshotTwoProgsSameFunc reproduces a single agent detaching
+// two programs on the same kernel function (e.g. fentry+fexit or primary+backup)
+// where the first close succeeds cleanly (building a new trampoline image still
+// calling prog 2) and the second close hits -ENOMEM.
+func TestOnKernelCleanSnapshotTwoProgsSameFunc(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if _, err := os.Stat("/sys/kernel/debug/failslab"); err != nil {
+		t.Skip("requires CONFIG_FAILSLAB=y")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-twoprog-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 5*time.Second, nil)
+		_ = os.RemoveAll(root)
+	})
+
+	hitMap, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hitMap.Close() }()
+
+	p1 := makeCountingFexitProg(t, "tp_first", "unix_dgram_sendmsg", nil)
+	p2 := makeCountingFexitProg(t, "tp_second", "unix_dgram_sendmsg", hitMap)
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		_ = p1.Close()
+		_ = p2.Close()
+		t.Fatal(err)
+	}
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	l1, err := AttachTracing(p1, "twoprog", "unix_dgram_sendmsg", "b")
+	if err != nil {
+		_ = p1.Close()
+		_ = p2.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatal(err)
+	}
+	l2, err := AttachTracing(p2, "twoprog", "unix_dgram_sendmsg", "p")
+	if err != nil {
+		_ = l1.Close()
+		_ = p1.Close()
+		_ = p2.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatal(err)
+	}
+
+	RegisterDetachHook(func() {
+		_ = l1.Close() // clean close builds a NEW trampoline image still calling p2!
+		injectFailslabClose(t, func() { _ = l2.Close() })
+	})
+
+	sendUnixDgramsHelper(t, 10)
+	var c0 uint64
+	_ = hitMap.Lookup(uint32(0), &c0)
+
+	GracefulShutdown(context.Background(), zap.NewNop())
+	_ = p1.Close()
+	_ = p2.Close()
+	releaseShutdownLockFDs()
+
+	time.Sleep(300 * time.Millisecond)
+	sendUnixDgramsHelper(t, 50)
+	var c1 uint64
+	_ = hitMap.Lookup(uint32(0), &c1)
+	if c1 <= c0 {
+		t.Fatalf("expected stale image to keep calling p2 after second-link ENOMEM (c0=%d c1=%d)", c0, c1)
+	}
+
+	time.Sleep(2500 * time.Millisecond)
+	ro, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { ro.reaper.closeNoopCache(); _ = unix.Close(ro.lockFD) }()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		ro.reaper.round()
+		if _, err := os.Stat(owner.dir); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if _, err := os.Stat(owner.dir); !os.IsNotExist(err) {
+		t.Fatalf("owner.dir still exists after two-prog clean-race rebuild + reap")
+	}
+	time.Sleep(500 * time.Millisecond)
+	sendUnixDgramsHelper(t, 200)
+}
+
+// TestOnKernelUnresolvedNameFailsClosed proves that on Linux 5.10..5.19 (where
+// bpf_prog_info omits attach_btf_id), a Tracing program whose caller passed a
+// non-kernel-symbol name fails closed and is NEVER prematurely unpinned (kills M13).
+func TestOnKernelUnresolvedNameFailsClosed(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-unres-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	p := makeCountingFexitProg(t, "unres_p", "unix_stream_connect", nil)
+	info, err := queryProgInfo(p.FD())
+	if err != nil {
+		_ = p.Close()
+		t.Fatal(err)
+	}
+	if info.AttachBtfID != 0 {
+		_ = p.Close()
+		t.Skip("Linux 6.0+ populates attach_btf_id directly; pre-6.0 unresolved fail-closed check applies to 5.10..5.19")
+	}
+
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		_ = p.Close()
+		t.Fatal(err)
+	}
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	l, err := AttachTracing(p, "unres_test", "not_a_real_kernel_func_name", "p")
+	if err != nil {
+		_ = p.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatal(err)
+	}
+	_ = l.Close()
+	_ = p.Close()
+	_ = unix.Close(owner.lockFD)
+	stateMu.Lock()
+	activeOwner = nil
+	stateMu.Unlock()
+
+	ro, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { ro.reaper.closeNoopCache(); _ = unix.Close(ro.lockFD) }()
+
+	for i := 0; i < 4; i++ {
+		ro.reaper.round()
+		time.Sleep(250 * time.Millisecond)
+	}
+	if _, err := os.Stat(owner.dir); err != nil {
+		t.Fatalf("unresolved pre-6.0 Tracing dir was prematurely reaped (M13 fail-open!): %v", err)
+	}
+}
+
+// TestOnKernelModuleTargetDeadOwnerENOMEM proves that a kernel-module tracing
+// target (tls.ko `tls_init`) on Linux 5.11..5.19 matches /proc/kallsyms via
+// low-31-bit module BTF type ID, forces a rebuild via pinned no-op when
+// unlink fails with -ENOMEM, and reaps cleanly with zero panic.
+func TestOnKernelModuleTargetDeadOwnerENOMEM(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if _, err := os.Stat("/sys/kernel/debug/failslab"); err != nil {
+		t.Skip("requires CONFIG_FAILSLAB=y")
+	}
+	if _, err := os.Stat("/tls.ko"); err != nil {
+		t.Skipf("/tls.ko not bundled for this kernel: %v", err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	img, err := os.ReadFile("/tls.ko")
+	if err != nil {
+		t.Fatalf("read /tls.ko: %v", err)
+	}
+	if err := unix.InitModule(img, ""); err != nil && !errors.Is(err, unix.EEXIST) {
+		t.Fatalf("init_module tls: %v", err)
+	}
+	if _, err := os.Stat("/sys/kernel/btf/tls"); err != nil {
+		t.Skipf("kernel has no /sys/kernel/btf/tls: %v", err)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-mod-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 5*time.Second, nil)
+		_ = os.RemoveAll(root)
+	})
+
+	callTLSInit := func(n int) {
+		for i := 0; i < n; i++ {
+			fd, serr := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
+			if serr != nil {
+				t.Fatal(serr)
+			}
+			_ = unix.SetsockoptString(fd, unix.IPPROTO_TCP, unix.TCP_ULP, "tls")
+			_ = unix.Close(fd)
+		}
+	}
+
+	hitMap, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hitMap.Close() }()
+
+	p := makeCountingFexitProg(t, "mod_tls", "tls_init", hitMap)
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		_ = p.Close()
+		t.Fatal(err)
+	}
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	l, err := AttachTracing(p, "mod_test", "tls_init", "p")
+	if err != nil {
+		_ = p.Close()
+		_ = unix.Close(owner.lockFD)
+		t.Fatalf("AttachTracing(tls_init): %v", err)
+	}
+	callTLSInit(10)
+	var c0 uint64
+	_ = hitMap.Lookup(uint32(0), &c0)
+	if c0 < 10 {
+		t.Fatalf("before detach tls_init hits = %d, want >= 10", c0)
+	}
+
+	injectFailslabClose(t, func() { _ = l.Close() })
+	_ = p.Close()
+	_ = unix.Close(owner.lockFD)
+	stateMu.Lock()
+	activeOwner = nil
+	stateMu.Unlock()
+
+	time.Sleep(300 * time.Millisecond)
+	callTLSInit(50)
+	var c1 uint64
+	_ = hitMap.Lookup(uint32(0), &c1)
+	if c1 <= c0 {
+		t.Fatalf("expected stale tls.ko trampoline to keep calling prog (c0=%d c1=%d)", c0, c1)
+	}
+
+	ro, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { ro.reaper.closeNoopCache(); _ = unix.Close(ro.lockFD) }()
+
+	ro.reaper.round() // Pass 1
+	ro.reaper.round() // Pass 2: MUST match tls.ko module key in kallsyms + force-rebuild (NOT reap with 0 no-ops!)
+	if got := countPinnedProgs(ro.dir); got == 0 {
+		t.Fatalf("expected reaper no-op pinned in %s for tls_init module target, found 0", ro.dir)
+	}
+	time.Sleep(300 * time.Millisecond)
+	callTLSInit(50)
+	var c2 uint64
+	_ = hitMap.Lookup(uint32(0), &c2)
+	if c2 != c1 {
+		t.Fatalf("stale tls.ko trampoline STILL called prog after rebuild: c1=%d c2=%d", c1, c2)
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		ro.reaper.round()
+		if _, err := os.Stat(owner.dir); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if _, err := os.Stat(owner.dir); !os.IsNotExist(err) {
+		t.Fatalf("owner.dir still exists after tls.ko rebuild + kallsyms clear")
+	}
+	time.Sleep(500 * time.Millisecond)
+	callTLSInit(100)
+}
+
+// TestOnKernelUnpinFailedAttach proves that if link.AttachTracing fails,
+// AttachTracing removes the unused bpffs pin created by PinBeforeAttach (kills M15).
+func TestOnKernelUnpinFailedAttach(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-unpin-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(owner.lockFD) }()
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	// Load a valid non-tracing Kprobe program: prog.Pin succeeds, then
+	// link.AttachTracing fails -> AttachTracing MUST unpin the unused file!
+	kprog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Name:    "unpin_fail_kp",
+		Type:    ebpf.Kprobe,
+		License: "GPL",
+		Instructions: asm.Instructions{
+			asm.Mov.Imm(asm.R0, 0),
+			asm.Return(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("load kprobe: %v", err)
+	}
+	defer func() { _ = kprog.Close() }()
+
+	l, err := AttachTracing(kprog, "unpin_test", "not_tracing", "p")
+	if err == nil {
+		_ = l.Close()
+		t.Fatal("expected AttachTracing on Kprobe program to fail")
+	}
+	if got := countPinnedProgs(owner.dir); got != 0 {
+		t.Fatalf("expected 0 leaked pins after failed AttachTracing (M15!), found %d", got)
+	}
 }
 
 var _ = context.Background

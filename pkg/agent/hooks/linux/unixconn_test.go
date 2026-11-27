@@ -216,3 +216,22 @@ func TestUnixReportsWithNoPeerAreJudgedByWhoIsBoundToThePath(t *testing.T) {
 		t.Fatalf("snapshot %+v, want the unread address named", got)
 	}
 }
+
+func TestUnixFexitAttachTargetUsesKernelAttachTo(t *testing.T) {
+	spec, err := loadUnixconn()
+	if err != nil {
+		t.Fatalf("loadUnixconn: %v", err)
+	}
+	want := map[string]string{
+		"k_unix_stream_connect": "unix_stream_connect",
+		"k_unix_dgram_connect":  "unix_dgram_connect",
+		"k_unix_dgram_sendmsg":  "unix_dgram_sendmsg",
+	}
+	for _, progName := range unixFexitPrograms {
+		got := unixFexitAttachTarget(spec, progName)
+		if got != want[progName] {
+			t.Fatalf("unixFexitAttachTarget(spec, %q) = %q, want %q (must pass real kernel AttachTo symbol, not prog name)", progName, got, want[progName])
+		}
+	}
+	clearBPFMapAllKeys(nil) // nil-safe
+}

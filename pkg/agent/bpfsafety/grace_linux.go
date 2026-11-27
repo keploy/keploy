@@ -628,11 +628,13 @@ func attachPinnedAnchorNoop(prog *ebpf.Program) (link.Link, error) {
 	return link.AttachTracing(link.TracingOptions{Program: prog})
 }
 
-// GracefulShutdown closes the attach gate, runs all disarm hooks FIRST (so any
-// prog caught in a stale trampoline image does nothing), snapshots live
-// /proc/kallsyms `bpf_trampoline_<key>` addresses into the grace directory,
-// closes all tracing links synchronously and fast, cancels the background
-// reaper, and returns IMMEDIATELY without blocking process exit.
+// GracefulShutdown closes the attach gate, cancels and drains the background
+// reaper BEFORE detaching (so the reaper cannot rebuild a trampoline during
+// link close), runs all disarm hooks FIRST (so any prog caught in a stale
+// trampoline image does nothing), closes all tracing links synchronously and
+// fast, snapshots live /proc/kallsyms `bpf_trampoline_<key>` addresses (the
+// union of before-detach and after-detach so images created during teardown
+// are never missed), and returns IMMEDIATELY without blocking process exit.
 func GracefulShutdown(_ context.Context, logger *zap.Logger) {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -650,30 +652,44 @@ func GracefulShutdown(_ context.Context, logger *zap.Logger) {
 
 	utils.TeardownStep()
 
-	// 1. Disarm filter/targeting maps BEFORE closing any tracing links.
+	// 1. Cancel and drain the background reaper BEFORE detaching any links so
+	//    it cannot trigger a trampoline rebuild mid-teardown.
+	if owner != nil {
+		if owner.reaper != nil {
+			owner.reaper.stopAndWait(owner.reaperCancel)
+			owner.reaper.closeNoopCache()
+		} else if owner.reaperCancel != nil {
+			owner.reaperCancel()
+		}
+	}
+
+	// 2. Disarm filter/targeting maps BEFORE closing any tracing links.
 	for _, fn := range disarms {
 		fn()
 	}
 
-	// 2. Snapshot live /proc/kallsyms trampoline image addresses BEFORE closing links
-	//    so the cross-process reaper knows the exact images that could call our progs.
+	// 3. Capture pre-detach trampoline image addresses (in memory only).
+	var preRefs []trampImageRef
 	if owner != nil {
-		owner.snapshotBeforeDetach(logger)
+		preRefs = owner.captureKallsymsSnapshot()
 	}
 
-	// 3. Detach every registered tracing-link holder synchronously and fast.
+	// 4. Detach every registered tracing-link holder synchronously and fast.
 	for _, fn := range hooks {
 		fn()
 		utils.TeardownStep()
 	}
 
+	// 5. Capture post-detach trampoline image addresses AFTER all detach hooks
+	//    complete and persist the union (pre ∪ post). Any trampoline image built
+	//    during teardown (by a concurrent agent, an earlier link close in this
+	//    process, etc.) that could still call one of our progs is guaranteed to
+	//    be present in postRefs, while preRefs preserves any image already in
+	//    RCU-tasks teardown.
 	if owner != nil {
-		if owner.reaperCancel != nil {
-			owner.reaperCancel()
-		}
-		if owner.reaper != nil {
-			owner.reaper.closeNoopCache()
-		}
+		postRefs := owner.captureKallsymsSnapshot()
+		owner.persistCleanSnapshot(mergeSnapshotRefs(preRefs, postRefs), logger)
+
 		// Keep owner.lockFD open until process exit so the kernel releases flock
 		// only once this process is truly gone.
 		stateMu.Lock()
@@ -879,20 +895,21 @@ func hasMountInfoBPFFS(mountinfoPath, target string) (bool, error) {
 }
 
 type graceOwner struct {
-	root            string
-	dir             string
-	self            string
-	lockFD          int
-	seq             atomic.Uint64
-	keysMu          sync.Mutex
-	attachedKeys    map[uint64]struct{}
-	recordedTargets map[string]bool
-	pinPaths        map[*ebpf.Program]string
-	anchorMu        sync.Mutex
-	anchoredFuncs   map[string]bool
-	logger          *zap.Logger
-	reaper          *graceReaper
-	reaperCancel    context.CancelFunc
+	root              string
+	dir               string
+	self              string
+	lockFD            int
+	seq               atomic.Uint64
+	keysMu            sync.Mutex
+	attachedKeys      map[uint64]struct{}
+	attachedModBTFIDs map[uint32]struct{}
+	recordedTargets   map[string]bool
+	pinPaths          map[*ebpf.Program]string
+	anchorMu          sync.Mutex
+	anchoredFuncs     map[string]bool
+	logger            *zap.Logger
+	reaper            *graceReaper
+	reaperCancel      context.CancelFunc
 }
 
 func (g *graceOwner) unpinFailed(prog *ebpf.Program) {
@@ -942,6 +959,7 @@ func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) e
 	var (
 		resolvedFunc string
 		candKeys     []uint64
+		modBTFID     uint32
 	)
 	if info, err := queryProgInfo(prog.FD()); err == nil {
 		objID, btfID, fnName, isTramp, pre60, rerr := resolveTrampolineTarget(info)
@@ -949,9 +967,16 @@ func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) e
 			resolvedFunc = fnName
 			candKeys = trampolineCandidateKeys(objID, btfID)
 		} else if pre60 && name != "" {
-			if objID, btfID, ok, berr := resolveFuncNameInBTF(name); berr == nil && ok {
+			if bObjID, bID, isMod, ok, berr := resolveFuncNameInBTF(name); berr == nil && ok {
 				resolvedFunc = name
-				candKeys = trampolineCandidateKeys(objID, btfID)
+				if isMod {
+					modBTFID = bID
+					if info.AttachBtfObjID > 1 {
+						candKeys = trampolineCandidateKeys(info.AttachBtfObjID, bID)
+					}
+				} else {
+					candKeys = trampolineCandidateKeys(bObjID, bID)
+				}
 			}
 		}
 	}
@@ -979,6 +1004,12 @@ func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) e
 			g.attachedKeys[k] = struct{}{}
 		}
 	}
+	if modBTFID != 0 {
+		if g.attachedModBTFIDs == nil {
+			g.attachedModBTFIDs = make(map[uint32]struct{})
+		}
+		g.attachedModBTFIDs[modBTFID] = struct{}{}
+	}
 	g.keysMu.Unlock()
 
 	if resolvedFunc != "" {
@@ -992,31 +1023,41 @@ func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) e
 	return nil
 }
 
-func (g *graceOwner) snapshotBeforeDetach(logger *zap.Logger) {
+func (g *graceOwner) captureKallsymsSnapshot() []trampImageRef {
 	g.keysMu.Lock()
 	keys := make(map[uint64]struct{}, len(g.attachedKeys))
 	for k := range g.attachedKeys {
 		keys[k] = struct{}{}
 	}
+	modIDs := make(map[uint32]struct{}, len(g.attachedModBTFIDs))
+	for id := range g.attachedModBTFIDs {
+		modIDs[id] = struct{}{}
+	}
 	g.keysMu.Unlock()
-	if len(keys) == 0 || g.reaper == nil {
-		return
+	if (len(keys) == 0 && len(modIDs) == 0) || g.reaper == nil {
+		return nil
 	}
 	if g.reaper.dynamicTrampImageFn != nil && !g.reaper.dynamicTrampImageFn() {
-		return
+		return nil
 	}
 	if !g.reaper.kallsymsSysctlFn() {
-		return
+		return nil
 	}
 	tramps, visible, err := g.reaper.readKallsymsFn()
 	if err != nil || !visible {
+		return nil
+	}
+	return snapshotKeysFromKallsyms(tramps, keys, modIDs)
+}
+
+func (g *graceOwner) persistCleanSnapshot(refs []trampImageRef, logger *zap.Logger) {
+	if g == nil || g.reaper == nil {
 		return
 	}
-	refs := snapshotKeysFromKallsyms(tramps, keys)
 	if len(refs) == 0 || len(refs) > maxSnapshotEntries {
-		// If we had attached keys but saw zero kallsyms entries (e.g. bpf_jit_kallsyms
-		// off or hidden), do NOT persist an empty clean snapshot — let the reaper
-		// take the safe dead-owner / BPF_ENABLE_STATS path.
+		// If we had attached keys but saw zero kallsyms entries (or exceeded
+		// cap), do NOT persist an empty clean snapshot — let the reaper take
+		// the safe dead-owner pass-2 snapshot + forced rebuild path.
 		return
 	}
 	if err := g.reaper.store.writeSnapshot(g.dir, refs); err != nil {
@@ -1169,8 +1210,14 @@ type graceReaper struct {
 	dynamicTrampImageFn func() bool
 	kallsymsSysctlFn    func() bool
 	readKallsymsFn      func() (map[uint64][]uint64, bool, error)
+	onBeforeNoopAttach  func()
+	onBeforeNoopClose   func()
 	noopMu              sync.Mutex
 	noopCache           map[string]*ebpf.Program
+	warnedMu            sync.Mutex
+	warnedUnresolved    map[string]bool
+	doneMu              sync.Mutex
+	doneCh              chan struct{}
 }
 
 func newGraceReaper(root, self string, reapInterval time.Duration, logger *zap.Logger) *graceReaper {
@@ -1193,6 +1240,7 @@ func newGraceReaper(root, self string, reapInterval time.Duration, logger *zap.L
 		dynamicTrampImageFn: kernelHasDynamicTrampImage,
 		kallsymsSysctlFn:    kallsymsSysctlAllowsJIT,
 		readKallsymsFn:      func() (map[uint64][]uint64, bool, error) { return parseKallsymsTrampolines(kallsymsPath) },
+		warnedUnresolved:    make(map[string]bool),
 	}
 	r.inspectTargetsFn = r.inspectDirTrampolineTargets
 	r.rebuildTargetFn = r.forceRebuildTarget
@@ -1201,7 +1249,12 @@ func newGraceReaper(root, self string, reapInterval time.Duration, logger *zap.L
 }
 
 func (r *graceReaper) start(ctx context.Context) {
+	done := make(chan struct{})
+	r.doneMu.Lock()
+	r.doneCh = done
+	r.doneMu.Unlock()
 	go func() {
+		defer close(done)
 		r.round()
 		tick := time.NewTicker(r.reapInterval)
 		defer tick.Stop()
@@ -1214,6 +1267,38 @@ func (r *graceReaper) start(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// stopAndWait cancels the reaper context and waits for any in-flight round()
+// to finish so the reaper can never perform a trampoline rebuild while
+// GracefulShutdown is detaching links.
+func (r *graceReaper) stopAndWait(cancel context.CancelFunc) {
+	if cancel != nil {
+		cancel()
+	}
+	r.doneMu.Lock()
+	done := r.doneCh
+	r.doneMu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
+func (r *graceReaper) warnOnceUnresolved(dirPath string, err error) {
+	r.warnedMu.Lock()
+	if r.warnedUnresolved == nil {
+		r.warnedUnresolved = make(map[string]bool)
+	}
+	already := r.warnedUnresolved[dirPath]
+	r.warnedUnresolved[dirPath] = true
+	r.warnedMu.Unlock()
+	if !already {
+		r.logger.Warn("bpf-safety: failed to inspect dead grace dir targets; keeping pins (logged once per directory)",
+			zap.String("graceDir", dirPath), zap.Error(err))
+	} else {
+		r.logger.Debug("bpf-safety: dead grace dir targets remain unresolved; keeping pins",
+			zap.String("graceDir", dirPath), zap.Error(err))
+	}
 }
 
 // isManagedGraceDirName reports whether a directory entry under keploy-grace/
@@ -1357,7 +1442,7 @@ func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms 
 		// (fails closed if any Tracing/LSM program has no resolvable target).
 		targets, terr := r.inspectTargetsFn(dirPath)
 		if terr != nil {
-			r.logger.Warn("bpf-safety: failed to inspect dead grace dir targets; keeping pins", zap.String("graceDir", dirPath), zap.Error(terr))
+			r.warnOnceUnresolved(dirPath, terr)
 			return false
 		}
 		fnSet := targets.allFuncs()
@@ -1366,12 +1451,12 @@ func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms 
 		}
 
 		tramps, kOK := loadKallsyms()
-		if kOK && len(targets.keyToFunc) > 0 {
+		if kOK && targets.hasKallsymsMatchers() {
 			wantKeys := make(map[uint64]struct{}, len(targets.keyToFunc))
 			for k := range targets.keyToFunc {
 				wantKeys[k] = struct{}{}
 			}
-			snap := snapshotKeysFromKallsyms(tramps, wantKeys)
+			snap := snapshotKeysFromKallsyms(tramps, wantKeys, targets.modBTFIDSet())
 			if len(snap) == 0 {
 				// Dead owner is gone and zero trampoline images for any of its
 				// hooked functions exist in /proc/kallsyms.
@@ -1452,7 +1537,7 @@ func (r *graceReaper) processDeadDir(dirPath string, nowNs uint64, loadKallsyms 
 	}
 	stuckFuncs := make(map[string]struct{})
 	for _, ref := range surviving {
-		if fn, ok := targets.keyToFunc[ref.Key]; ok && fn != "" {
+		if fn, ok := targets.funcForKey(ref.Key); ok && fn != "" {
 			stuckFuncs[fn] = struct{}{}
 		}
 	}

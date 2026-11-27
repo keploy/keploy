@@ -115,7 +115,7 @@ func TestTrampolineKeyAndKallsymsParsing(t *testing.T) {
 	if err != nil || !vis2 || len(t2[6442572795]) != 1 {
 		t.Fatalf("parseKallsymsTrampolines(gen2) = (%v, %v, %v), want 1 entry", t2, vis2, err)
 	}
-	snap0 := snapshotKeysFromKallsyms(t0, map[uint64]struct{}{6442572795: {}})
+	snap0 := snapshotKeysFromKallsyms(t0, map[uint64]struct{}{6442572795: {}}, nil)
 	if got := survivingSnapshotKeys(snap0, t0); len(got) != 1 {
 		t.Fatalf("survivingSnapshotKeys(gen0 vs gen0) = %d, want 1", len(got))
 	}
@@ -980,5 +980,169 @@ func TestResolveTrampolineTargetKillsM6(t *testing.T) {
 	})
 	if err != nil || isTramp || pre60 {
 		t.Fatalf("resolveTrampolineTarget(Kprobe) = (isTramp=%v, pre60=%v, err=%v), want (false, false, nil)", isTramp, pre60, err)
+	}
+}
+
+func TestModuleWildcardKallsymsMatching(t *testing.T) {
+	// Linux 5.19 tls.ko tls_init: module BTF obj=14, type_id=129749.
+	// key = (14 << 32) | 0x80000000 | 129749
+	modKey := (uint64(14) << 32) | 0x80000000 | 129749
+	vmlinuxKey := (uint64(1) << 32) | 0x80000000 | 129749
+	tramps := map[uint64][]uint64{
+		modKey:     {0xffffffffc0401000},
+		vmlinuxKey: {0xffffffffc0402000},
+	}
+	modIDs := map[uint32]struct{}{129749: {}}
+	snap := snapshotKeysFromKallsyms(tramps, nil, modIDs)
+	if len(snap) != 1 || snap[0].Key != modKey || snap[0].Addr != 0xffffffffc0401000 {
+		t.Fatalf("snapshotKeysFromKallsyms(module wildcard) = %+v, want single match on modKey %d (not vmlinuxKey)", snap, modKey)
+	}
+	dt := dirTargets{modIDToFunc: map[uint32]string{129749: "tls_init"}}
+	if fn, ok := dt.funcForKey(modKey); !ok || fn != "tls_init" {
+		t.Fatalf("funcForKey(modKey) = (%q, %v), want (tls_init, true)", fn, ok)
+	}
+	if fn, ok := dt.funcForKey(vmlinuxKey); ok {
+		t.Fatalf("funcForKey(vmlinuxKey) = (%q, true), want false", fn)
+	}
+}
+
+func TestGracefulShutdownDrainsReaperBeforeDetachAndSnapshotsPostDetach(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = uint64(6442555249)
+	const preAddr = uint64(0xffffffffc0100000)
+	const postAddr = uint64(0xffffffffc0200000)
+
+	curAddr := preAddr
+	owner.attachedKeys = map[uint64]struct{}{key: {}}
+	owner.reaper.dynamicTrampImageFn = func() bool { return true }
+	owner.reaper.kallsymsSysctlFn = func() bool { return true }
+	owner.reaper.readKallsymsFn = func() (map[uint64][]uint64, bool, error) {
+		return map[uint64][]uint64{key: {curAddr}}, true, nil
+	}
+
+	reaperCtx, reaperCancel := context.WithCancel(context.Background())
+	owner.reaperCancel = reaperCancel
+	owner.reaper.start(reaperCtx)
+
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	reaperDrainedBeforeDetach := false
+	RegisterDetachHook(func() {
+		// Verify reaper goroutine has ALREADY exited before detach hook runs!
+		select {
+		case <-owner.reaper.doneCh:
+			reaperDrainedBeforeDetach = true
+		default:
+			reaperDrainedBeforeDetach = false
+		}
+		// Simulate a concurrent agent attach or earlier link close creating a
+		// NEW trampoline image during detach.
+		curAddr = postAddr
+	})
+
+	GracefulShutdown(context.Background(), zap.NewNop())
+	if !reaperDrainedBeforeDetach {
+		t.Fatal("reaper goroutine was NOT cancelled and drained before detach hooks ran")
+	}
+
+	st, ok, err := owner.reaper.store.readState(owner.dir)
+	if err != nil || !ok || st.Flags&stateCleanSnapshot == 0 {
+		t.Fatalf("clean snapshot state = (%+v, %v, %v), want stateCleanSnapshot", st, ok, err)
+	}
+	refs, err := owner.reaper.store.readSnapshot(owner.dir, st.SnapshotCount)
+	if err != nil {
+		t.Fatalf("readSnapshot: %v", err)
+	}
+	hasPre, hasPost := false, false
+	for _, r := range refs {
+		if r.Addr == preAddr {
+			hasPre = true
+		}
+		if r.Addr == postAddr {
+			hasPost = true
+		}
+	}
+	if !hasPre || !hasPost {
+		t.Fatalf("persisted snapshot %+v must contain union of pre (%x) and post (%x) images", refs, preAddr, postAddr)
+	}
+}
+
+func TestUnpinFailedAttachRemovesUnusedPin(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(owner.lockFD) }()
+
+	var dummy ebpf.Program
+	pinPath := filepath.Join(owner.dir, "000001-test-fn-p")
+	if err := os.WriteFile(pinPath, []byte("pin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	owner.keysMu.Lock()
+	owner.pinPaths = map[*ebpf.Program]string{&dummy: pinPath}
+	owner.keysMu.Unlock()
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	UnpinFailedAttach(&dummy)
+	if _, err := os.Stat(pinPath); !os.IsNotExist(err) {
+		t.Fatalf("UnpinFailedAttach did not remove unused pin %s: err=%v", pinPath, err)
+	}
+}
+
+func TestWarnOnceForUnresolvableDeadDir(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	unresDir := filepath.Join(root, LegacyGraceDirPrefix+"old-v3727")
+	if err := os.Mkdir(unresDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unresDir, "000001-p"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	core, logs := observer.New(zapcore.WarnLevel)
+	r := newGraceReaper(root, GraceDirPrefix+"self", DefaultReapInterval, zap.New(core))
+	r.dynamicTrampImageFn = func() bool { return true }
+	r.kallsymsSysctlFn = func() bool { return true }
+	r.inspectTargetsFn = func(string) (dirTargets, error) {
+		return dirTargets{}, errors.New("no resolvable target")
+	}
+
+	r.round() // Pass 1
+	r.round() // Pass 2: WARN #1
+	r.round() // Pass 3: suppressed to Debug
+	r.round() // Pass 4: suppressed to Debug
+	if logs.Len() != 1 {
+		t.Fatalf("expected exactly 1 WARN for unresolvable dir across repeated rounds, got %d: %+v", logs.Len(), logs.All())
+	}
+}
+
+func TestCleanupAnchorsRefusesOnPre512(t *testing.T) {
+	resetStateForTest(t)
+	root := t.TempDir()
+	anchorsDir := filepath.Join(root, AnchorsSubdir)
+	if err := os.MkdirAll(anchorsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(anchorsDir, "unix_dgram_sendmsg"+anchorLinkSuffix), []byte("l"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, time.Second, &anchorCleanupHooks{
+		dynamicTrampImageFn: func() bool { return false },
+	})
+	if err == nil || !strings.Contains(err.Error(), "Linux <5.12") {
+		t.Fatalf("cleanupAnchorsInRoot on <5.12 = %v, want explicit refusal error", err)
 	}
 }

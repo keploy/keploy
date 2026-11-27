@@ -1,0 +1,118 @@
+name: BPF Failslab 4-Kernel VM Gate
+
+on:
+  pull_request:
+    paths:
+      - 'pkg/agent/bpfsafety/**'
+      - 'pkg/agent/hooks/linux/**'
+      - 'scripts/bpf-failslab-vm-gate.sh'
+      - '.github/workflows/bpf_failslab_gate.yml'
+  workflow_dispatch:
+
+jobs:
+  failslab-4kernel-vm:
+    name: failslab-vm (5.10, 5.15, 5.19+tls.ko, 6.12)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install QEMU and cpio
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 cpio python3 curl xz-utils zstd
+
+      - name: Cache Fedora debug kernels (5.10, 5.15, 5.19+tls.ko, 6.12)
+        id: kernel-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/debug-kernels
+          key: bpf-failslab-debug-kernels-v2-5.10-5.15-5.19tls-6.12
+
+      - name: Fetch and unpack Fedora debug kernels
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/debug-kernels
+          python3 - <<'PY'
+          import os, struct, lzma, subprocess, tempfile
+
+          def unpack_rpm(url, match_fn, out_path):
+              if os.path.exists(out_path):
+                  return
+              with tempfile.TemporaryDirectory() as td:
+                  rpm = os.path.join(td, "pkg.rpm")
+                  subprocess.check_call(["curl", "-fsSL", "--retry", "3", "-o", rpm, url])
+                  data = open(rpm, "rb").read()
+                  off = 96
+                  for hdr in range(2):
+                      _, _, nidx, hsize = struct.unpack(">4s4sII", data[off:off+16])
+                      off += 16 + nidx * 16 + hsize
+                      if hdr == 0 and off % 8:
+                          off += 8 - (off % 8)
+                  raw_pay = data[off:]
+                  if raw_pay[:4] == b"\x28\xb5\x2f\xfd":
+                      payload = subprocess.check_output(["zstd", "-dc"], input=raw_pay)
+                  else:
+                      payload = lzma.decompress(raw_pay)
+                  i = 0
+                  while i + 110 <= len(payload):
+                      if payload[i:i+6] != b"070701":
+                          break
+                      fsize = int(payload[i+54:i+62], 16)
+                      nsize = int(payload[i+94:i+102], 16)
+                      name = payload[i+110:i+110+nsize-1].decode("utf-8", errors="replace")
+                      doff = i + 110 + nsize
+                      if doff % 4:
+                          doff += 4 - (doff % 4)
+                      if match_fn(name):
+                          raw = payload[doff:doff+fsize]
+                          if name.endswith(".xz"):
+                              raw = lzma.decompress(raw)
+                          elif name.endswith(".zst"):
+                              raw = subprocess.check_output(["zstd", "-dc"], input=raw)
+                          with open(out_path, "wb") as f:
+                              f.write(raw)
+                          print(f"extracted {name} -> {out_path} ({len(raw)} bytes)")
+                          return
+                      i = doff + fsize
+                      if i % 4:
+                          i += 4 - (i % 4)
+                  raise RuntimeError(f"target file not found in {url}")
+
+          unpack_rpm(
+              "https://kojipkgs.fedoraproject.org/packages/kernel/5.10.23/200.fc33/x86_64/kernel-debug-core-5.10.23-200.fc33.x86_64.rpm",
+              lambda n: n.endswith("/vmlinuz"),
+              "/tmp/debug-kernels/vmlinuz-5.10-debug",
+          )
+          unpack_rpm(
+              "https://kojipkgs.fedoraproject.org/packages/kernel/5.15.18/200.fc35/x86_64/kernel-debug-core-5.15.18-200.fc35.x86_64.rpm",
+              lambda n: n.endswith("/vmlinuz"),
+              "/tmp/debug-kernels/vmlinuz-5.15-debug",
+          )
+          unpack_rpm(
+              "https://kojipkgs.fedoraproject.org/packages/kernel/5.19.16/200.fc36/x86_64/kernel-debug-core-5.19.16-200.fc36.x86_64.rpm",
+              lambda n: n.endswith("/vmlinuz"),
+              "/tmp/debug-kernels/vmlinuz-5.19-debug",
+          )
+          unpack_rpm(
+              "https://kojipkgs.fedoraproject.org/packages/kernel/5.19.16/200.fc36/x86_64/kernel-debug-core-5.19.16-200.fc36.x86_64.rpm",
+              lambda n: n.endswith("/tls.ko.xz") or n.endswith("/tls.ko"),
+              "/tmp/debug-kernels/tls-5.19.ko",
+          )
+          unpack_rpm(
+              "https://kojipkgs.fedoraproject.org/packages/kernel/6.12.11/200.fc41/x86_64/kernel-debug-core-6.12.11-200.fc41.x86_64.rpm",
+              lambda n: n.endswith("/vmlinuz"),
+              "/tmp/debug-kernels/vmlinuz-6.12-debug",
+          )
+          PY
+          ls -lh /tmp/debug-kernels/
+
+      - name: Run 4-kernel failslab debug VM gate
+        run: |
+          KERNEL_DIR=/tmp/debug-kernels ./scripts/bpf-failslab-vm-gate.sh 5.10 5.15 5.19 6.12

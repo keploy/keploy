@@ -346,3 +346,43 @@ func TestUnixConnNoHostBPFFSEntersHonestUnprotectedMode(t *testing.T) {
 		t.Fatalf("GracefulShutdown blocked for %v (>= 5s); must not hold exit", elapsed)
 	}
 }
+
+// TestOnKernelUnixConnDisarmClearsFilterMaps proves clearBPFMapAllKeys empties
+// a populated real kernel BPF hash map (killing M11).
+func TestOnKernelUnixConnDisarmClearsFilterMaps(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name:       "disarm_test_map",
+		Type:       ebpf.Hash,
+		KeySize:    4,
+		ValueSize:  1,
+		MaxEntries: 16,
+	})
+	if err != nil {
+		t.Fatalf("create hash map: %v", err)
+	}
+	defer func() { _ = m.Close() }()
+
+	for _, k := range []uint32{101, 202, 303} {
+		if err := m.Put(k, uint8(1)); err != nil {
+			t.Fatalf("Put(%d): %v", k, err)
+		}
+	}
+	clearBPFMapAllKeys(m)
+
+	var key uint32
+	var val uint8
+	remaining := 0
+	iter := m.Iterate()
+	for iter.Next(&key, &val) {
+		remaining++
+	}
+	if remaining != 0 {
+		t.Fatalf("clearBPFMapAllKeys left %d entries in BPF hash map, want 0 (M11!)", remaining)
+	}
+}

@@ -193,6 +193,20 @@ func checkOSSAttachTracingFile(fset *token.FileSet, rel string, file *ast.File) 
 			}
 		}
 	}
+	// Enforce that unixconn.go passes the resolved AttachTo target (not the raw
+	// ELF program name) to bpfsafety.AttachTracing (killing M12).
+	if rel == "pkg/agent/hooks/linux/unixconn.go" {
+		ast.Inspect(file, func(n ast.Node) bool {
+			ce, ok := n.(*ast.CallExpr)
+			if !ok || !isIdentOrSel(ce.Fun, "AttachTracing") || len(ce.Args) < 3 {
+				return true
+			}
+			if id, ok := ce.Args[2].(*ast.Ident); ok && id.Name == "name" {
+				out = append(out, fmt.Sprintf("%s:%d: bpfsafety.AttachTracing must pass kernel AttachTo targetFunc, not raw program name", rel, fset.Position(ce.Pos()).Line))
+			}
+			return true
+		})
+	}
 	return out
 }
 

@@ -256,10 +256,7 @@ func loadUnixConnWith(logger *zap.Logger, objs *bpfObjects, fallback bool) (*uni
 			return nil, fmt.Errorf("arm trampoline grace pinning for unixconn fexit: %w", initErr)
 		}
 		for _, name := range unixFexitPrograms {
-			targetFunc := name
-			if ps := spec.Programs[name]; ps != nil && ps.AttachTo != "" {
-				targetFunc = ps.AttachTo
-			}
+			targetFunc := unixFexitAttachTarget(spec, name)
 			var l link.Link
 			err := watchedCall(logger, "attach of fexit program "+name+" via bpfsafety", func() error {
 				var aerr error
@@ -556,6 +553,15 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 		<-ctx.Done()
 		detach()
 	}()
+}
+
+func unixFexitAttachTarget(spec *ebpf.CollectionSpec, name string) string {
+	if spec != nil {
+		if ps := spec.Programs[name]; ps != nil && ps.AttachTo != "" {
+			return ps.AttachTo
+		}
+	}
+	return name
 }
 
 func clearBPFMapAllKeys(m *ebpf.Map) {

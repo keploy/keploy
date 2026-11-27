@@ -510,14 +510,59 @@ func parseTrampolineSymbol(sym string, addr uint64) (key uint64, token uint64, o
 	return k, addr, true
 }
 
-// snapshotKeysFromKallsyms collects every (key, addr) entry in tramps whose key
-// is in wantKeys.
-func snapshotKeysFromKallsyms(tramps map[uint64][]uint64, wantKeys map[uint64]struct{}) []trampImageRef {
+// snapshotKeysFromKallsyms collects every (key, token) entry in tramps whose
+// key is in wantKeys OR whose low 31-bit BTF type ID matches wantModBTFIDs for
+// a kernel module (obj >= 2, or bare pre-5.12 obj == 0). Matching module
+// targets on their low BTF type ID guarantees Linux 5.11..5.19 module
+// trampolines (e.g. tls.ko where bpf_prog_info omits attach_btf_obj_id) are
+// always captured even without CAP_SYS_ADMIN; over-matching only waits longer.
+func snapshotKeysFromKallsyms(tramps map[uint64][]uint64, wantKeys map[uint64]struct{}, wantModBTFIDs map[uint32]struct{}) []trampImageRef {
+	seen := make(map[trampImageRef]struct{})
 	var out []trampImageRef
-	for k := range wantKeys {
+	add := func(k uint64) {
 		for _, addr := range tramps[k] {
-			if addr != 0 {
-				out = append(out, trampImageRef{Key: k, Addr: addr})
+			if addr == 0 {
+				continue
+			}
+			ref := trampImageRef{Key: k, Addr: addr}
+			if _, ok := seen[ref]; !ok {
+				seen[ref] = struct{}{}
+				out = append(out, ref)
+			}
+		}
+	}
+	for k := range wantKeys {
+		add(k)
+	}
+	if len(wantModBTFIDs) > 0 {
+		for k := range tramps {
+			obj := k >> 32
+			if obj == 1 {
+				continue // vmlinux key, not a kernel module
+			}
+			lowID := uint32(k & 0x7fffffff)
+			if _, ok := wantModBTFIDs[lowID]; ok {
+				add(k)
+			}
+		}
+	}
+	return out
+}
+
+// mergeSnapshotRefs returns the deduplicated union of two kallsyms snapshots
+// (used to union pre-detach and post-detach snapshots so images built during
+// link teardown are never missed).
+func mergeSnapshotRefs(a, b []trampImageRef) []trampImageRef {
+	seen := make(map[trampImageRef]struct{}, len(a)+len(b))
+	out := make([]trampImageRef, 0, len(a)+len(b))
+	for _, list := range [][]trampImageRef{a, b} {
+		for _, ref := range list {
+			if ref.Key == 0 || ref.Addr == 0 {
+				continue
+			}
+			if _, ok := seen[ref]; !ok {
+				seen[ref] = struct{}{}
+				out = append(out, ref)
 			}
 		}
 	}

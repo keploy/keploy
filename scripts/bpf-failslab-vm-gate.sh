@@ -1,21 +1,30 @@
 #!/usr/bin/env bash
-# Run bpfsafety CONFIG_FAILSLAB=y -ENOMEM unlink regression tests inside QEMU
-# against one or more Linux debug kernels (default: 5.10, 5.15, 5.19, 6.12).
+# Run bpfsafety CONFIG_FAILSLAB=y -ENOMEM unlink regression tests (including
+# clean-exit snapshot race, two-prog same-func race, pre-6.0 unresolved target
+# fail-closed, kernel-module tls.ko target, last-link anchor protection, and
+# calm anchor stale detection) inside QEMU against Linux debug kernels
+# (default: 5.10, 5.15, 5.19, 6.12).
 #
 # Usage:
 #   KERNEL_DIR=/tmp/debug-kernels scripts/bpf-failslab-vm-gate.sh [5.10 5.15 5.19 6.12]
 #
-# Each kernel is booted with a minimal static Go initramfs that mounts proc,
-# sysfs, debugfs, and bpffs, enables bpf_jit_kallsyms=1, runs the three
-# failslab integration tests, and powers off cleanly. Any test failure, KASAN
-# report, Oops, or kernel panic fails the gate.
+# Auto-detects /dev/kvm when writable (falls back to tcg,thread=single).
+# If $KERNEL_DIR/tls-${K}.ko exists, it is bundled as /tls.ko inside that
+# kernel's initramfs so TestOnKernelModuleTargetDeadOwnerENOMEM runs on real
+# module BTF. Any test failure, KASAN report, Oops, or kernel panic fails the gate.
 set -euo pipefail
 
 KERNEL_DIR="${KERNEL_DIR:-/tmp/debug-kernels}"
-QEMU_ACCEL="${QEMU_ACCEL:-tcg,thread=single}"
+if [ -z "${QEMU_ACCEL:-}" ]; then
+  if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    QEMU_ACCEL="kvm"
+  else
+    QEMU_ACCEL="tcg,thread=single"
+  fi
+fi
 QEMU_MEM="${QEMU_MEM:-1536}"
-VM_TIMEOUT="${VM_TIMEOUT:-240}"
-TEST_REGEX="${TEST_REGEX:-^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCalmRemovalDetectsStaleAfterENOMEM)$}"
+VM_TIMEOUT="${VM_TIMEOUT:-300}"
+TEST_REGEX="${TEST_REGEX:-^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCalmRemovalDetectsStaleAfterENOMEM|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|ModuleTargetDeadOwnerENOMEM)$}"
 
 if [ "$#" -gt 0 ]; then
   KERNELS=("$@")
@@ -26,7 +35,7 @@ fi
 WORK="$(mktemp -d /tmp/bpf-failslab-gate.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "=== Building static bpfsafety integration test binary ==="
+echo "=== Building static bpfsafety integration test binary (accel=${QEMU_ACCEL}) ==="
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -tags=integration -c -o "$WORK/bpfsafety.test" ./pkg/agent/bpfsafety
 
 echo "=== Building minimal QEMU init binary ==="
@@ -66,9 +75,9 @@ func main() {
 
 	regex := os.Getenv("TEST_REGEX")
 	if regex == "" {
-		regex = "^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCalmRemovalDetectsStaleAfterENOMEM)$"
+		regex = "^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCalmRemovalDetectsStaleAfterENOMEM|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|ModuleTargetDeadOwnerENOMEM)$"
 	}
-	cmd := exec.Command("/bpfsafety.test", "-test.v", "-test.count=1", "-test.timeout=180s", "-test.run="+regex)
+	cmd := exec.Command("/bpfsafety.test", "-test.v", "-test.count=1", "-test.timeout=240s", "-test.run="+regex)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Run()
@@ -82,11 +91,18 @@ func main() {
 EOF
 (cd "$WORK" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$WORK/init" "$WORK/init.go")
 
-mkdir -p "$WORK/rootfs/proc" "$WORK/rootfs/sys" "$WORK/rootfs/dev" "$WORK/rootfs/tmp"
-cp "$WORK/init" "$WORK/rootfs/init"
-cp "$WORK/bpfsafety.test" "$WORK/rootfs/bpfsafety.test"
-chmod +x "$WORK/rootfs/init" "$WORK/rootfs/bpfsafety.test"
-(cd "$WORK/rootfs" && find . -print0 | cpio --null -ov --format=newc 2>/dev/null | gzip -1 >"$WORK/initramfs.cpio.gz")
+build_initrd() {
+  local k="$1"
+  local rdir="$WORK/rootfs-${k}"
+  mkdir -p "$rdir/proc" "$rdir/sys" "$rdir/dev" "$rdir/tmp"
+  cp "$WORK/init" "$rdir/init"
+  cp "$WORK/bpfsafety.test" "$rdir/bpfsafety.test"
+  if [ -f "$KERNEL_DIR/tls-${k}.ko" ]; then
+    cp "$KERNEL_DIR/tls-${k}.ko" "$rdir/tls.ko"
+  fi
+  chmod +x "$rdir/init" "$rdir/bpfsafety.test"
+  (cd "$rdir" && find . -print0 | cpio --null -ov --format=newc 2>/dev/null | gzip -1 >"$WORK/initramfs-${k}.cpio.gz")
+}
 
 FAILURES=0
 for K in "${KERNELS[@]}"; do
@@ -96,12 +112,13 @@ for K in "${KERNELS[@]}"; do
     FAILURES=$((FAILURES + 1))
     continue
   fi
+  build_initrd "$K"
   LOG="$WORK/vm-${K}.log"
   echo "=== Booting debug kernel ${K} ($VMLINUZ) ==="
   set +e
   timeout -k 10 "$VM_TIMEOUT" qemu-system-x86_64 \
     -machine q35 -accel "$QEMU_ACCEL" -cpu max -smp 2 -m "$QEMU_MEM" \
-    -kernel "$VMLINUZ" -initrd "$WORK/initramfs.cpio.gz" \
+    -kernel "$VMLINUZ" -initrd "$WORK/initramfs-${K}.cpio.gz" \
     -nographic -no-reboot \
     -append "console=ttyS0 panic=-1 oops=panic nokaslr quiet TEST_REGEX=${TEST_REGEX}" \
     >"$LOG" 2>&1
@@ -111,7 +128,7 @@ for K in "${KERNELS[@]}"; do
   echo "--- Console summary for kernel ${K} (qemu rc=${RC}) ---"
   CLEAN_LOG="$WORK/vm-${K}.clean.log"
   tr -d '\r' < "$LOG" > "$CLEAN_LOG"
-  grep -E 'VM_KERNEL:|=== RUN|--- PASS:|--- FAIL:|FAIL|PASS|VM_TESTS_RESULT=|BUG:|KASAN:|Kernel panic|Oops:' "$CLEAN_LOG" || true
+  grep -E 'VM_KERNEL:|=== RUN|--- PASS:|--- FAIL:|--- SKIP:|FAIL|PASS|VM_TESTS_RESULT=|BUG:|KASAN:|Kernel panic|Oops:' "$CLEAN_LOG" || true
 
   BAD=0
   if ! grep -q '^VM_TESTS_RESULT=PASS$' "$CLEAN_LOG"; then
