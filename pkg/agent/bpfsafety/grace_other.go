@@ -34,6 +34,7 @@ var (
 	ErrShuttingDown     = errors.New("bpf trampoline safety gate is closed for shutdown")
 	ErrPinFailed        = errors.New("bpf trampoline grace pin failed")
 	ErrUnresolvedTarget = errors.New("bpf tracing program target function could not be resolved")
+	ErrAnchorUnpinned   = errors.New("bpf trampoline anchor is not pinned on host bpffs")
 )
 
 type Mode string

@@ -175,6 +175,14 @@ var ErrPinFailed = errors.New("bpf trampoline grace pin failed")
 // can be anchored and safely reaped per program).
 var ErrUnresolvedTarget = errors.New("bpf tracing program target function could not be resolved")
 
+// ErrAnchorUnpinned is returned by PinBeforeAttach on static-trampoline
+// kernels (Linux 5.10.0–5.10.27 and 5.11, lacking struct bpf_tramp_image) when
+// the host-bpffs trampoline anchor link for the target function could not be
+// pinned. Failing closed prevents attaching fexit programs onto an unpinned
+// anchor whose clean exit-time close would free the static trampoline page
+// while tasks are sleeping in the hooked function.
+var ErrAnchorUnpinned = errors.New("bpf trampoline anchor is not pinned on host bpffs")
+
 // MetricsObserver receives updated host-bpffs grace counts, anchor link count,
 // unprotected status, and permanent stale-trampoline status (EBUSY last-link failure).
 type MetricsObserver func(dirsPresent, pinnedProgs, anchorLinks int, unprotected, staleTrampoline bool)
@@ -905,6 +913,7 @@ func hasMountInfoBPFFS(mountinfoPath, target string) (bool, error) {
 
 type graceOwner struct {
 	root               string
+	rootIsBPFFS        bool
 	dir                string
 	self               string
 	lockFD             int
@@ -977,48 +986,64 @@ func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) e
 		candKeys         []uint64
 		modBTFID         uint32
 	)
-	if info, err := queryProgInfo(prog.FD()); err == nil {
-		progType := ebpf.ProgramType(info.Type)
-		if progType == ebpf.Tracing || progType == ebpf.LSM {
-			objID, btfID, fnName, isTramp, pre60, rerr := resolveTrampolineTarget(info)
-			if rerr != nil {
-				return fmt.Errorf("%w: resolve tracing target for %s (%s): %v", ErrUnresolvedTarget, name, object, rerr)
+	info, err := queryProgInfo(prog.FD())
+	if err != nil {
+		return fmt.Errorf("%w: query BPF program info for %s (%s): %w", ErrUnresolvedTarget, name, object, err)
+	}
+	if progType := ebpf.ProgramType(info.Type); progType == ebpf.Tracing || progType == ebpf.LSM {
+		objID, btfID, fnName, isTramp, pre60, rerr := resolveTrampolineTarget(info)
+		if rerr != nil {
+			return fmt.Errorf("%w: resolve tracing target for %s (%s): %v", ErrUnresolvedTarget, name, object, rerr)
+		}
+		if isTramp && fnName != "" {
+			resolvedFunc = fnName
+			candKeys = trampolineCandidateKeys(objID, btfID)
+		} else if !pre60 {
+			// Valid non-trampoline Tracing prog (e.g. tp_btf on 6.0+).
+			resolvedNonTramp = true
+		} else {
+			// Linux 5.10..5.19 or CAP_BPF-only 6.0+ module target: resolve
+			// caller-provided AttachTo symbol directly against /sys/kernel/btf/*.
+			bObjID, bID, isMod, ok, berr := resolveFuncNameInBTF(name)
+			if berr != nil {
+				return fmt.Errorf("%w: lookup %q in kernel BTF: %v", ErrUnresolvedTarget, name, berr)
 			}
-			if isTramp && fnName != "" {
-				resolvedFunc = fnName
-				candKeys = trampolineCandidateKeys(objID, btfID)
-			} else if !pre60 {
-				// Valid non-trampoline Tracing prog (e.g. tp_btf on 6.0+).
-				resolvedNonTramp = true
-			} else {
-				// Linux 5.10..5.19 or CAP_BPF-only 6.0+ module target: resolve
-				// caller-provided AttachTo symbol directly against /sys/kernel/btf/*.
-				bObjID, bID, isMod, ok, berr := resolveFuncNameInBTF(name)
-				if berr != nil {
-					return fmt.Errorf("%w: lookup %q in kernel BTF: %v", ErrUnresolvedTarget, name, berr)
+			if !ok {
+				if isRawBTFTracepointName(name) {
+					resolvedNonTramp = true
+				} else {
+					return fmt.Errorf("%w: %q (object %s) is not a kernel BTF function or tracepoint; pass ProgramSpec.AttachTo", ErrUnresolvedTarget, name, object)
 				}
-				if !ok {
-					if isRawBTFTracepointName(name) {
-						resolvedNonTramp = true
-					} else {
-						return fmt.Errorf("%w: %q (object %s) is not a kernel BTF function or tracepoint; pass ProgramSpec.AttachTo", ErrUnresolvedTarget, name, object)
+			} else {
+				resolvedFunc = name
+				if isMod {
+					modBTFID = bID
+					if info.AttachBtfObjID > 1 && info.AttachBtfID != 0 {
+						candKeys = trampolineCandidateKeys(info.AttachBtfObjID, info.AttachBtfID)
 					}
 				} else {
-					resolvedFunc = name
-					if isMod {
-						modBTFID = bID
-						if info.AttachBtfObjID > 1 && info.AttachBtfID != 0 {
-							candKeys = trampolineCandidateKeys(info.AttachBtfObjID, info.AttachBtfID)
-						}
-					} else {
-						candKeys = trampolineCandidateKeys(bObjID, bID)
-					}
+					candKeys = trampolineCandidateKeys(bObjID, bID)
 				}
 			}
 		}
 	}
 	if object != "bpfsafety_reaper" && resolvedFunc != "" && isStaleTarget(resolvedFunc) {
 		return fmt.Errorf("stale BPF trampoline on %s (hook unavailable until node reboot; drain and reboot this node): %w", resolvedFunc, unix.EBUSY)
+	}
+
+	if resolvedFunc != "" && object != "bpfsafety_reaper" {
+		// Pin a no-op anchor link on this function BEFORE the first real
+		// attach (skip for the reaper's own rebuild no-op so we don't recurse).
+		g.ensureAnchor(resolvedFunc, g.logger)
+		// On static-trampoline kernels (5.10.0–5.10.27 and 5.11, lacking
+		// struct bpf_tramp_image), a clean exit-time close of an unpinned
+		// anchor frees tr->image after synchronize_rcu_tasks(), which does not
+		// wait for tasks sleeping inside an fexit-hooked function. Fail closed
+		// until a retry pins the anchor; an fentry-only anchor image has no
+		// sleepers on the stack, so its exit close is safe.
+		if g.rootIsBPFFS && !g.dynamicTrampImage() && !g.isAnchorPinned(resolvedFunc) {
+			return fmt.Errorf("%w: refusing to attach tracing program %s (%s) on static-trampoline kernel until anchor for %s is pinned on host bpffs", ErrAnchorUnpinned, name, object, resolvedFunc)
+		}
 	}
 
 	seq := g.seq.Add(1)
@@ -1062,14 +1087,14 @@ func (g *graceOwner) pinProgram(prog *ebpf.Program, object, name, role string) e
 	}
 	g.keysMu.Unlock()
 
-	if resolvedFunc != "" {
-		// Pin a no-op anchor link on this function BEFORE the first real
-		// attach (skip for the reaper's own rebuild no-op so we don't recurse).
-		if object != "bpfsafety_reaper" {
-			g.ensureAnchor(resolvedFunc, g.logger)
-		}
-	}
 	return nil
+}
+
+func (g *graceOwner) dynamicTrampImage() bool {
+	if g != nil && g.reaper != nil && g.reaper.dynamicTrampImageFn != nil {
+		return g.reaper.dynamicTrampImageFn()
+	}
+	return kernelHasDynamicTrampImage()
 }
 
 func (g *graceOwner) captureKallsymsSnapshot() []trampImageRef {
@@ -1206,11 +1231,12 @@ func openGraceOwnerInRoot(root string, logger *zap.Logger) (*graceOwner, error) 
 	}
 
 	owner := &graceOwner{
-		root:   root,
-		dir:    finalDir,
-		self:   self,
-		lockFD: fd,
-		logger: logger,
+		root:        root,
+		rootIsBPFFS: autoStateStore.isBPFFS(autoStateStore{}, root),
+		dir:         finalDir,
+		self:        self,
+		lockFD:      fd,
+		logger:      logger,
 	}
 	reaper := newGraceReaper(root, self, DefaultReapInterval, logger)
 	reaper.reapPrefix = reapPrefix

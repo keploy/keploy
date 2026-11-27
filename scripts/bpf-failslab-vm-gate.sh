@@ -24,7 +24,7 @@ if [ -z "${QEMU_ACCEL:-}" ]; then
 fi
 QEMU_MEM="${QEMU_MEM:-1536}"
 VM_TIMEOUT="${VM_TIMEOUT:-300}"
-TEST_REGEX="${TEST_REGEX:-^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|AnchorPinFailNeverClosesLastLink|AnchorPinRetryFailKeepsLink|AnchorEMFILEKeepsLink|ShutdownRetainsUnpinnedAnchor|IdleTmpNoopENOMEMNeverPanics|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|LegacyMixedDirUnresolvedProgDead|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$}"
+TEST_REGEX="${TEST_REGEX:-^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|AnchorPinFailNeverClosesLastLink|AnchorPinRetryFailKeepsLink|AnchorEMFILEKeepsLink|ShutdownRetainsUnpinnedAnchor|StaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives|IdleTmpNoopENOMEMNeverPanics|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|LegacyMixedDirUnresolvedProgDead|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$}"
 HOOKS_TEST_REGEX="${HOOKS_TEST_REGEX:-^TestOnKernelUnixconnRealObjectFexitPinsResolve$}"
 
 if [ "$#" -gt 0 ]; then
@@ -77,7 +77,7 @@ func main() {
 
 	regex := os.Getenv("TEST_REGEX")
 	if regex == "" {
-		regex = "^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|AnchorPinFailNeverClosesLastLink|AnchorPinRetryFailKeepsLink|AnchorEMFILEKeepsLink|ShutdownRetainsUnpinnedAnchor|IdleTmpNoopENOMEMNeverPanics|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|LegacyMixedDirUnresolvedProgDead|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$"
+		regex = "^TestOnKernel(ReaperSurvivesENOMEMUnlinkViaForceRebuild|AnchorPreventsLastLinkENOMEM|AnchorCleanupNeverDetachesLastLinkUnderFailslab|AnchorPinFailNeverClosesLastLink|AnchorPinRetryFailKeepsLink|AnchorEMFILEKeepsLink|ShutdownRetainsUnpinnedAnchor|StaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives|IdleTmpNoopENOMEMNeverPanics|CleanSnapshotRace|CleanSnapshotTwoProgsSameFunc|UnresolvedNameFailsClosed|MixedDirUnresolvedProgDead|MixedDirUnresolvedProgClean|LegacyMixedDirUnresolvedProgDead|ModuleTargetDeadOwnerENOMEM|CleanupAnchorsIdleWithDeadDirAndOtherLink|SlotReuseConvergence)$"
 	}
 	cmd := exec.Command("/bpfsafety.test", "-test.v", "-test.count=1", "-test.timeout=240s", "-test.run="+regex)
 	cmd.Stdout = os.Stdout
@@ -169,7 +169,16 @@ for K in "${KERNELS[@]}"; do
     TestOnKernelUnixconnRealObjectFexitPinsResolve
   )
   case "$K" in
-    5.10|5.15|5.19)
+    5.10)
+      REQ_TESTS+=(
+        TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives
+        TestOnKernelUnresolvedNameFailsClosed
+        TestOnKernelMixedDirUnresolvedProgDead
+        TestOnKernelMixedDirUnresolvedProgClean
+        TestOnKernelLegacyMixedDirUnresolvedProgDead
+      )
+      ;;
+    5.15|5.19)
       REQ_TESTS+=(
         TestOnKernelUnresolvedNameFailsClosed
         TestOnKernelMixedDirUnresolvedProgDead

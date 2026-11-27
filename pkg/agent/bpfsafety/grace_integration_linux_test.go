@@ -506,15 +506,8 @@ func TestOnKernelAnchorCleanupNeverDetachesLastLinkUnderFailslab(t *testing.T) {
 	}
 
 	sendUnixDgramsHelper(t, 10)
-	hookCalled := false
-	hooks := &anchorCleanupHooks{
-		beforeLinkClose: func(string) { hookCalled = true },
-	}
-	if err := cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 5*time.Second, hooks); err != nil {
+	if err := cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 5*time.Second, nil); err != nil {
 		t.Fatalf("cleanupAnchorsInRoot = %v, want nil", err)
-	}
-	if hookCalled {
-		t.Fatal("cleanupAnchorsInRoot attempted to close an anchor link (MUST NEVER detach anchors!)")
 	}
 	if StaleTrampolineDetected() {
 		t.Fatal("StaleTrampolineDetected() = true after idle cleanup, want false")
@@ -2233,6 +2226,198 @@ func TestOnKernelShutdownRetainsUnpinnedAnchor(t *testing.T) {
 	// drop the function's only link in the same VM boot.
 	if retainedLink != nil {
 		_ = retainedLink.Pin(filepath.Join(root, AnchorsSubdir, sanitizeToken(fn)+anchorLinkSuffix))
+	}
+}
+
+// TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives
+// proves on static-trampoline kernels (5.10.0–5.10.27 and 5.11, where
+// !kernelHasDynamicTrampImage()) that when ensureAnchor leaves an anchor
+// unpinned under memory pressure:
+//  1. AttachTracing / PinBeforeAttach FAILS CLOSED with ErrAnchorUnpinned
+//     (refusing to attach fexit onto an unpinned anchor and leaking 0 pins).
+//  2. Closing that unpinned fentry-only anchor cleanly (simulating process
+//     exit) while a task sleeps in unix_stream_recvmsg does NOT panic the node
+//     (unlike an fexit trampoline image, which frees tr->image under the sleeper
+//     and panics 5.10.23).
+//  3. Once memory pressure clears and a retry pins the anchor onto host bpffs,
+//     AttachTracing for fexit/unix_stream_recvmsg succeeds cleanly.
+func TestOnKernelStaticTrampolineUnpinnedAnchorRefusesFexitAndExitCloseSurvives(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	if _, err := os.Stat("/sys/kernel/debug/failslab"); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y: %v", err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	if kernelHasDynamicTrampImage() {
+		t.Skip("static-trampoline unpinned-anchor fexit refusal applies only to Linux 5.10.0..5.10.27 / 5.11")
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+
+	root := filepath.Join(DefaultNativeBPFFSPath, "keploy-bpfsafety-staticunp-"+randomNonce())
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := openGraceOwnerInRoot(root, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(owner.lockFD) }()
+	stateMu.Lock()
+	activeOwner = owner
+	stateMu.Unlock()
+
+	const fn = "unix_stream_recvmsg"
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = unix.Close(fds[0])
+		_ = unix.Close(fds[1])
+	}()
+
+	// Step 1 & 2: Load fexit/unix_stream_recvmsg and call AttachTracing while
+	// onBeforeAnchorPin arms failslab right before ensureAnchor's l.Pin.
+	// ensureAnchor attaches the fentry-only anchor and retains it unpinned;
+	// pinProgram MUST then fail closed with ErrAnchorUnpinned (refusing to
+	// attach fexit onto an unpinned anchor and leaking 0 pins).
+	hitMap, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hitMap.Close() }()
+	p := makeCountingFexitProg(t, "r7_static_fexit", fn, hitMap)
+	defer func() { _ = p.Close() }()
+
+	failslabDir := "/sys/kernel/debug/failslab"
+	runtime.LockOSThread()
+	tidFailPath := fmt.Sprintf("/proc/self/task/%d/make-it-fail", unix.Gettid())
+	failFD, err := unix.Open(tidFailPath, unix.O_WRONLY, 0)
+	if err != nil {
+		runtime.UnlockOSThread()
+		t.Fatalf("open %s: %v", tidFailPath, err)
+	}
+	_ = os.WriteFile(filepath.Join(failslabDir, "task-filter"), []byte("Y"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "ignore-gfp-wait"), []byte("N"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("100"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "interval"), []byte("1"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("20"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "space"), []byte("0"), 0o644)
+	hookRan := false
+	owner.onBeforeAnchorPin = func() {
+		hookRan = true
+		_, _ = unix.Pwrite(failFD, []byte("1\n"), 0)
+	}
+	fexitLink, attachErr := AttachTracing(p, "r7_static", fn, "p")
+	_, _ = unix.Pwrite(failFD, []byte("0\n"), 0)
+	remRaw, _ := os.ReadFile(filepath.Join(failslabDir, "times"))
+	_ = unix.Close(failFD)
+	_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+	_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+	runtime.UnlockOSThread()
+	owner.onBeforeAnchorPin = nil
+
+	if !hookRan {
+		t.Fatal("onBeforeAnchorPin hook did not run during AttachTracing")
+	}
+	if rem, perr := strconv.Atoi(strings.TrimSpace(string(remRaw))); perr == nil && rem >= 20 {
+		t.Fatalf("failslab did not inject -ENOMEM during anchor pin (times remained %d)", rem)
+	}
+	if fexitLink != nil {
+		_ = fexitLink.Close()
+		t.Fatalf("AttachTracing(fexit/%s) unexpectedly succeeded while anchor was unpinned on static-trampoline kernel", fn)
+	}
+	if !errors.Is(attachErr, ErrAnchorUnpinned) {
+		t.Fatalf("AttachTracing(fexit/%s) err = %v, want ErrAnchorUnpinned", fn, attachErr)
+	}
+	if got := countPinnedProgs(owner.dir); got != 0 {
+		t.Fatalf("expected 0 leaked pins after ErrAnchorUnpinned, got %d", got)
+	}
+	n, id := pendingAnchorState(owner)
+	if n != 1 || id == 0 || !linkIDAlive(id) {
+		t.Fatalf("expected 1 live unpinned anchor after failslab, pending=%d id=%d alive=%v", n, id, linkIDAlive(id))
+	}
+	if owner.isAnchorPinned(fn) {
+		t.Fatalf("expected isAnchorPinned(%s)=false while link is unpinned", fn)
+	}
+
+	// Step 3: Put a thread to sleep in unix_stream_recvmsg, cleanly close the
+	// unpinned fentry-only anchor (simulating process exit), then wake the
+	// sleeper. Because fexit was refused, the fentry-only anchor image has no
+	// return address on the sleeper's stack and closes with zero panic.
+	done := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		buf := make([]byte, 8)
+		_, rerr := unix.Read(fds[1], buf)
+		done <- rerr
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	owner.anchorMu.Lock()
+	var unpinnedLink link.Link
+	if len(owner.unpinnedAnchors) > 0 {
+		unpinnedLink = owner.unpinnedAnchors[0].lnk
+		owner.unpinnedAnchors = nil
+	}
+	owner.anchorMu.Unlock()
+	if unpinnedLink == nil {
+		t.Fatal("expected unpinned anchor link to close for exit simulation")
+	}
+	_ = unpinnedLink.Close()
+	time.Sleep(1500 * time.Millisecond)
+
+	if _, err := unix.Write(fds[0], []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case rerr := <-done:
+		if rerr != nil {
+			t.Fatalf("sleeper read err = %v", rerr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sleeper did not wake after clean unpinned fentry-anchor close")
+	}
+
+	// Step 4: Now that memory pressure cleared, AttachTracing pins the anchor
+	// cleanly and attaches fexit/unix_stream_recvmsg with zero panic.
+	l2, err := AttachTracing(p, "r7_static", fn, "p")
+	if err != nil {
+		t.Fatalf("AttachTracing(fexit/%s) after pressure cleared: %v", fn, err)
+	}
+	if !owner.isAnchorPinned(fn) || CountAnchorLinks(root) != 1 {
+		_ = l2.Close()
+		t.Fatalf("expected pinned anchor after recovery (pinned=%v anchorLinks=%d)", owner.isAnchorPinned(fn), CountAnchorLinks(root))
+	}
+	done2 := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		buf := make([]byte, 8)
+		_, rerr := unix.Read(fds[1], buf)
+		done2 <- rerr
+	}()
+	time.Sleep(500 * time.Millisecond)
+	_ = l2.Close()
+	time.Sleep(500 * time.Millisecond)
+	if _, err := unix.Write(fds[0], []byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case rerr := <-done2:
+		if rerr != nil {
+			t.Fatalf("second sleeper read err = %v", rerr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second sleeper did not wake after fexit detach with pinned anchor")
 	}
 }
 

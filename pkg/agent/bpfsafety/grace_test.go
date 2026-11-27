@@ -1148,35 +1148,31 @@ func TestCleanupAnchorsNeverRemovesAnchorLinksOnAnyKernel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, dyn := range []bool{false, true} {
-		core, logs := observer.New(zapcore.InfoLevel)
-		err := cleanupAnchorsInRoot(context.Background(), zap.New(core), root, time.Second, &anchorCleanupHooks{
-			dynamicTrampImageFn: func() bool { return dyn },
-		})
-		if err != nil {
-			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) = %v, want nil", dyn, err)
+	core, logs := observer.New(zapcore.InfoLevel)
+	err := cleanupAnchorsInRoot(context.Background(), zap.New(core), root, time.Second, nil)
+	if err != nil {
+		t.Fatalf("cleanupAnchorsInRoot = %v, want nil", err)
+	}
+	if StaleTrampolineDetected() {
+		t.Fatalf("cleanupAnchorsInRoot wrongly raised StaleTrampolineDetected")
+	}
+	if _, serr := os.Stat(linkPath); serr != nil {
+		t.Fatalf("cleanupAnchorsInRoot removed anchor link %s (MUST stay until reboot!): %v", linkPath, serr)
+	}
+	if _, serr := os.Stat(progPath); serr != nil {
+		t.Fatalf("cleanupAnchorsInRoot removed anchor prog %s (MUST stay until reboot!): %v", progPath, serr)
+	}
+	foundMsg := false
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "1 idle keploy anchors stay until the next reboot") &&
+			strings.Contains(e.Message, "tens of ns/call") &&
+			strings.Contains(e.Message, "livepatches") {
+			foundMsg = true
+			break
 		}
-		if StaleTrampolineDetected() {
-			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) wrongly raised StaleTrampolineDetected", dyn)
-		}
-		if _, serr := os.Stat(linkPath); serr != nil {
-			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) removed anchor link %s (MUST stay until reboot!): %v", dyn, linkPath, serr)
-		}
-		if _, serr := os.Stat(progPath); serr != nil {
-			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) removed anchor prog %s (MUST stay until reboot!): %v", dyn, progPath, serr)
-		}
-		foundMsg := false
-		for _, e := range logs.All() {
-			if strings.Contains(e.Message, "1 idle keploy anchors stay until the next reboot") &&
-				strings.Contains(e.Message, "tens of ns/call") &&
-				strings.Contains(e.Message, "livepatches") {
-				foundMsg = true
-				break
-			}
-		}
-		if !foundMsg {
-			t.Fatalf("cleanupAnchorsInRoot(dyn=%v) missing clear reboot/cost summary line, logs=%+v", dyn, logs.All())
-		}
+	}
+	if !foundMsg {
+		t.Fatalf("cleanupAnchorsInRoot missing clear reboot/cost summary line, logs=%+v", logs.All())
 	}
 }
 

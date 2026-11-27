@@ -58,7 +58,7 @@ func (g *graceOwner) ensureAnchor(funcName string, logger *zap.Logger) {
 	if g == nil || funcName == "" {
 		return
 	}
-	if !autoStateStore.isBPFFS(autoStateStore{}, g.root) {
+	if !g.rootIsBPFFS {
 		return
 	}
 	g.anchorMu.Lock()
@@ -66,7 +66,14 @@ func (g *graceOwner) ensureAnchor(funcName string, logger *zap.Logger) {
 		g.anchorMu.Unlock()
 		return
 	}
+	unpinned := g.hasUnpinnedAnchorLocked(funcName)
 	g.anchorMu.Unlock()
+	if unpinned {
+		// An anchor link for funcName is already attached in-process; retry
+		// pinning that existing FD instead of attaching a second anchor link.
+		g.retryUnpinnedAnchors()
+		return
+	}
 
 	anchorsDir := filepath.Join(g.root, AnchorsSubdir)
 	if err := os.MkdirAll(anchorsDir, 0o755); err != nil {
@@ -160,10 +167,10 @@ func (g *graceOwner) ensureAnchor(funcName string, logger *zap.Logger) {
 	// owner and retry pinning on every reaper round and at shutdown.
 	if err := l.Pin(linkPath); err != nil {
 		g.anchorMu.Lock()
-		if g.anchoredFuncs == nil {
-			g.anchoredFuncs = make(map[string]bool)
-		}
-		g.anchoredFuncs[funcName] = true
+		// Do NOT mark anchoredFuncs[funcName]=true here: anchoredFuncs records
+		// only anchors confirmed pinned on host bpffs. hasUnpinnedAnchorLocked
+		// prevents attaching a second anchor link while pinProgram can tell
+		// that this anchor is still unpinned on static-trampoline kernels.
 		g.unpinnedAnchors = append(g.unpinnedAnchors, pendingAnchor{
 			funcName: funcName,
 			linkPath: linkPath,
@@ -219,6 +226,7 @@ func (g *graceOwner) retryUnpinnedAnchors() {
 			continue
 		}
 		_ = p.lnk.Close()
+		g.markAnchored(p.funcName)
 		if g.logger != nil {
 			g.logger.Info("bpf-safety: pinned deferred trampoline anchor link on retry",
 				zap.String("function", p.funcName), zap.String("linkPath", p.linkPath))
@@ -265,6 +273,25 @@ func (g *graceOwner) markAnchored(funcName string) {
 	g.anchorMu.Unlock()
 }
 
+func (g *graceOwner) isAnchorPinned(funcName string) bool {
+	if g == nil || funcName == "" {
+		return false
+	}
+	g.anchorMu.Lock()
+	pinned := g.anchoredFuncs[funcName]
+	g.anchorMu.Unlock()
+	return pinned
+}
+
+func (g *graceOwner) hasUnpinnedAnchorLocked(funcName string) bool {
+	for _, p := range g.unpinnedAnchors {
+		if p.funcName == funcName && p.lnk != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // CountAnchorLinks returns the number of pinned anchor links currently present
 // under <root>/anchors/.
 func CountAnchorLinks(root string) int {
@@ -298,11 +325,13 @@ func CountAnchorLinks(root string) int {
 //     tiny mapless 2-insn rebuild no-op directory pinned safely for the next
 //     agent's reaper or node reboot.
 //  3. NEVER removes or detaches an anchor's last link on ANY kernel. Anchors
-//     (mapless idle no-op fentry; ~64–256 B bpf_prog_pack slot per anchored
-//     function on Linux 6.7+, or one 4 KiB page per anchored function on Linux
-//     5.10–6.6) are released only by node reboot, preventing Linux 6.0+
-//     last-link -ENOMEM ftrace_ops UAF and 5.10–5.11 static-trampoline page
-//     free.
+//     (mapless idle no-op fentry; at least one 4 KiB bpf_prog page per
+//     anchored function on every kernel plus bpf_prog_aux, JIT image, and
+//     trampoline image — sub-page bpf_prog_pack trampoline slot on x86 6.8+ /
+//     arm64 6.9+, or a 4 KiB trampoline page on x86 5.10–6.7 / arm64
+//     5.10–6.8) are released only by node reboot, preventing Linux 6.0+
+//     last-link -ENOMEM ftrace_ops UAF and 5.10.0–5.10.27 / 5.11
+//     static-trampoline page free.
 func CleanupAnchors(ctx context.Context, logger *zap.Logger, hostBPFFS string) error {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -319,12 +348,7 @@ func CleanupAnchors(ctx context.Context, logger *zap.Logger, hostBPFFS string) e
 }
 
 type anchorCleanupHooks struct {
-	beforeLinkClose     func(funcName string)
-	afterLinkClose      func(funcName string)
-	wrapNoopClose       func(closeFn func())
-	dynamicTrampImageFn func() bool
-	kallsymsSysctlFn    func() bool
-	readKallsymsFn      func() (map[uint64][]uint64, bool, error)
+	wrapNoopClose func(closeFn func())
 }
 
 func cleanupAnchorsInRoot(ctx context.Context, logger *zap.Logger, root string, waitTimeout time.Duration, hooks *anchorCleanupHooks) error {
