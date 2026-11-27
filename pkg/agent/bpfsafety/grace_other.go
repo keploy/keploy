@@ -58,18 +58,18 @@ func StaleTrampolineDetected() bool                                             
 func ReportStaleTrampoline(logger *zap.Logger, funcName string, err error)      {}
 func CountAnchorLinks(root string) int                                          { return 0 }
 func CleanupAnchors(ctx context.Context, logger *zap.Logger, path string) error { return nil }
-func ActiveGraceMode() string                                               { return "" }
-func Armed() bool                                                           { return false }
-func ActiveGraceDir() string                                                { return "" }
-func RecordPrivateOverlayDev(dev uint64)                                    {}
-func CaptureHostBPFFSDev() (uint64, bool)                                   { return 0, false }
-func ValidateHostBPFFSPath(path string, checkContainerHostMount bool) error { return nil }
-func SetBypassForTest(tb TestCleaner)                                       {}
-func AllowShortGraceForTest(tb TestCleaner)                                 {}
-func ResetShutdownForTest(tb TestCleaner)                                   {}
-func ResetUnprotectedForTest(tb TestCleaner)                                {}
-func HasActiveWork() bool                                                   { return false }
-func Init(ctx context.Context, logger *zap.Logger, m Mode) error            { return nil }
-func RegisterDisarmHook(fn func())                                          {}
-func RegisterDetachHook(fn func())                                          {}
-func GracefulShutdown(ctx context.Context, logger *zap.Logger)              {}
+func ActiveGraceMode() string                                                   { return "" }
+func Armed() bool                                                               { return false }
+func ActiveGraceDir() string                                                    { return "" }
+func RecordPrivateOverlayDev(dev uint64)                                        {}
+func CaptureHostBPFFSDev() (uint64, bool)                                       { return 0, false }
+func ValidateHostBPFFSPath(path string, checkContainerHostMount bool) error     { return nil }
+func SetBypassForTest(tb TestCleaner)                                           {}
+func AllowShortGraceForTest(tb TestCleaner)                                     {}
+func ResetShutdownForTest(tb TestCleaner)                                       {}
+func ResetUnprotectedForTest(tb TestCleaner)                                    {}
+func HasActiveWork() bool                                                       { return false }
+func Init(ctx context.Context, logger *zap.Logger, m Mode) error                { return nil }
+func RegisterDisarmHook(fn func())                                              {}
+func RegisterDetachHook(fn func())                                              {}
+func GracefulShutdown(ctx context.Context, logger *zap.Logger)                  {}
