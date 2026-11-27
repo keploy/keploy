@@ -528,8 +528,8 @@ func TestMountCheckErrorClassificationAndOpenGraceOwner(t *testing.T) {
 			{"EINVAL", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EINVAL), true, false, 2, UnprotectedMountCheckErrWarnMessage},
 			{"ENOENT", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ENOENT), false, false, 1, UnprotectedWarnMessage},
 			{"ENOTDIR", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ENOTDIR), false, false, 1, UnprotectedWarnMessage},
-			{"EACCES", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EACCES), false, true, 1, UnprotectedPermWarnMessage},
-			{"EPERM", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EPERM), false, true, 1, UnprotectedPermWarnMessage},
+			{"EACCES", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EACCES), false, true, 1, unprotectedPermWarnMessage(DefaultHostBPFFSPath)},
+			{"EPERM", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.EPERM), false, true, 1, unprotectedPermWarnMessage(DefaultHostBPFFSPath)},
 			{"ELOOP", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ELOOP), false, false, 1, UnprotectedWarnMessage},
 			{"ENAMETOOLONG", fmt.Errorf("statfs /run/keploy/host-bpffs: %w", unix.ENAMETOOLONG), false, false, 1, UnprotectedWarnMessage},
 			{"non_bpffs", errors.New("/run/keploy/host-bpffs is not a bpffs filesystem"), false, false, 1, UnprotectedWarnMessage},
@@ -631,7 +631,7 @@ func TestMountCheckErrorClassificationAndOpenGraceOwner(t *testing.T) {
 				hostErrs:   []error{eacces(h)},
 				nativeErrs: []error{notBPF(n)},
 				wantArmed:  false,
-				wantWarn:   UnprotectedPermWarnMessage,
+				wantWarn:   unprotectedPermWarnMessage(h),
 				wantHostN:  1,
 			},
 			{
@@ -752,6 +752,288 @@ func TestMountCheckErrorClassificationAndOpenGraceOwner(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("override_eacces_names_override_path", func(t *testing.T) {
+		resetStateForTest(t)
+		const customPath = "/custom/keploy/host-bpffs"
+		t.Setenv(EnvHostBPFFS, customPath)
+		t.Setenv(EnvAllowUnprotectedTrampolines, "")
+		validateHostBPFFSPathFn = func(path string, _ bool) error {
+			if path != customPath {
+				return fmt.Errorf("unexpected path %s", path)
+			}
+			return fmt.Errorf("statfs %s: %w", path, unix.EACCES)
+		}
+		core, logs := observer.New(zapcore.WarnLevel)
+		if err := Init(context.Background(), zap.New(core), ModeDaemonSet); err != nil {
+			t.Fatalf("Init = %v, want nil", err)
+		}
+		if Armed() {
+			t.Fatal("expected unprotected mode on override EACCES")
+		}
+		want := unprotectedPermWarnMessage(customPath)
+		if logs.Len() != 1 || logs.All()[0].Message != want || !strings.Contains(logs.All()[0].Message, customPath) {
+			t.Fatalf("WARN = %+v, want %q naming %q", logs.All(), want, customPath)
+		}
+	})
+
+	t.Run("bare_native_host_bpffs_and_ensure_branches", func(t *testing.T) {
+		enomem := func(p string) error { return fmt.Errorf("statfs %s: %w", p, unix.ENOMEM) }
+		enoent := func(p string) error { return fmt.Errorf("statfs %s: %w", p, unix.ENOENT) }
+		eacces := func(p string) error { return fmt.Errorf("statfs %s: %w", p, unix.EACCES) }
+		notBPF := func(p string) error {
+			return fmt.Errorf("%s is not a bpffs filesystem (type=0x62656572, want BPF_FS_MAGIC=0xcafe4a11)", p)
+		}
+		h, n := DefaultHostBPFFSPath, DefaultNativeBPFFSPath
+
+		// M79: bare native, /run/keploy/host-bpffs transient ENOMEM once then OK,
+		// /sys/fs/bpf not bpffs -> retries and ends ARMED on /run/keploy/host-bpffs.
+		t.Run("m79_transient_host_enomem_recovers_armed", func(t *testing.T) {
+			resetStateForTest(t)
+			t.Setenv(EnvHostBPFFS, "")
+			t.Setenv(EnvAllowUnprotectedTrampolines, "")
+			runningInContainerFn = func() bool { return false }
+			nativeBPFFSStatfsFn = func(_ string, buf *unix.Statfs_t) error {
+				buf.Type = 0x62656572
+				return nil
+			}
+			nativeBPFFSMkdirAllFn = func(string, os.FileMode) error { return nil }
+			nativeBPFFSMountFn = func(_, _, _ string, _ uintptr, _ string) error { return nil }
+
+			var hostN, nativeN int
+			validateHostBPFFSPathFn = func(path string, _ bool) error {
+				switch path {
+				case h:
+					hostN++
+					if hostN == 1 {
+						return enomem(h)
+					}
+					return nil
+				case n:
+					nativeN++
+					return notBPF(n)
+				default:
+					return fmt.Errorf("unexpected path %s", path)
+				}
+			}
+			tmp := t.TempDir()
+			var gotRoot string
+			openGraceOwnerInRootFn = func(root string, lg *zap.Logger) (*graceOwner, error) {
+				gotRoot = root
+				return openGraceOwnerInRoot(filepath.Join(tmp, GraceRootSubdir), lg)
+			}
+			core, logs := observer.New(zapcore.WarnLevel)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := Init(ctx, zap.New(core), ModeNative); err != nil {
+				t.Fatalf("Init = %v, want nil", err)
+			}
+			defer func() {
+				stateMu.Lock()
+				o := activeOwner
+				activeOwner = nil
+				stateMu.Unlock()
+				if o != nil {
+					if o.reaper != nil {
+						o.reaper.stopAndWait(o.reaperCancel)
+					}
+					_ = unix.Close(o.lockFD)
+				}
+			}()
+			if !Armed() {
+				t.Fatalf("expected Armed after bare-native host-bpffs retry, logs=%+v", logs.All())
+			}
+			if hostN != 2 || nativeN != 1 {
+				t.Fatalf("validate calls host=%d native=%d, want host=2 native=1", hostN, nativeN)
+			}
+			if want := filepath.Join(h, GraceRootSubdir); gotRoot != want {
+				t.Fatalf("root = %q, want %q", gotRoot, want)
+			}
+		})
+
+		// M79 persistent: bare native, /run/keploy/host-bpffs persistent ENOMEM,
+		// /sys/fs/bpf not bpffs -> 4 total validate calls (2 host + 2 native) + syserr WARN.
+		t.Run("m79_persistent_host_enomem_syserr_4_validates", func(t *testing.T) {
+			resetStateForTest(t)
+			t.Setenv(EnvHostBPFFS, "")
+			t.Setenv(EnvAllowUnprotectedTrampolines, "")
+			runningInContainerFn = func() bool { return false }
+			nativeBPFFSStatfsFn = func(_ string, buf *unix.Statfs_t) error {
+				buf.Type = 0x62656572
+				return nil
+			}
+			nativeBPFFSMkdirAllFn = func(string, os.FileMode) error { return nil }
+			nativeBPFFSMountFn = func(_, _, _ string, _ uintptr, _ string) error { return nil }
+
+			var totalCalls int
+			validateHostBPFFSPathFn = func(path string, _ bool) error {
+				totalCalls++
+				if path == h {
+					return enomem(h)
+				}
+				return notBPF(n)
+			}
+			core, logs := observer.New(zapcore.WarnLevel)
+			if err := Init(context.Background(), zap.New(core), ModeNative); err != nil {
+				t.Fatalf("Init = %v, want nil", err)
+			}
+			if Armed() {
+				t.Fatal("expected unprotected on persistent host-bpffs ENOMEM")
+			}
+			if totalCalls != 4 {
+				t.Fatalf("total validate calls = %d, want 4", totalCalls)
+			}
+			if logs.Len() != 1 || logs.All()[0].Message != UnprotectedMountCheckErrWarnMessage {
+				t.Fatalf("WARN = %+v, want %q", logs.All(), UnprotectedMountCheckErrWarnMessage)
+			}
+		})
+
+		// Bare native, /run/keploy/host-bpffs EACCES, /sys/fs/bpf not bpffs -> perm WARN naming host path, no retry.
+		t.Run("bare_native_host_eacces_perm_warn", func(t *testing.T) {
+			resetStateForTest(t)
+			t.Setenv(EnvHostBPFFS, "")
+			t.Setenv(EnvAllowUnprotectedTrampolines, "")
+			runningInContainerFn = func() bool { return false }
+			nativeBPFFSStatfsFn = func(_ string, buf *unix.Statfs_t) error {
+				buf.Type = 0x62656572
+				return nil
+			}
+			nativeBPFFSMkdirAllFn = func(string, os.FileMode) error { return nil }
+			nativeBPFFSMountFn = func(_, _, _ string, _ uintptr, _ string) error { return nil }
+			var hostN int
+			validateHostBPFFSPathFn = func(path string, _ bool) error {
+				if path == h {
+					hostN++
+					return eacces(h)
+				}
+				return notBPF(n)
+			}
+			core, logs := observer.New(zapcore.WarnLevel)
+			if err := Init(context.Background(), zap.New(core), ModeNative); err != nil {
+				t.Fatalf("Init = %v, want nil", err)
+			}
+			if hostN != 1 {
+				t.Fatalf("host validate calls = %d, want 1", hostN)
+			}
+			want := unprotectedPermWarnMessage(h)
+			if logs.Len() != 1 || logs.All()[0].Message != want {
+				t.Fatalf("WARN = %+v, want %q", logs.All(), want)
+			}
+		})
+
+		// S1: unmounted host where ensureNativeBPFFS hits a transient fault (statfs,
+		// MkdirAll, or Mount) must retry and end ARMED; persistent faults must log
+		// the system-error or permission WARN rather than the mount hint.
+		ensureCases := []struct {
+			name        string
+			statfsErrs  []error
+			mkdirErrs   []error
+			mountErrs   []error
+			wantArmed   bool
+			wantWarn    string
+			wantEnsureN int
+		}{
+			{"transient_statfs_enomem_recovers", []error{unix.ENOMEM, nil}, nil, nil, true, "", 2},
+			{"transient_mkdir_enomem_recovers", nil, []error{unix.ENOMEM, nil}, nil, true, "", 2},
+			{"transient_mount_enomem_recovers", nil, nil, []error{unix.ENOMEM, nil}, true, "", 2},
+			{"persistent_statfs_enomem_syserr", []error{unix.ENOMEM}, nil, nil, false, UnprotectedMountCheckErrWarnMessage, 2},
+			{"persistent_mount_enomem_syserr", nil, nil, []error{unix.ENOMEM}, false, UnprotectedMountCheckErrWarnMessage, 2},
+			{"mount_eperm_perm_warn_no_retry", nil, nil, []error{unix.EPERM}, false, unprotectedPermWarnMessage(n), 1},
+		}
+		for _, tc := range ensureCases {
+			t.Run(tc.name, func(t *testing.T) {
+				resetStateForTest(t)
+				t.Setenv(EnvHostBPFFS, "")
+				t.Setenv(EnvAllowUnprotectedTrampolines, "")
+				runningInContainerFn = func() bool { return false }
+
+				pick := func(errs []error, idx int) error {
+					if len(errs) == 0 {
+						return nil
+					}
+					if idx >= len(errs) {
+						idx = len(errs) - 1
+					}
+					return errs[idx]
+				}
+				mounted := false
+				var statN, mkdirN, mountN int
+				nativeBPFFSStatfsFn = func(_ string, buf *unix.Statfs_t) error {
+					e := pick(tc.statfsErrs, statN)
+					statN++
+					if e != nil {
+						return e
+					}
+					if mounted {
+						buf.Type = unix.BPF_FS_MAGIC
+					} else {
+						buf.Type = 0x62656572
+					}
+					return nil
+				}
+				nativeBPFFSMkdirAllFn = func(string, os.FileMode) error {
+					e := pick(tc.mkdirErrs, mkdirN)
+					mkdirN++
+					return e
+				}
+				nativeBPFFSMountFn = func(_, _, _ string, _ uintptr, _ string) error {
+					e := pick(tc.mountErrs, mountN)
+					mountN++
+					if e != nil {
+						return e
+					}
+					mounted = true
+					return nil
+				}
+				validateHostBPFFSPathFn = func(path string, _ bool) error {
+					if path == h {
+						return enoent(h)
+					}
+					if mounted {
+						return nil
+					}
+					return notBPF(n)
+				}
+				tmp := t.TempDir()
+				openGraceOwnerInRootFn = func(_ string, lg *zap.Logger) (*graceOwner, error) {
+					return openGraceOwnerInRoot(filepath.Join(tmp, GraceRootSubdir), lg)
+				}
+
+				core, logs := observer.New(zapcore.WarnLevel)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if err := Init(ctx, zap.New(core), ModeNative); err != nil {
+					t.Fatalf("Init = %v, want nil", err)
+				}
+				defer func() {
+					stateMu.Lock()
+					o := activeOwner
+					activeOwner = nil
+					stateMu.Unlock()
+					if o != nil {
+						if o.reaper != nil {
+							o.reaper.stopAndWait(o.reaperCancel)
+						}
+						_ = unix.Close(o.lockFD)
+					}
+				}()
+
+				if Armed() != tc.wantArmed {
+					t.Fatalf("Armed = %v, want %v (logs=%+v)", Armed(), tc.wantArmed, logs.All())
+				}
+				if statN != tc.wantEnsureN {
+					t.Fatalf("ensure statfs calls = %d, want %d", statN, tc.wantEnsureN)
+				}
+				if tc.wantArmed {
+					if logs.Len() != 0 {
+						t.Fatalf("expected 0 WARNs when armed, got %+v", logs.All())
+					}
+				} else if logs.Len() != 1 || logs.All()[0].Message != tc.wantWarn {
+					t.Fatalf("WARN = %+v, want %q", logs.All(), tc.wantWarn)
+				}
+			})
+		}
+	})
 }
 
 func TestEnsureNativeBPFFSNeverStacksOnStatfsError(t *testing.T) {
@@ -761,19 +1043,20 @@ func TestEnsureNativeBPFFSNeverStacksOnStatfsError(t *testing.T) {
 		statfsMagic int64
 		statfsErr   error
 		wantMount   int
+		wantErr     error
 	}{
-		{"already_bpffs", false, unix.BPF_FS_MAGIC, nil, 0},
-		{"statfs_enomem_no_stack", false, 0, unix.ENOMEM, 0},
-		{"statfs_eintr_no_stack", false, 0, unix.EINTR, 0},
-		{"statfs_eio_no_stack", false, 0, unix.EIO, 0},
-		{"statfs_eagain_no_stack", false, 0, unix.EAGAIN, 0},
-		{"statfs_eacces_no_stack", false, 0, unix.EACCES, 0},
-		{"statfs_eperm_no_stack", false, 0, unix.EPERM, 0},
-		{"statfs_enotdir_no_stack", false, 0, unix.ENOTDIR, 0},
-		{"non_bpffs_mounts", false, 0x62656572, nil, 1},
-		{"enoent_mounts", false, 0, unix.ENOENT, 1},
-		{"in_container_never_mounts_non_bpffs", true, 0x62656572, nil, 0},
-		{"in_container_never_mounts_enoent", true, 0, unix.ENOENT, 0},
+		{"already_bpffs", false, unix.BPF_FS_MAGIC, nil, 0, nil},
+		{"statfs_enomem_no_stack", false, 0, unix.ENOMEM, 0, unix.ENOMEM},
+		{"statfs_eintr_no_stack", false, 0, unix.EINTR, 0, unix.EINTR},
+		{"statfs_eio_no_stack", false, 0, unix.EIO, 0, unix.EIO},
+		{"statfs_eagain_no_stack", false, 0, unix.EAGAIN, 0, unix.EAGAIN},
+		{"statfs_eacces_no_stack", false, 0, unix.EACCES, 0, unix.EACCES},
+		{"statfs_eperm_no_stack", false, 0, unix.EPERM, 0, unix.EPERM},
+		{"statfs_enotdir_no_stack", false, 0, unix.ENOTDIR, 0, unix.ENOTDIR},
+		{"non_bpffs_mounts", false, 0x62656572, nil, 1, nil},
+		{"enoent_mounts", false, 0, unix.ENOENT, 1, nil},
+		{"in_container_never_mounts_non_bpffs", true, 0x62656572, nil, 0, nil},
+		{"in_container_never_mounts_enoent", true, 0, unix.ENOENT, 0, nil},
 	}
 
 	for _, tc := range cases {
@@ -793,9 +1076,16 @@ func TestEnsureNativeBPFFSNeverStacksOnStatfsError(t *testing.T) {
 				mountCalls++
 				return nil
 			}
-			ensureNativeBPFFS()
+			gotErr := ensureNativeBPFFS()
 			if mountCalls != tc.wantMount {
 				t.Fatalf("mount calls = %d, want %d", mountCalls, tc.wantMount)
+			}
+			if tc.wantErr != nil {
+				if !errors.Is(gotErr, tc.wantErr) {
+					t.Fatalf("ensureNativeBPFFS err = %v, want %v", gotErr, tc.wantErr)
+				}
+			} else if gotErr != nil {
+				t.Fatalf("ensureNativeBPFFS err = %v, want nil", gotErr)
 			}
 		})
 	}

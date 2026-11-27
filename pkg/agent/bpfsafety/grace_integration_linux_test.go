@@ -3246,31 +3246,167 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 	})
 
 	// 6. Container-native single-fault failslab sweep with bpffs mounted at
-	//    /run/keploy/host-bpffs and runningInContainerFn=true: proves a transient
-	//    statfs/stat ENOMEM on /run/keploy/host-bpffs is NOT swallowed by the
-	//    /sys/fs/bpf fallback's config error — every single fault recovers to
-	//    Armed with 0 misleading mount hints and 0 stacked mounts.
+	//    /run/keploy/host-bpffs and runningInContainerFn=true, tested BOTH with
+	//    /sys/fs/bpf private (kills M76 on-kernel) AND with /sys/fs/bpf detached
+	//    (kills M75 on-kernel): proves a transient statfs/stat ENOMEM on
+	//    /run/keploy/host-bpffs is NOT swallowed by the /sys/fs/bpf fallback's
+	//    config error — every single fault recovers to Armed with 0 misleading
+	//    mount hints and 0 stacked mounts.
 	t.Run("container_native_failslab_sweep", func(t *testing.T) {
+		for _, variant := range []struct {
+			name         string
+			detachSysBPF bool
+		}{
+			{"private_sys_bpf", false},
+			{"detached_sys_bpf", true},
+		} {
+			t.Run(variant.name, func(t *testing.T) {
+				resetStateForTest(t)
+				t.Setenv(EnvHostBPFFS, "")
+				runningInContainerFn = func() bool { return true }
+				if err := os.MkdirAll(DefaultHostBPFFSPath, 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", DefaultHostBPFFSPath, err)
+				}
+				mountedHere := false
+				if countBPFFSMounts(DefaultHostBPFFSPath) == 0 {
+					if err := unix.Mount("bpf", DefaultHostBPFFSPath, "bpf", 0, ""); err != nil {
+						t.Fatalf("mount bpf at %s: %v", DefaultHostBPFFSPath, err)
+					}
+					mountedHere = true
+				}
+				defer func() {
+					if mountedHere {
+						_ = unix.Unmount(DefaultHostBPFFSPath, unix.MNT_DETACH)
+					}
+				}()
+				detachedHere := false
+				if variant.detachSysBPF {
+					for countBPFFSMounts(DefaultNativeBPFFSPath) > 0 {
+						if err := unix.Unmount(DefaultNativeBPFFSPath, unix.MNT_DETACH); err != nil {
+							t.Fatalf("detach %s: %v", DefaultNativeBPFFSPath, err)
+						}
+						detachedHere = true
+					}
+				}
+				defer func() {
+					if detachedHere && countBPFFSMounts(DefaultNativeBPFFSPath) == 0 {
+						_ = unix.Mount("bpf", DefaultNativeBPFFSPath, "bpf", 0, "")
+					}
+				}()
+				baseHostMounts := countBPFFSMounts(DefaultHostBPFFSPath)
+				baseSysMounts := countBPFFSMounts(DefaultNativeBPFFSPath)
+
+				for _, kv := range [][2]string{{"task-filter", "N"}, {"ignore-gfp-wait", "N"}, {"probability", "0"}, {"times", "-1"}, {"verbose", "0"}} {
+					_ = os.WriteFile(filepath.Join(failslabDir, kv[0]), []byte(kv[1]), 0o644)
+				}
+				defer func() {
+					_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+					_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+				}()
+
+				type res struct {
+					errMsg string
+				}
+				ch := make(chan res, 1)
+				go func() {
+					runtime.LockOSThread()
+					nfd, oerr := unix.Open(fmt.Sprintf("/proc/self/task/%d/fail-nth", unix.Gettid()), unix.O_RDWR, 0)
+					if oerr != nil {
+						ch <- res{errMsg: "open fail-nth: " + oerr.Error()}
+						return
+					}
+					defer func() { _ = unix.Close(nfd) }()
+					arm := func(n int) { _, _ = unix.Pwrite(nfd, []byte(strconv.Itoa(n)), 0) }
+					left := func() string {
+						b := make([]byte, 16)
+						k, _ := unix.Pread(nfd, b, 0)
+						if k < 0 {
+							k = 0
+						}
+						return strings.TrimSpace(string(b[:k]))
+					}
+					for n := 1; n <= 300; n++ {
+						core, logs := observer.New(zap.WarnLevel)
+						ctx, cancel := context.WithCancel(context.Background())
+						arm(n)
+						_ = Init(ctx, zap.New(core), ModeNative)
+						lf := left()
+						if lf != "0" {
+							arm(0)
+						}
+						stateMu.Lock()
+						o := activeOwner
+						stateMu.Unlock()
+						unprot := UnprotectedTrampolinesActive()
+						if countBPFFSMounts(DefaultHostBPFFSPath) > baseHostMounts || countBPFFSMounts(DefaultNativeBPFFSPath) > baseSysMounts {
+							cancel()
+							ch <- res{errMsg: fmt.Sprintf("container-native(%s) fail-nth=%d stacked a bpffs mount", variant.name, n)}
+							return
+						}
+						if unprot || o == nil {
+							cancel()
+							ch <- res{errMsg: fmt.Sprintf("container-native(%s) single failslab fault fail-nth=%d left Init unprotected (armed=%v unprot=%v logs=%+v)", variant.name, n, o != nil, unprot, logs.All())}
+							return
+						}
+						cancel()
+						if o.reaper != nil {
+							o.reaper.stopAndWait(o.reaperCancel)
+						}
+						stateMu.Lock()
+						activeOwner = nil
+						stateMu.Unlock()
+						_ = unix.Close(o.lockFD)
+						_ = os.RemoveAll(o.dir)
+						unprotectedTrampolines.Store(false)
+						explicitUnprotectedOptOut.Store(false)
+						unprotectedWarned.Store(false)
+						stateMu.Lock()
+						unprotectedLogger = nil
+						unprotectedWarnedFuncs = map[string]bool{}
+						stateMu.Unlock()
+						if lf != "0" {
+							break
+						}
+					}
+					ch <- res{}
+				}()
+				r := <-ch
+				if r.errMsg != "" {
+					t.Fatal(r.errMsg)
+				}
+			})
+		}
+	})
+
+	// 7. Unmounted bare-native single-fault failslab sweep: /sys/fs/bpf is
+	//    unmounted before every iteration so ensureNativeBPFFS must statfs +
+	//    mount it under real slab faults. Proves every transient fault (statfs,
+	//    MkdirAll, or mount(2)) retries cleanly and ends Armed with mount count
+	//    never above 1, and proves an ENOENT statfs still mounts bpffs (kills
+	//    S1 and M78 on-kernel).
+	t.Run("unmounted_native_failslab_sweep", func(t *testing.T) {
 		resetStateForTest(t)
 		t.Setenv(EnvHostBPFFS, "")
-		runningInContainerFn = func() bool { return true }
-		if err := os.MkdirAll(DefaultHostBPFFSPath, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", DefaultHostBPFFSPath, err)
-		}
-		mountedHere := false
-		if countBPFFSMounts(DefaultHostBPFFSPath) == 0 {
-			if err := unix.Mount("bpf", DefaultHostBPFFSPath, "bpf", 0, ""); err != nil {
-				t.Fatalf("mount bpf at %s: %v", DefaultHostBPFFSPath, err)
-			}
-			mountedHere = true
-		}
+		runningInContainerFn = func() bool { return false }
 		defer func() {
-			if mountedHere {
-				_ = unix.Unmount(DefaultHostBPFFSPath, unix.MNT_DETACH)
+			if countBPFFSMounts(DefaultNativeBPFFSPath) == 0 {
+				_ = unix.Mount("bpf", DefaultNativeBPFFSPath, "bpf", 0, "")
 			}
 		}()
-		baseHostMounts := countBPFFSMounts(DefaultHostBPFFSPath)
-		baseSysMounts := countBPFFSMounts(DefaultNativeBPFFSPath)
+
+		// First prove ENOENT statfs with real MkdirAll + Mount mounts /sys/fs/bpf (kills M78 on-kernel).
+		for countBPFFSMounts(DefaultNativeBPFFSPath) > 0 {
+			if err := unix.Unmount(DefaultNativeBPFFSPath, unix.MNT_DETACH); err != nil {
+				t.Fatalf("unmount %s: %v", DefaultNativeBPFFSPath, err)
+			}
+		}
+		origStatfs := nativeBPFFSStatfsFn
+		nativeBPFFSStatfsFn = func(string, *unix.Statfs_t) error { return unix.ENOENT }
+		eerr := ensureNativeBPFFS()
+		nativeBPFFSStatfsFn = origStatfs
+		if eerr != nil || countBPFFSMounts(DefaultNativeBPFFSPath) != 1 {
+			t.Fatalf("ensureNativeBPFFS on ENOENT: err=%v mounts=%d, want nil and 1", eerr, countBPFFSMounts(DefaultNativeBPFFSPath))
+		}
 
 		for _, kv := range [][2]string{{"task-filter", "N"}, {"ignore-gfp-wait", "N"}, {"probability", "0"}, {"times", "-1"}, {"verbose", "0"}} {
 			_ = os.WriteFile(filepath.Join(failslabDir, kv[0]), []byte(kv[1]), 0o644)
@@ -3302,6 +3438,12 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 				return strings.TrimSpace(string(b[:k]))
 			}
 			for n := 1; n <= 300; n++ {
+				for countBPFFSMounts(DefaultNativeBPFFSPath) > 0 {
+					if uerr := unix.Unmount(DefaultNativeBPFFSPath, unix.MNT_DETACH); uerr != nil {
+						ch <- res{errMsg: fmt.Sprintf("unmount %s before n=%d: %v", DefaultNativeBPFFSPath, n, uerr)}
+						return
+					}
+				}
 				core, logs := observer.New(zap.WarnLevel)
 				ctx, cancel := context.WithCancel(context.Background())
 				arm(n)
@@ -3314,14 +3456,15 @@ func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
 				o := activeOwner
 				stateMu.Unlock()
 				unprot := UnprotectedTrampolinesActive()
-				if countBPFFSMounts(DefaultHostBPFFSPath) > baseHostMounts || countBPFFSMounts(DefaultNativeBPFFSPath) > baseSysMounts {
+				mounts := countBPFFSMounts(DefaultNativeBPFFSPath)
+				if mounts > 1 {
 					cancel()
-					ch <- res{errMsg: fmt.Sprintf("container-native fail-nth=%d stacked a bpffs mount", n)}
+					ch <- res{errMsg: fmt.Sprintf("unmounted native fail-nth=%d stacked bpffs mounts (%d > 1)", n, mounts)}
 					return
 				}
-				if unprot || o == nil {
+				if unprot || o == nil || mounts != 1 {
 					cancel()
-					ch <- res{errMsg: fmt.Sprintf("container-native single failslab fault fail-nth=%d left Init unprotected (armed=%v unprot=%v logs=%+v)", n, o != nil, unprot, logs.All())}
+					ch <- res{errMsg: fmt.Sprintf("unmounted native single failslab fault fail-nth=%d did not arm (armed=%v unprot=%v mounts=%d logs=%+v)", n, o != nil, unprot, mounts, logs.All())}
 					return
 				}
 				cancel()

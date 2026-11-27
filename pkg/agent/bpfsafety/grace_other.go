@@ -19,7 +19,7 @@ const (
 	GraceModeUnprotected                = "unprotected"
 	UnprotectedWarnMessage              = "eBPF crash protection is OFF: mount the host's /sys/fs/bpf at /run/keploy/host-bpffs (see docs/kernel-safety.md)"
 	UnprotectedMountCheckErrWarnMessage = "eBPF crash protection is OFF: host bpffs mount check failed with a system error (see docs/kernel-safety.md)"
-	UnprotectedPermWarnMessage          = "eBPF crash protection is OFF: permission denied accessing host bpffs mount (check permissions/AppArmor/SELinux on /run/keploy/host-bpffs or /sys/fs/bpf; see docs/kernel-safety.md)"
+	UnprotectedPermWarnMessage          = "eBPF crash protection is OFF: permission denied accessing host bpffs mount"
 	UnprotectedInitErrWarnMessage       = "eBPF crash protection is OFF: host bpffs mount is present but grace directory initialization failed (see docs/kernel-safety.md)"
 	UnprotectedOptOutWarnMessage        = "eBPF crash protection is OFF: KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 is set (see docs/kernel-safety.md)"
 	EnvHostBPFFS                        = "KEPLOY_HOST_BPFFS"
