@@ -85,13 +85,14 @@ Both OSS `keploy` and `enterprise` share a single implementation in `go.keploy.i
    - Keploy keeps the affected program pinned until reboot, degrades the affected hook cleanly without crash-looping, sets Prometheus gauge `keploy_bpf_stale_trampoline=1`, logs a loud `WARN` (`"drain and reboot this node"`), and sets `bpf_stale_trampoline: true` in CLI telemetry.
    - **Operator action when `keploy_bpf_stale_trampoline == 1`:** cordon, drain, and reboot the affected node. Do **not** manually delete pinned programs from `/sys/fs/bpf/keploy-grace/` before rebooting.
 
-6. **Honest Unprotected Mode (When No Host bpffs Is Reachable):**
-   - If no writable host bpffs mount is reachable (for example, a customer-managed pod manifest or an older Helm chart missing `/run/keploy/host-bpffs`), Keploy **never** refuses to start or aborts recording (no exit code `6`).
-   - Instead, Keploy enters honest unprotected mode, logs one clear `WARN`:
+6. **Honest Unprotected Mode (When No Host bpffs Is Reachable or Grace Setup Fails):**
+   - If no writable host bpffs mount is reachable (for example, a customer-managed pod manifest or an older Helm chart missing `/run/keploy/host-bpffs`), or if a validated host bpffs mount's grace directory initialization fails even after retry (for example under sustained `-ENOMEM` or `ENOSPC`), Keploy **never** refuses to start or aborts recording (no exit code `6`).
+   - Instead, Keploy enters honest unprotected mode, logs one cause-specific `WARN` — when no host bpffs mount is reachable:
      ```text
      eBPF crash protection is OFF: mount the host's /sys/fs/bpf at /run/keploy/host-bpffs (see docs/kernel-safety.md)
      ```
-     sets `keploy_bpf_unprotected_trampolines=1` and `keploy_bpf_grace_mode{mode="unprotected"}=1`, and flags `bpf_unprotected_trampolines: true` in CLI telemetry.
+     or, when host bpffs is mounted but grace directory setup failed, `"eBPF crash protection is OFF: host bpffs mount is present but grace directory initialization failed (see docs/kernel-safety.md)"` with the underlying OS error — sets `keploy_bpf_unprotected_trampolines=1` and `keploy_bpf_grace_mode{mode="unprotected"}=1`, and flags `bpf_unprotected_trampolines: true` in CLI telemetry.
+   - **Static-trampoline kernels (`5.10.0–5.10.27` and `5.11.0–5.11.10`) still fail closed in Init-entered unprotected mode:** Because no anchor link can be pinned without a host bpffs grace owner and a clean exit-time close of an unanchored `fexit` panics these kernels while tasks sleep in the hooked function, `bpfsafety.PinBeforeAttach` still returns `ErrAnchorUnpinned` (withholding tracing attaches so OSS `unixconn` falls back to syscall tracepoints) unless the operator explicitly sets `KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1`.
    - No anchor links can be pinned in unprotected mode. Mount the host's `/sys/fs/bpf` at `/run/keploy/host-bpffs` to re-enable full host-bpffs protection.
 
 7. **Observability (Prometheus Metrics & Telemetry):**

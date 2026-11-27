@@ -91,8 +91,19 @@ const (
 	GraceModeUnprotected = "unprotected"
 
 	// UnprotectedWarnMessage is the exact single warning logged when Init
-	// cannot arm host-bpffs grace pinning and degrades to honest unprotected mode.
+	// cannot find a writable host bpffs mount and degrades to honest
+	// unprotected mode.
 	UnprotectedWarnMessage = "eBPF crash protection is OFF: mount the host's /sys/fs/bpf at /run/keploy/host-bpffs (see docs/kernel-safety.md)"
+
+	// UnprotectedInitErrWarnMessage is logged when a host bpffs mount validated
+	// but grace directory initialization failed (for example under memory
+	// pressure or ENOSPC), so the warning names the real cause rather than
+	// claiming bpffs is unmounted.
+	UnprotectedInitErrWarnMessage = "eBPF crash protection is OFF: host bpffs mount is present but grace directory initialization failed (see docs/kernel-safety.md)"
+
+	// UnprotectedOptOutWarnMessage is logged when the operator explicitly set
+	// KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1.
+	UnprotectedOptOutWarnMessage = "eBPF crash protection is OFF: KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 is set (see docs/kernel-safety.md)"
 
 	// EnvHostBPFFS overrides the host bpffs mount path.
 	EnvHostBPFFS = "KEPLOY_HOST_BPFFS"
@@ -188,22 +199,29 @@ var ErrAnchorUnpinned = errors.New("bpf trampoline anchor is not pinned on host 
 type MetricsObserver func(dirsPresent, pinnedProgs, anchorLinks int, unprotected, staleTrampoline bool)
 
 var (
-	initMu                  sync.Mutex
-	stateMu                 sync.Mutex
-	activeOwner             *graceOwner
-	disarmHooks             []func()
-	detachHooks             []func()
-	unpinnedLockFDs         []int
-	retainedAnchorLinks     []link.Link
-	privateOverlayDevs      = map[uint64]bool{}
-	staleTargets            = map[string]bool{}
-	metricsObserver         MetricsObserver
-	unprotectedTrampolines  atomic.Bool
-	unprotectedWarned       atomic.Bool
-	staleTrampolineDetected atomic.Bool
-	shuttingDown            atomic.Bool
-	shortGraceTestMode      atomic.Bool
-	testBypassPin           atomic.Bool
+	initMu                    sync.Mutex
+	stateMu                   sync.Mutex
+	activeOwner               *graceOwner
+	disarmHooks               []func()
+	detachHooks               []func()
+	unpinnedLockFDs           []int
+	retainedAnchorLinks       []link.Link
+	privateOverlayDevs        = map[uint64]bool{}
+	staleTargets              = map[string]bool{}
+	unprotectedWarnedFuncs    = map[string]bool{}
+	unprotectedLogger         *zap.Logger
+	metricsObserver           MetricsObserver
+	unprotectedTrampolines    atomic.Bool
+	explicitUnprotectedOptOut atomic.Bool
+	unprotectedWarned         atomic.Bool
+	staleTrampolineDetected   atomic.Bool
+	shuttingDown              atomic.Bool
+	shortGraceTestMode        atomic.Bool
+	testBypassPin             atomic.Bool
+
+	// dynamicTrampImageCheckFn and openGraceOwnerInRootFn are swappable in tests.
+	dynamicTrampImageCheckFn = kernelHasDynamicTrampImage
+	openGraceOwnerInRootFn   = openGraceOwnerInRoot
 )
 
 // DetectMode infers the launch Mode from the daemonSet flag, explicit
@@ -409,18 +427,26 @@ func ResetShutdownForTest(tb TestCleaner) {
 func ResetUnprotectedForTest(tb TestCleaner) {
 	tb.Helper()
 	prevUnprot := unprotectedTrampolines.Swap(false)
+	prevOptOut := explicitUnprotectedOptOut.Swap(false)
 	prevWarned := unprotectedWarned.Swap(false)
 	prevStale := staleTrampolineDetected.Swap(false)
 	stateMu.Lock()
 	prevTargets := staleTargets
 	staleTargets = map[string]bool{}
+	prevLogger := unprotectedLogger
+	unprotectedLogger = nil
+	prevWarnedFuncs := unprotectedWarnedFuncs
+	unprotectedWarnedFuncs = map[string]bool{}
 	stateMu.Unlock()
 	tb.Cleanup(func() {
 		unprotectedTrampolines.Store(prevUnprot)
+		explicitUnprotectedOptOut.Store(prevOptOut)
 		unprotectedWarned.Store(prevWarned)
 		staleTrampolineDetected.Store(prevStale)
 		stateMu.Lock()
 		staleTargets = prevTargets
+		unprotectedLogger = prevLogger
+		unprotectedWarnedFuncs = prevWarnedFuncs
 		stateMu.Unlock()
 	})
 }
@@ -470,13 +496,19 @@ func Init(ctx context.Context, logger *zap.Logger, mode Mode) error {
 	}
 
 	if strings.TrimSpace(os.Getenv(EnvAllowUnprotectedTrampolines)) == "1" {
-		enterUnprotectedMode(logger, mode, errors.New("KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 set"))
+		explicitUnprotectedOptOut.Store(true)
+		enterUnprotectedMode(logger, mode, UnprotectedOptOutWarnMessage, errors.New("KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 set"))
 		return nil
 	}
 
-	owner, err := openGraceOwner(logger, mode)
+	owner, mountValidated, err := openGraceOwner(logger, mode)
 	if err != nil {
-		enterUnprotectedMode(logger, mode, err)
+		explicitUnprotectedOptOut.Store(false)
+		msg := UnprotectedWarnMessage
+		if mountValidated {
+			msg = UnprotectedInitErrWarnMessage
+		}
+		enterUnprotectedMode(logger, mode, msg, err)
 		return nil
 	}
 
@@ -484,8 +516,11 @@ func Init(ctx context.Context, logger *zap.Logger, mode Mode) error {
 	owner.reaperCancel = reaperCancel
 
 	unprotectedTrampolines.Store(false)
+	explicitUnprotectedOptOut.Store(false)
 	stateMu.Lock()
 	activeOwner = owner
+	unprotectedLogger = nil
+	unprotectedWarnedFuncs = map[string]bool{}
 	stateMu.Unlock()
 
 	fields := []zap.Field{
@@ -502,8 +537,13 @@ func Init(ctx context.Context, logger *zap.Logger, mode Mode) error {
 	return nil
 }
 
-func enterUnprotectedMode(logger *zap.Logger, mode Mode, cause error) {
+func enterUnprotectedMode(logger *zap.Logger, mode Mode, msg string, cause error) {
 	unprotectedTrampolines.Store(true)
+	if logger != nil {
+		stateMu.Lock()
+		unprotectedLogger = logger
+		stateMu.Unlock()
+	}
 	notifyMetrics(0, 0, 0)
 	if unprotectedWarned.CompareAndSwap(false, true) && logger != nil {
 		fields := []zap.Field{
@@ -513,7 +553,22 @@ func enterUnprotectedMode(logger *zap.Logger, mode Mode, cause error) {
 		if cause != nil {
 			fields = append(fields, zap.Error(cause))
 		}
-		logger.Warn(UnprotectedWarnMessage, fields...)
+		logger.Warn(msg, fields...)
+	}
+}
+
+func warnUnprotectedStaticRefusalOnce(funcName string) {
+	stateMu.Lock()
+	if unprotectedWarnedFuncs[funcName] {
+		stateMu.Unlock()
+		return
+	}
+	unprotectedWarnedFuncs[funcName] = true
+	logger := unprotectedLogger
+	stateMu.Unlock()
+	if logger != nil {
+		logger.Warn("bpf-safety: refusing tracing attach on static-trampoline kernel in unprotected mode because trampoline anchors cannot be pinned on host bpffs",
+			zap.String("function", funcName))
 	}
 }
 
@@ -579,7 +634,14 @@ func PinBeforeAttach(prog *ebpf.Program, object, name, role string) error {
 	owner := activeOwner
 	stateMu.Unlock()
 	if owner == nil {
-		if unprotectedTrampolines.Load() || testBypassPin.Load() {
+		if testBypassPin.Load() || explicitUnprotectedOptOut.Load() {
+			return nil
+		}
+		if unprotectedTrampolines.Load() {
+			if !dynamicTrampImageCheckFn() {
+				warnUnprotectedStaticRefusalOnce(name)
+				return fmt.Errorf("%w: refusing to attach tracing program %s (%s) on static-trampoline kernel in unprotected mode (host bpffs grace pinning unavailable)", ErrAnchorUnpinned, name, object)
+			}
 			return nil
 		}
 		return ErrGraceNotArmed
@@ -1200,13 +1262,22 @@ func sanitizeTag(s string) string {
 	return b.String()
 }
 
-func openGraceOwner(logger *zap.Logger, mode Mode) (*graceOwner, error) {
+func openGraceOwner(logger *zap.Logger, mode Mode) (*graceOwner, bool, error) {
 	mountPath, err := resolveHostBPFFSMount(mode)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	root := filepath.Join(mountPath, GraceRootSubdir)
-	return openGraceOwnerInRoot(root, logger)
+	owner, err := openGraceOwnerInRootFn(root, logger)
+	if err != nil {
+		// The host bpffs mount itself validated; retry once in case a
+		// transient allocation fault interrupted grace directory setup.
+		owner, err = openGraceOwnerInRootFn(root, logger)
+	}
+	if err != nil {
+		return nil, true, err
+	}
+	return owner, true, nil
 }
 
 func openGraceOwnerInRoot(root string, logger *zap.Logger) (*graceOwner, error) {

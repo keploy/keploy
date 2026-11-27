@@ -38,6 +38,8 @@ func resetStateForTest(t *testing.T) {
 	for k, v := range privateOverlayDevs {
 		prevOverlays[k] = v
 	}
+	prevUnprotLogger := unprotectedLogger
+	prevWarnedFuncs := unprotectedWarnedFuncs
 	activeOwner = nil
 	metricsObserver = nil
 	disarmHooks = nil
@@ -45,12 +47,17 @@ func resetStateForTest(t *testing.T) {
 	unpinnedLockFDs = nil
 	retainedAnchorLinks = nil
 	privateOverlayDevs = map[uint64]bool{}
+	unprotectedLogger = nil
+	unprotectedWarnedFuncs = map[string]bool{}
 	stateMu.Unlock()
 	prevUnprot := unprotectedTrampolines.Swap(false)
+	prevOptOut := explicitUnprotectedOptOut.Swap(false)
 	prevWarned := unprotectedWarned.Swap(false)
 	prevStale := staleTrampolineDetected.Swap(false)
 	prevShuttingDown := shuttingDown.Swap(false)
 	prevBypass := testBypassPin.Swap(false)
+	prevDynFn := dynamicTrampImageCheckFn
+	prevOpenFn := openGraceOwnerInRootFn
 	t.Cleanup(func() {
 		stateMu.Lock()
 		for _, fd := range unpinnedLockFDs {
@@ -63,12 +70,17 @@ func resetStateForTest(t *testing.T) {
 		unpinnedLockFDs = prevLockFDs
 		retainedAnchorLinks = prevRetained
 		privateOverlayDevs = prevOverlays
+		unprotectedLogger = prevUnprotLogger
+		unprotectedWarnedFuncs = prevWarnedFuncs
 		stateMu.Unlock()
 		unprotectedTrampolines.Store(prevUnprot)
+		explicitUnprotectedOptOut.Store(prevOptOut)
 		unprotectedWarned.Store(prevWarned)
 		staleTrampolineDetected.Store(prevStale)
 		shuttingDown.Store(prevShuttingDown)
 		testBypassPin.Store(prevBypass)
+		dynamicTrampImageCheckFn = prevDynFn
+		openGraceOwnerInRootFn = prevOpenFn
 	})
 }
 
@@ -264,8 +276,38 @@ func TestInitWithoutHostBPFFSEntersHonestUnprotectedModeOnce(t *testing.T) {
 	}
 
 	var dummy ebpf.Program
+	// Dynamic-trampoline kernel: honest unprotected mode permits PinBeforeAttach.
+	dynamicTrampImageCheckFn = func() bool { return true }
 	if err := PinBeforeAttach(&dummy, "proxyless", "keploy_tcp_sendmsg", "p"); err != nil {
-		t.Fatalf("PinBeforeAttach under honest unprotected mode returned %v, want nil", err)
+		t.Fatalf("PinBeforeAttach under honest unprotected mode on dynamic kernel returned %v, want nil", err)
+	}
+
+	// Static-trampoline kernel: Init-entered unprotected mode MUST STILL fail
+	// closed with ErrAnchorUnpinned (and log one refusal WARN per function)
+	// unless KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 was explicitly set.
+	dynamicTrampImageCheckFn = func() bool { return false }
+	for i := 0; i < 3; i++ {
+		err := PinBeforeAttach(&dummy, "proxyless", "unix_stream_recvmsg", "p")
+		if !errors.Is(err, ErrAnchorUnpinned) {
+			t.Fatalf("attempt %d: PinBeforeAttach under Init unprotected mode on static kernel = %v, want ErrAnchorUnpinned", i, err)
+		}
+	}
+	if logs.Len() != 2 {
+		t.Fatalf("expected 1 init WARN + 1 per-function static refusal WARN across 3 attempts, got %d: %+v", logs.Len(), logs.All())
+	}
+
+	// Explicit KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 break-glass opt-out still overrides.
+	ResetUnprotectedForTest(t)
+	t.Setenv(EnvAllowUnprotectedTrampolines, "1")
+	optCore, optLogs := observer.New(zapcore.WarnLevel)
+	if err := Init(context.Background(), zap.New(optCore), ModeNative); err != nil {
+		t.Fatalf("Init with explicit opt-out returned %v, want nil", err)
+	}
+	if optLogs.Len() != 1 || optLogs.All()[0].Message != UnprotectedOptOutWarnMessage {
+		t.Fatalf("explicit opt-out WARN = %+v, want %q", optLogs.All(), UnprotectedOptOutWarnMessage)
+	}
+	if err := PinBeforeAttach(&dummy, "proxyless", "unix_stream_recvmsg", "p"); err != nil {
+		t.Fatalf("PinBeforeAttach with explicit %s=1 on static kernel = %v, want nil", EnvAllowUnprotectedTrampolines, err)
 	}
 }
 

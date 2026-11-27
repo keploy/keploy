@@ -21,6 +21,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 )
 
@@ -433,10 +434,12 @@ func TestOnKernelAnchorCalmRemoval(t *testing.T) {
 		t.Fatalf("anchor disappeared on agent exit (CountAnchorLinks=%d, want 1)", got)
 	}
 
-	// Idle cleanup MUST reap owner.dir (and on 5.12+ with visible kallsyms
-	// leave 0 leftover grace dirs; on 5.10..5.11 at most 1 mapless rebuild
-	// no-op dir may remain safely pinned) AND KEEP anchor -link and -prog
-	// pinned until reboot (with StaleTrampolineDetected==false)!
+	// Idle cleanup MUST reap owner.dir (and on dynamic-trampoline kernels
+	// 5.10.28+/5.11.11+/5.12+ with visible kallsyms leave 0 leftover grace
+	// dirs; on static-trampoline kernels 5.10.0-5.10.27/5.11.0-5.11.10 at
+	// most 1 mapless rebuild no-op dir may remain safely pinned) AND KEEP
+	// anchor -link and -prog pinned until reboot (with
+	// StaleTrampolineDetected==false)!
 	if err := cleanupAnchorsInRoot(context.Background(), zap.NewNop(), root, 10*time.Second, nil); err != nil {
 		t.Fatalf("idle CleanupAnchors failed: %v", err)
 	}
@@ -448,7 +451,7 @@ func TestOnKernelAnchorCalmRemoval(t *testing.T) {
 	}
 	if kernelHasDynamicTrampImage() && hasAnyDeadGraceDir(root) {
 		ents, _ := os.ReadDir(root)
-		t.Fatalf("expected 0 leftover grace dirs after idle cleanup on 5.12+, found entries=%v", ents)
+		t.Fatalf("expected 0 leftover grace dirs after idle cleanup on dynamic-trampoline kernel, found entries=%v", ents)
 	}
 	if _, err := os.Stat(linkPath); err != nil {
 		t.Fatalf("anchor link %s was removed by CleanupAnchors (MUST stay until reboot!): %v", linkPath, err)
@@ -747,10 +750,11 @@ func TestOnKernelReaperSurvivesENOMEMUnlinkViaForceRebuild(t *testing.T) {
 
 	// Pass 2: snapshots stuck stale address from kallsyms AND immediately forces
 	// trampoline rebuild via a pinned no-op in reaperOwner.dir (kills M3 & M5)!
-	// On Linux 5.12+ (dynamic bpf_tramp_image), owner.dir remains pinned until
-	// the old image clears from /proc/kallsyms; on Linux 5.10..5.11 (static
-	// in-place trampoline), Pass 2 forces a synchronous rebuild + 2s
-	// BPF_ENABLE_STATS flat run_cnt check and may already reap owner.dir.
+	// On dynamic-trampoline kernels (5.10.28+, 5.11.11+, 5.12+), owner.dir
+	// remains pinned until the old image clears from /proc/kallsyms; on
+	// static-trampoline kernels (5.10.0-5.10.27, 5.11.0-5.11.10), Pass 2 forces
+	// a synchronous rebuild + 2s BPF_ENABLE_STATS flat run_cnt check and may
+	// already reap owner.dir.
 	reaperOwner.reaper.round()
 	if kernelHasDynamicTrampImage() {
 		if _, err := os.Stat(owner.dir); err != nil {
@@ -2537,9 +2541,20 @@ func TestOnKernelPersistentAnchorPinFailure(t *testing.T) {
 
 	for i := 1; i <= 6; i++ {
 		owner.reaper.round()
-		l, aerr := AttachTracing(p, "persist_test", fn, "p")
+		// On dynamic kernels, load a fresh program per attempt so early dynamic
+		// kernels (e.g. 5.11.11) that reject re-attaching a closed tracing FD
+		// with ENOENT do not fail falsely; on static kernels, re-trying the same
+		// program exercises the refused path directly.
+		attemptProg := p
+		if !staticKernel {
+			attemptProg = makeCountingFexitProg(t, fmt.Sprintf("persist_fexit_%d", i), fn, hitMap)
+		}
+		l, aerr := AttachTracing(attemptProg, "persist_test", fn, "p")
 		if l != nil {
 			_ = l.Close()
+		}
+		if attemptProg != p {
+			_ = attemptProg.Close()
 		}
 		attempts = append(attempts, aerr)
 		n, id := pendingAnchorState(owner)
@@ -2561,7 +2576,12 @@ func TestOnKernelPersistentAnchorPinFailure(t *testing.T) {
 
 	unblock()
 	unblocked = true
-	l, err := AttachTracing(p, "persist_test", fn, "p")
+	finalProg := p
+	if !staticKernel {
+		finalProg = makeCountingFexitProg(t, "persist_fexit_rec", fn, hitMap)
+		defer func() { _ = finalProg.Close() }()
+	}
+	l, err := AttachTracing(finalProg, "persist_test", fn, "p")
 	if err != nil {
 		t.Fatalf("AttachTracing after unblocking anchor pin: %v", err)
 	}
@@ -2709,6 +2729,239 @@ func TestOnKernelRootStatfsFaultNeverFailsOpen(t *testing.T) {
 			t.Fatalf("expected 0 leaked pins after ErrAnchorUnpinned, got %d", got)
 		}
 	}
+}
+
+// TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit proves end-to-end
+// through the production bpfsafety.Init + AttachTracing entry points across
+// all 4 debug kernels (5.10, 5.15, 5.19, 6.12) that:
+//  1. When Init enters unprotected mode because host bpffs is missing/invalid,
+//     it logs UnprotectedWarnMessage; on static-trampoline kernels (5.10),
+//     AttachTracing(fexit/unix_stream_recvmsg) STILL fails closed with
+//     ErrAnchorUnpinned (preventing unanchored exit-close node panics); on
+//     dynamic kernels (5.15, 5.19, 6.12), it attaches and survives a clean
+//     exit-time close with a reader asleep inside unix_stream_recvmsg.
+//  2. When host bpffs validates but grace directory setup fails persistently
+//     (e.g. statfs ENOMEM on both attempts), Init logs UnprotectedInitErrWarnMessage
+//     (naming the real init error rather than claiming bpffs is unmounted) and
+//     static-trampoline kernels STILL refuse AttachTracing with ErrAnchorUnpinned.
+//  3. A single transient failslab fault sweeping Init(ModeNative) on real
+//     /sys/fs/bpf either recovers via openGraceOwner's retry (arming host bpffs)
+//     or refuses fexit on static-trampoline kernels — never attaching an
+//     unanchored fexit that panics on sleeper exit-close.
+func TestOnKernelInitUnprotectedStaticTrampolineRefusesFexit(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root/CAP_BPF")
+	}
+	failslabDir := "/sys/kernel/debug/failslab"
+	if _, err := os.Stat(failslabDir); err != nil {
+		t.Skipf("requires CONFIG_FAILSLAB=y: %v", err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	var stfs unix.Statfs_t
+	if err := unix.Statfs(DefaultNativeBPFFSPath, &stfs); err != nil || stfs.Type != unix.BPF_FS_MAGIC {
+		t.Skipf("%s is not a bpffs mount", DefaultNativeBPFFSPath)
+	}
+	resetStateForTest(t)
+	t.Setenv(EnvAllowUnprotectedTrampolines, "")
+
+	staticKernel := !kernelHasDynamicTrampImage()
+	const fn = "unix_stream_recvmsg"
+
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = unix.Close(fds[0])
+		_ = unix.Close(fds[1])
+	}()
+
+	checkAttachAndSleeper := func(t *testing.T, tag string) {
+		t.Helper()
+		hitMap, herr := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+		if herr != nil {
+			t.Fatal(herr)
+		}
+		defer func() { _ = hitMap.Close() }()
+		p := makeCountingFexitProg(t, tag, fn, hitMap)
+		defer func() { _ = p.Close() }()
+
+		l, aerr := AttachTracing(p, tag, fn, "p")
+		if staticKernel {
+			if l != nil {
+				_ = l.Close()
+				t.Fatalf("%s: static-trampoline kernel attached unanchored fexit/%s in unprotected mode", tag, fn)
+			}
+			if !errors.Is(aerr, ErrAnchorUnpinned) {
+				t.Fatalf("%s: static-trampoline kernel err = %v, want ErrAnchorUnpinned", tag, aerr)
+			}
+			return
+		}
+		if aerr != nil || l == nil {
+			t.Fatalf("%s: dynamic kernel refused fexit/%s in unprotected mode: l=%v err=%v", tag, fn, l, aerr)
+		}
+		done := make(chan error, 1)
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			buf := make([]byte, 8)
+			_, rerr := unix.Read(fds[1], buf)
+			done <- rerr
+		}()
+		time.Sleep(400 * time.Millisecond)
+		_ = l.Close()
+		time.Sleep(400 * time.Millisecond)
+		if _, werr := unix.Write(fds[0], []byte("z")); werr != nil {
+			t.Fatal(werr)
+		}
+		select {
+		case rerr := <-done:
+			if rerr != nil {
+				t.Fatalf("%s: sleeper read err = %v", tag, rerr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: sleeper did not wake after fexit close", tag)
+		}
+	}
+
+	// 1. Missing/non-bpffs host path -> Init unprotected mode with UnprotectedWarnMessage.
+	t.Run("missing_host_bpffs", func(t *testing.T) {
+		resetStateForTest(t)
+		t.Setenv(EnvHostBPFFS, t.TempDir())
+		core, logs := observer.New(zap.WarnLevel)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if ierr := Init(ctx, zap.New(core), ModeNative); ierr != nil {
+			t.Fatalf("Init(missing bpffs) = %v, want nil", ierr)
+		}
+		if Armed() || !UnprotectedTrampolinesActive() {
+			t.Fatalf("expected unprotected mode, got armed=%v unprot=%v", Armed(), UnprotectedTrampolinesActive())
+		}
+		if logs.Len() < 1 || logs.All()[0].Message != UnprotectedWarnMessage {
+			t.Fatalf("missing bpffs WARN = %+v, want %q", logs.All(), UnprotectedWarnMessage)
+		}
+		checkAttachAndSleeper(t, "unprot_nobpffs")
+	})
+
+	// 2. Validated real /sys/fs/bpf mount whose grace setup fails persistently
+	//    (e.g. statfs ENOMEM) -> Init unprotected mode with UnprotectedInitErrWarnMessage.
+	t.Run("validated_bpffs_init_error", func(t *testing.T) {
+		resetStateForTest(t)
+		t.Setenv(EnvHostBPFFS, "")
+		openGraceOwnerInRootFn = func(root string, _ *zap.Logger) (*graceOwner, error) {
+			return nil, fmt.Errorf("statfs grace root %s: %w", root, unix.ENOMEM)
+		}
+		core, logs := observer.New(zap.WarnLevel)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if ierr := Init(ctx, zap.New(core), ModeNative); ierr != nil {
+			t.Fatalf("Init(validated bpffs statfs ENOMEM) = %v, want nil", ierr)
+		}
+		if Armed() || !UnprotectedTrampolinesActive() {
+			t.Fatalf("expected unprotected mode, got armed=%v unprot=%v", Armed(), UnprotectedTrampolinesActive())
+		}
+		if logs.Len() < 1 || logs.All()[0].Message != UnprotectedInitErrWarnMessage {
+			t.Fatalf("validated bpffs init-err WARN = %+v, want %q", logs.All(), UnprotectedInitErrWarnMessage)
+		}
+		checkAttachAndSleeper(t, "unprot_initerr")
+	})
+
+	// 3. Real failslab fail-nth sweep over Init(ModeNative) on /sys/fs/bpf:
+	//    every fault either recovers to armed host-bpffs (via retry) OR enters
+	//    unprotected mode where static kernels still refuse fexit with ErrAnchorUnpinned.
+	t.Run("real_failslab_init_sweep", func(t *testing.T) {
+		resetStateForTest(t)
+		t.Setenv(EnvHostBPFFS, "")
+		for _, kv := range [][2]string{{"task-filter", "N"}, {"ignore-gfp-wait", "N"}, {"probability", "0"}, {"times", "-1"}, {"verbose", "0"}} {
+			_ = os.WriteFile(filepath.Join(failslabDir, kv[0]), []byte(kv[1]), 0o644)
+		}
+		defer func() {
+			_ = os.WriteFile(filepath.Join(failslabDir, "times"), []byte("0"), 0o644)
+			_ = os.WriteFile(filepath.Join(failslabDir, "probability"), []byte("0"), 0o644)
+		}()
+
+		sweepProg := makeCountingFexitProg(t, "sweep_init", fn, nil)
+		defer func() { _ = sweepProg.Close() }()
+
+		type res struct {
+			errMsg string
+		}
+		ch := make(chan res, 1)
+		go func() {
+			runtime.LockOSThread()
+			nfd, oerr := unix.Open(fmt.Sprintf("/proc/self/task/%d/fail-nth", unix.Gettid()), unix.O_RDWR, 0)
+			if oerr != nil {
+				ch <- res{errMsg: "open fail-nth: " + oerr.Error()}
+				return
+			}
+			defer func() { _ = unix.Close(nfd) }()
+			arm := func(n int) { _, _ = unix.Pwrite(nfd, []byte(strconv.Itoa(n)), 0) }
+			left := func() string {
+				b := make([]byte, 16)
+				k, _ := unix.Pread(nfd, b, 0)
+				if k < 0 {
+					k = 0
+				}
+				return strings.TrimSpace(string(b[:k]))
+			}
+			for n := 1; n <= 300; n++ {
+				core, logs := observer.New(zap.WarnLevel)
+				ctx, cancel := context.WithCancel(context.Background())
+				arm(n)
+				_ = Init(ctx, zap.New(core), ModeNative)
+				lf := left()
+				if lf != "0" {
+					arm(0)
+				}
+				stateMu.Lock()
+				o := activeOwner
+				stateMu.Unlock()
+				unprot := UnprotectedTrampolinesActive()
+				if unprot && staticKernel {
+					l, aerr := AttachTracing(sweepProg, "sweep_init", fn, "p")
+					if l != nil {
+						_ = l.Close()
+						cancel()
+						ch <- res{errMsg: fmt.Sprintf("fail-nth=%d: static kernel attached unanchored fexit in unprotected mode (logs=%+v)", n, logs.All())}
+						return
+					}
+					if !errors.Is(aerr, ErrAnchorUnpinned) {
+						cancel()
+						ch <- res{errMsg: fmt.Sprintf("fail-nth=%d: static kernel err=%v, want ErrAnchorUnpinned", n, aerr)}
+						return
+					}
+				}
+				cancel()
+				if o != nil {
+					if o.reaper != nil {
+						o.reaper.stopAndWait(o.reaperCancel)
+					}
+					stateMu.Lock()
+					activeOwner = nil
+					stateMu.Unlock()
+					_ = unix.Close(o.lockFD)
+					_ = os.RemoveAll(o.dir)
+				}
+				unprotectedTrampolines.Store(false)
+				explicitUnprotectedOptOut.Store(false)
+				unprotectedWarned.Store(false)
+				stateMu.Lock()
+				unprotectedLogger = nil
+				unprotectedWarnedFuncs = map[string]bool{}
+				stateMu.Unlock()
+				if o != nil && lf != "0" {
+					break
+				}
+			}
+			ch <- res{}
+		}()
+		r := <-ch
+		if r.errMsg != "" {
+			t.Fatal(r.errMsg)
+		}
+	})
 }
 
 // TestOnKernelLegacyMixedDirUnresolvedProgDead reproduces a dead grace dir left
