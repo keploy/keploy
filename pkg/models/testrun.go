@@ -1601,6 +1601,11 @@ type BodyResult struct {
 	Type     BodyType `json:"type" bson:"type" yaml:"type"`
 	Expected string   `json:"expected" bson:"expected" yaml:"expected"`
 	Actual   string   `json:"actual" bson:"actual" yaml:"actual"`
+	// NotCompared marks a row that is not a comparison of the bodies: a
+	// gRPC test case's assertions replaced the comparison, and this row is
+	// their verdict. A learner of noise learns nothing from it. In-process
+	// only.
+	NotCompared bool `json:"-" bson:"-" yaml:"-"`
 }
 
 type TestStatus string

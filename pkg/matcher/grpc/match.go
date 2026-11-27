@@ -45,6 +45,17 @@ func (o matchOptions) out() io.Writer {
 	return o.console
 }
 
+// messageCountUnit ends the values of a stream's message-count row, the one
+// GrpcLength row that counts messages (the others are a message's length):
+// IsMessageCountRow tells it apart.
+const messageCountUnit = " message(s)"
+
+// IsMessageCountRow reports whether b is a stream's message-count row: a
+// difference in it is answered by no body noise.
+func IsMessageCountRow(b models.BodyResult) bool {
+	return b.Type == models.GrpcLength && strings.HasSuffix(b.Expected, messageCountUnit)
+}
+
 // WithConsole makes w the console the comparison writes its lines to: the
 // "Testrun passed" and "Testrun failed" lines and a failure's diff, which
 // names the expected and actual messages whole. With none, or a nil w, it
@@ -296,8 +307,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		result.BodyResult = append(result.BodyResult, models.BodyResult{
 			Normal:   false,
 			Type:     models.GrpcLength,
-			Expected: fmt.Sprintf("%d message(s)", len(expMsgs)),
-			Actual:   fmt.Sprintf("%d message(s)", len(actMsgs)),
+			Expected: fmt.Sprintf("%d"+messageCountUnit, len(expMsgs)),
+			Actual:   fmt.Sprintf("%d"+messageCountUnit, len(actMsgs)),
 		})
 		// Graded below, once noise has had its say.
 	}

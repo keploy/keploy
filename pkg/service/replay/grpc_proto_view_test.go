@@ -433,6 +433,12 @@ func TestAGrpcTestFailedOnItsStatusAloneShowsBodiesWithFieldNames(t *testing.T) 
 	if d == nil || d.MessageIndex != 0 || !strings.Contains(d.ActualJSON, "Shipped") || d.Note == encodingOnlyNote {
 		t.Fatalf("decoded view: %+v", d)
 	}
+	// Compared: a learner of noise may learn from them.
+	for _, b := range res.BodyResult {
+		if b.NotCompared {
+			t.Fatalf("a row the comparison wrote is marked not compared: %+v", b)
+		}
+	}
 }
 
 // A passed test whose recorded release has no upload says so, as a failed one.
@@ -484,6 +490,10 @@ func TestAFailedAssertionTestNeverSaysItsSameBodiesDifferInEncoding(t *testing.T
 	d := res.GrpcDecode
 	if d == nil || d.MessageIndex != 0 || !strings.Contains(d.ActualJSON, "Shipped") || d.Note == encodingOnlyNote {
 		t.Fatalf("decoded view: %+v", d)
+	}
+	// Not compared: no learner of noise learns from them.
+	if len(res.BodyResult) != 1 || !res.BodyResult[0].NotCompared {
+		t.Fatalf("the assertions' verdict row is not marked not compared: %+v", res.BodyResult)
 	}
 }
 

@@ -86,10 +86,11 @@ func AssertionMatch(tc *models.TestCase, actualResp *models.GrpcResp, logger *za
 			Actual:   actualStatus,
 		},
 		BodyResult: []models.BodyResult{{
-			Normal:   false,
-			Type:     models.GrpcData,
-			Expected: expectedBody,
-			Actual:   actualBody,
+			Normal:      false,
+			Type:        models.GrpcData,
+			Expected:    expectedBody,
+			Actual:      actualBody,
+			NotCompared: true,
 		}},
 	}
 
