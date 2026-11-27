@@ -416,6 +416,34 @@ func TestTheOSsPickForADNSPortIsFreeOverUDP(t *testing.T) {
 		if !strings.Contains(err.Error(), "after 2 UDP and 9 TCP OS picks") || !strings.Contains(err.Error(), "16384-65535") {
 			t.Fatalf("final error has inaccurate counts or range: %v", err)
 		}
+
+		// Full stage 1 (9 UDP picks, all TCP-blocked) + stage 2 :0 fails immediately (0 TCP picks).
+		nextUDP := 56000
+		udpListen = func(network, address string) (net.PacketConn, error) {
+			if address == ":0" {
+				p := nextUDP
+				nextUDP++
+				return &udpStandIn{port: p}, nil
+			}
+			return nil, errors.New("udp blocked")
+		}
+		portListen = func(_ context.Context, network, address string) (net.Listener, error) {
+			if address == ":0" {
+				return nil, errTCPZero
+			}
+			return nil, errors.New("tcp blocked")
+		}
+
+		got, err = availablePortAbove(unknown, 0, true)
+		if err == nil || got != 0 {
+			t.Fatalf("full stage1 + stage2 :0 failed = %d, %v; want error", got, err)
+		}
+		if !errors.Is(err, errTCPZero) || errors.Is(err, errUDPZero) {
+			t.Fatalf("final error did not preserve only stage2 :0 OS error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "after 9 UDP and 0 TCP OS picks") || !strings.Contains(err.Error(), "16384-65535") {
+			t.Fatalf("final error has inaccurate counts or range: %v", err)
+		}
 	})
 
 	t.Run("close_error_surfaces_immediately", func(t *testing.T) {

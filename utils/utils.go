@@ -2377,16 +2377,18 @@ func osAssignedDNSPort(exclude []uint32) (uint32, error) {
 	} else if found {
 		return port, nil
 	}
-	switch {
-	case udpRes.listenErr != nil && tcpRes.listenErr != nil:
-		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after %d UDP and %d TCP OS picks and scanning ports %d-65535 (udp :0: %w; tcp :0: %w)", exclude, udpRes.picks, tcpRes.picks, unprivilegedPortLo, udpRes.listenErr, tcpRes.listenErr)
-	case udpRes.listenErr != nil:
-		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after %d UDP and %d TCP OS picks and scanning ports %d-65535 (udp :0: %w)", exclude, udpRes.picks, tcpRes.picks, unprivilegedPortLo, udpRes.listenErr)
-	case tcpRes.listenErr != nil:
-		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after %d UDP and %d TCP OS picks and scanning ports %d-65535 (tcp :0: %w)", exclude, udpRes.picks, tcpRes.picks, unprivilegedPortLo, tcpRes.listenErr)
-	default:
-		return 0, fmt.Errorf("failed to find a port other than %v that is free over UDP and TCP, after %d UDP and %d TCP OS picks and scanning ports %d-65535", exclude, udpRes.picks, tcpRes.picks, unprivilegedPortLo)
+	var listenErrs []error
+	if udpRes.listenErr != nil {
+		listenErrs = append(listenErrs, fmt.Errorf("udp :0: %w", udpRes.listenErr))
 	}
+	if tcpRes.listenErr != nil {
+		listenErrs = append(listenErrs, fmt.Errorf("tcp :0: %w", tcpRes.listenErr))
+	}
+	base := fmt.Sprintf("failed to find a port other than %v that is free over UDP and TCP, after %d UDP and %d TCP OS picks and scanning ports %d-65535", exclude, udpRes.picks, tcpRes.picks, unprivilegedPortLo)
+	if len(listenErrs) > 0 {
+		return 0, fmt.Errorf("%s (%w)", base, errors.Join(listenErrs...))
+	}
+	return 0, errors.New(base)
 }
 
 func osAssignedUDPFirst(exclude []uint32, asks int) (osPickOutcome, error) {
