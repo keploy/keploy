@@ -858,12 +858,16 @@ type SyncMockManager struct {
 	// answer the client never read (OnDrop, toldDropped).
 	onDrop atomic.Pointer[func(*models.Mock)]
 	// sending holds the request time of each mock taken out of the buffer
-	// (or handed straight on) whose send to outChan has not finished. A mock
-	// leaving the buffer is added under mu, so it is always either buffered
-	// or here until it is sent or dropped (PendingIn). sendingMu is a leaf:
-	// taken under mu, or alone.
-	sendingMu sync.Mutex
-	sending   map[*models.Mock]time.Time
+	// (or handed straight on) whose send to outChan has not finished. Keyed by
+	// a monotonic uint64 token (sendingSeq) rather than *models.Mock so a mock
+	// spilled to disk by OutQueueSpill is not pinned on heap until delivery.
+	// A mock leaving the buffer is added under mu, so it is always either
+	// buffered or here until it is sent or dropped (PendingIn). sendingMu is a
+	// leaf: taken under mu, or alone.
+	sendingMu    sync.Mutex
+	sendingSeq   uint64
+	sending      map[uint64]time.Time
+	sendingByPtr map[*models.Mock]uint64
 
 	// loggerMu guards logger so SetLogger and the drop path can run
 	// concurrently without a data race. The read lock is taken only
@@ -888,9 +892,10 @@ type pressureRange struct {
 // startup mock sent for a claim (noteSentClaimedLocked), whose send's end is
 // told to its note (sentClaimDone): the test that takes it is its owner.
 type ownedMock struct {
-	mock  *models.Mock
-	owner string
-	noted bool
+	mock   *models.Mock
+	owner  string
+	noted  bool
+	sendID uint64
 }
 
 // mergeByRequestTime merges sorted, which is in request order, into arrived,
@@ -2969,6 +2974,30 @@ func (m *SyncMockManager) trySendControlFrameFor(mock *models.Mock, epoch uint64
 	}
 }
 
+// noteSendingAt records a mock's request time on its way to outChan (PendingIn)
+// without retaining the *models.Mock pointer, returning the token for sentID.
+func (m *SyncMockManager) noteSendingAt(at time.Time) uint64 {
+	m.sendingMu.Lock()
+	defer m.sendingMu.Unlock()
+	if m.sending == nil {
+		m.sending = make(map[uint64]time.Time)
+	}
+	m.sendingSeq++
+	id := m.sendingSeq
+	m.sending[id] = at
+	return id
+}
+
+// sentID marks the send identified by id (from noteSendingAt) finished.
+func (m *SyncMockManager) sentID(id uint64) {
+	if id == 0 {
+		return
+	}
+	m.sendingMu.Lock()
+	delete(m.sending, id)
+	m.sendingMu.Unlock()
+}
+
 // noteSending records mocks on their way to outChan (PendingIn). Callers
 // that take them out of the buffer hold mu.
 func (m *SyncMockManager) noteSending(mocks ...*models.Mock) {
@@ -2978,11 +3007,17 @@ func (m *SyncMockManager) noteSending(mocks ...*models.Mock) {
 	m.sendingMu.Lock()
 	defer m.sendingMu.Unlock()
 	if m.sending == nil {
-		m.sending = make(map[*models.Mock]time.Time)
+		m.sending = make(map[uint64]time.Time)
+	}
+	if m.sendingByPtr == nil {
+		m.sendingByPtr = make(map[*models.Mock]uint64)
 	}
 	for _, mk := range mocks {
 		if mk != nil {
-			m.sending[mk] = mk.Spec.ReqTimestampMock
+			m.sendingSeq++
+			id := m.sendingSeq
+			m.sending[id] = mk.Spec.ReqTimestampMock
+			m.sendingByPtr[mk] = id
 		}
 	}
 }
@@ -2990,18 +3025,32 @@ func (m *SyncMockManager) noteSending(mocks ...*models.Mock) {
 // sent says a mock's send has finished: delivered, or dropped and told.
 func (m *SyncMockManager) sent(mk *models.Mock) {
 	m.sendingMu.Lock()
-	delete(m.sending, mk)
+	if id, ok := m.sendingByPtr[mk]; ok {
+		delete(m.sendingByPtr, mk)
+		delete(m.sending, id)
+	}
 	m.sendingMu.Unlock()
 }
 
 // noteTaken is noteSending for a batch taken out of the buffer. Caller holds
-// mu.
+// mu. Records each mock by token (without pinning *models.Mock in m.sending).
 func (m *SyncMockManager) noteTaken(batch []ownedMock) {
-	mocks := make([]*models.Mock, 0, len(batch))
-	for _, om := range batch {
-		mocks = append(mocks, om.mock)
+	if len(batch) == 0 {
+		return
 	}
-	m.noteSending(mocks...)
+	m.sendingMu.Lock()
+	defer m.sendingMu.Unlock()
+	if m.sending == nil {
+		m.sending = make(map[uint64]time.Time)
+	}
+	for i := range batch {
+		if batch[i].mock != nil {
+			m.sendingSeq++
+			id := m.sendingSeq
+			m.sending[id] = batch[i].mock.Spec.ReqTimestampMock
+			batch[i].sendID = id
+		}
+	}
 }
 
 // sendTaken sends mocks taken out of the buffer (noteTaken), and says each is
@@ -3009,14 +3058,16 @@ func (m *SyncMockManager) noteTaken(batch []ownedMock) {
 // startup mock sent for a claim (ownedMock.noted), before it stops being
 // pending, so the test that takes it is told of a drop before it is let go.
 func (m *SyncMockManager) sendTaken(batch []ownedMock) {
-	for _, om := range batch {
-		// Read before the send: once delivered, the mock is the consumer's.
-		name, at, noted, mk := om.mock.Name, om.mock.Spec.ReqTimestampMock, om.noted, om.mock
+	for i := range batch {
+		om := batch[i]
+		// Read before the send: once delivered or spilled, the mock must not be
+		// pinned on heap by the done closure.
+		name, at, noted, sendID := om.mock.Name, om.mock.Spec.ReqTimestampMock, om.noted, om.sendID
 		m.sendFor(om.mock, om.owner, func(delivered bool, epoch uint64) {
 			if noted {
 				m.sentClaimDoneFor(name, at, delivered, epoch)
 			}
-			m.sent(mk)
+			m.sentID(sendID)
 		})
 	}
 }
@@ -3735,12 +3786,15 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) MockDrop {
 		m.toldDropped(mock)
 		return MockDroppedOutputClosed
 	case bound && !m.firstReqSeen:
-		m.noteSending(mock) // under mu: it leaves no gap for PendingIn
+		var sendID uint64
+		if mock != nil {
+			sendID = m.noteSendingAt(mock.Spec.ReqTimestampMock) // under mu: leaves no gap for PendingIn and does not pin mock on heap
+		}
 		m.mu.Unlock()
 		// Dropped at once (the output closed since outChanStatus, or the
 		// byte bound) or taken: delivered, or queued for the drainer, whose
 		// drop of it later is said there (dropOut), not here.
-		return m.send(mock, "", func(bool) { m.sent(mock) })
+		return m.send(mock, "", func(bool) { m.sentID(sendID) })
 	default:
 		m.buffer = append(m.buffer, mock)
 		m.mu.Unlock()
@@ -3787,8 +3841,11 @@ func (m *SyncMockManager) SendConfigMock(mock *models.Mock) MockDrop {
 		return MockDroppedNoRecording
 	}
 	m.totalAdded.Add(1)
-	m.noteSending(mock)
-	return m.send(mock, "", func(bool) { m.sent(mock) })
+	var sendID uint64
+	if mock != nil {
+		sendID = m.noteSendingAt(mock.Spec.ReqTimestampMock)
+	}
+	return m.send(mock, "", func(bool) { m.sentID(sendID) })
 }
 
 // CloseOutChan flushes any still-attributable buffered mocks and then

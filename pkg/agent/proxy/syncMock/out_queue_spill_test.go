@@ -3,10 +3,12 @@ package manager
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -350,6 +352,100 @@ func TestSetDefaultOutQueueSpill_AppliesToNewManagers(t *testing.T) {
 	}
 	for i := 0; i < 10; i++ {
 		<-out
+	}
+	mgr.CloseOutChan()
+}
+
+// nonRetainingSpillLane discards the *models.Mock pointer on Put (modeling a
+// disk-backed spill that serializes bytes and releases the Go struct) so the
+// test can prove SyncMockManager itself (m.sending, done closures, spillMeta)
+// does not pin spilled mocks on heap.
+type nonRetainingSpillFactory struct{ ramLimit int64 }
+
+func (f *nonRetainingSpillFactory) RAMLimit() int64            { return f.ramLimit }
+func (f *nonRetainingSpillFactory) NewLane() OutQueueSpillLane { return &nonRetainingSpillLane{} }
+
+type nonRetainingSpillLane struct{ count int }
+
+func (l *nonRetainingSpillLane) Put(_ *models.Mock, _ string, _ int64) bool {
+	l.count++
+	return true
+}
+func (l *nonRetainingSpillLane) Len() int { return l.count }
+func (l *nonRetainingSpillLane) Peek() (*models.Mock, string, int64, error) {
+	if l.count == 0 {
+		return nil, "", 0, nil
+	}
+	return &models.Mock{Kind: models.GENERIC, Name: "reconstructed"}, "", 64, nil
+}
+func (l *nonRetainingSpillLane) Pop() {
+	if l.count > 0 {
+		l.count--
+	}
+}
+func (l *nonRetainingSpillLane) Detach() OutQueueSpillLane {
+	n := l.count
+	l.count = 0
+	return &nonRetainingSpillLane{count: n}
+}
+func (l *nonRetainingSpillLane) Discard() int {
+	n := l.count
+	l.count = 0
+	return n
+}
+
+func TestOutQueueSpill_SpilledMocksNotPinnedOnHeap(t *testing.T) {
+	mgr := New(zap.NewNop())
+	out := make(chan *models.Mock, 1)
+	mgr.SetOutputChannel(out)
+	mgr.SetOutQueueSpill(&nonRetainingSpillFactory{ramLimit: 1024})
+
+	now := time.Now().Add(-time.Second)
+	ptrs := make([]weak.Pointer[models.Mock], 0, 20)
+	for i := 0; i < 20; i++ {
+		m := makeSizedMock(fmt.Sprintf("gc-%02d", i), 4096, now.Add(time.Duration(i)*time.Millisecond))
+		if i >= 5 {
+			ptrs = append(ptrs, weak.Make(m))
+		}
+		mgr.AddMock(m)
+	}
+	// While mocks sit in spill, PendingIn must still report them in flight.
+	if !mgr.PendingIn(now, now.Add(time.Second)) {
+		t.Fatal("PendingIn returned false while spilled mocks are still pending")
+	}
+	// Force GC passes: spilled *models.Mock pointers must be reclaimable while
+	// still sitting in spill (not pinned by m.sending or done closures).
+	collected := 0
+	for attempt := 0; attempt < 5; attempt++ {
+		runtime.GC()
+		collected = 0
+		for _, wp := range ptrs {
+			if wp.Value() == nil {
+				collected++
+			}
+		}
+		if collected == len(ptrs) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if collected != len(ptrs) {
+		t.Fatalf("only %d/%d spilled mocks were GC-collected while in spill; SyncMockManager is still pinning *models.Mock on heap", collected, len(ptrs))
+	}
+
+	for i := 0; i < 20; i++ {
+		select {
+		case <-out:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out draining mock %d", i)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for mgr.OutQueued() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if mgr.PendingIn(now, now.Add(time.Second)) {
+		t.Fatal("PendingIn still true after all spilled mocks drained")
 	}
 	mgr.CloseOutChan()
 }
