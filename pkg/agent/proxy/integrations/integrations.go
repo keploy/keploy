@@ -1288,15 +1288,18 @@ type StagedRecordingReader interface {
 //     snapshot (v.shownOf), unlike sibling heldScope reads.
 //
 // Callers are responsible for delivery-once semantics and view ownership.
-// StagedStartupGeneration returns a monotonic counter that advances whenever
-// the retained set is replaced (any BaseTime staging) or cleared
-// (ResetForReplaySession), and stays constant across per-test window refiles
-// and SetScopeMocks(open). Callers tracking their own delivery state may cache
-// GetStagedStartupMocksByKind results keyed on StagedStartupGeneration (rather
-// than StagingEpoch, which advances on SetScopeMocks(open) and does not advance
-// on ResetForReplaySession). Note that scopedMockDb applies worker-scope and
-// consumption filters on top of GetStagedStartupMocksByKind without advancing
-// StagedStartupGeneration.
+// StagedStartupGeneration returns a monotonic counter covering the reader's
+// effective view: on MockManager it advances whenever the retained set is
+// replaced (any BaseTime staging) or cleared (ResetForReplaySession), staying
+// constant across per-test window refiles and SetScopeMocks(open); on
+// scopedMockDb it adds the worker view version so worker-scope and
+// mapped-universe changes advance it too; on heldScope it follows the same
+// sample-before-check sentinel contract as StagingGenerations (reporting a
+// non-keepable RestagedGeneration / ElsewhereGeneration once the staging moves
+// or the held view is gone). Callers tracking their own delivery state can
+// safely cache GetStagedStartupMocksByKind keyed on StagedStartupGeneration
+// alone (using KeptGeneration before caching). As with MockManager, consumption
+// via DeleteFilteredMock on a scoped view does not advance the generation.
 type StagedStartupReader interface {
 	GetStagedStartupMocksByKind(kind models.Kind) ([]*models.Mock, error)
 	StagedStartupGeneration() uint64

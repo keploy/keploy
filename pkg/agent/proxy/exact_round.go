@@ -1559,10 +1559,7 @@ func (h *heldScope) GetStagedStartupMocksByKind(kind models.Kind) ([]*models.Moc
 }
 
 func (h *heldScope) StagedStartupGeneration() uint64 {
-	if h.moved() {
-		return 0
-	}
-	return h.MockManager.StagedStartupGeneration()
+	return h.generation(h.MockManager.StagedStartupGeneration())
 }
 
 var _ integrations.StagedStartupReader = (*heldScope)(nil)

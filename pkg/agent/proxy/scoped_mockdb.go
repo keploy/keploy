@@ -1403,10 +1403,11 @@ func (s *scopedMockDb) GetStagedStartupMocksByKind(kind models.Kind) ([]*models.
 }
 
 func (s *scopedMockDb) StagedStartupGeneration() uint64 {
+	var gen uint64
 	if sr, ok := s.MockMemDb.(integrations.StagedStartupReader); ok {
-		return sr.StagedStartupGeneration()
+		gen = sr.StagedStartupGeneration()
 	}
-	return 0
+	return gen + s.viewVersion()
 }
 
 var _ integrations.StagedStartupReader = (*scopedMockDb)(nil)

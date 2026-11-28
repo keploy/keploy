@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -330,8 +332,167 @@ func TestMockManager_StagedStartupReaderGenerationTracksSetChanges(t *testing.T)
 	if g4 <= g3 {
 		t.Fatalf("empty BaseTime restage did not advance generation: before=%d after=%d", g3, g4)
 	}
-	if got := held.StagedStartupGeneration(); got != 0 {
-		t.Fatalf("heldScope generation after staging moved = %d, want 0", got)
+	if got := held.StagedStartupGeneration(); got != integrations.RestagedGeneration || integrations.KeptGeneration(got) || got < g4 {
+		t.Fatalf("heldScope generation after staging moved = %d, want RestagedGeneration (%d, non-keepable and >= %d)", got, integrations.RestagedGeneration, g4)
+	}
+}
+
+func TestMockManager_StagedStartupReaderGenerationScopedWorkerViewChanges(t *testing.T) {
+	const testKind models.Kind = "StagedStartupScopedGenKind"
+	mm, _, _, w1End, _, _ := stagedStartupTestFixture(t, testKind)
+
+	a := makeStagedStartupMock("a-1", testKind, "consume", w1End.Add(time.Second), models.LifetimePerTest)
+	b := makeStagedStartupMock("b-1", testKind, "consume", w1End.Add(2*time.Second), models.LifetimePerTest)
+	sh := makeStagedStartupMock("sh-1", testKind, "consume", w1End.Add(3*time.Second), models.LifetimePerTest)
+	mm.SetMocksWithWindow([]*models.Mock{a, b, sh}, nil, models.BaseTime, time.Now())
+
+	sample := func(db integrations.StagedStartupReader) (uint64, []string) {
+		g := db.StagedStartupGeneration()
+		got, err := db.GetStagedStartupMocksByKind(testKind)
+		if err != nil {
+			t.Fatalf("GetStagedStartupMocksByKind: %v", err)
+		}
+		names := make([]string, len(got))
+		for i, m := range got {
+			names[i] = m.Name
+		}
+		return g, names
+	}
+
+	self := uint32(os.Getpid())
+	p := &Proxy{}
+	p.SetMappedUniverse([]string{"a-1", "b-1"})
+	p.SetWorkerScope(self, []string{"a-1"})
+	conn, ok := p.scopedFor(self, mm).(*scopedMockDb)
+	if !ok {
+		t.Fatal("expected *scopedMockDb from Proxy.scopedFor")
+	}
+
+	// Switching the worker to test 2 changes the visible set ([a-1 sh-1] -> [b-1 sh-1])
+	// and must advance StagedStartupGeneration so a cache never serves stale pushes.
+	g1, n1 := sample(conn)
+	p.ClearWorkerScope(self)
+	p.SetWorkerScope(self, []string{"b-1"})
+	g2, n2 := sample(conn)
+	if slices.Equal(n1, n2) {
+		t.Fatalf("expected worker switch to change scoped view, both were %v", n1)
+	}
+	if g2 == g1 {
+		t.Fatalf("worker switch changed scoped view %v -> %v without advancing StagedStartupGeneration (%d)", n1, n2, g1)
+	}
+
+	// Updating the mapped universe hides previously shared mocks and must also advance generation.
+	p.SetMappedUniverse([]string{"a-1", "b-1", "sh-1"})
+	g3, n3 := sample(conn)
+	if slices.Equal(n2, n3) {
+		t.Fatalf("expected mapped universe change to alter scoped view, both were %v", n2)
+	}
+	if g3 == g2 {
+		t.Fatalf("mapped universe change altered scoped view %v -> %v without advancing StagedStartupGeneration (%d)", n2, n3, g2)
+	}
+}
+
+func TestMockManager_StagedStartupReaderGenerationHeldViewGoneAndMoved(t *testing.T) {
+	const testKind models.Kind = "StagedStartupHeldGenKind"
+	mm, _, _, w1End, _, _ := stagedStartupTestFixture(t, testKind)
+
+	mk := func(pfx string) []*models.Mock {
+		return []*models.Mock{makeStagedStartupMock(pfx+"-gap", testKind, "consume", w1End.Add(time.Second), models.LifetimePerTest)}
+	}
+	mm.SetMocksWithWindow(mk("a"), nil, models.BaseTime, time.Now())
+	mm.SetMocksWithWindow(mk("b"), nil, models.BaseTime, time.Now())
+
+	t.Run("viewGone_moves_to_nonkeepable_sentinel", func(t *testing.T) {
+		h := &heldScope{roundScope: roundScope{
+			MockManager: mm,
+			g:           roundGuard{at: integrations.RoundAt{Epoch: mm.StagingEpoch()}, staging: true},
+		}}
+		h.diagnosing = true
+		h.heldIn = mm.exactView()
+		g1 := h.StagedStartupGeneration()
+		m1, err := h.GetStagedStartupMocksByKind(testKind)
+		if err != nil || len(m1) != 1 {
+			t.Fatalf("in-force held read: len=%d err=%v", len(m1), err)
+		}
+		h.heldIn = &exactView{}
+		if !h.viewGone() {
+			t.Fatal("expected viewGone() to be true after replacing heldIn")
+		}
+		g2 := h.StagedStartupGeneration()
+		m2, err := h.GetStagedStartupMocksByKind(testKind)
+		if err != nil || len(m2) != 0 {
+			t.Fatalf("viewGone held read: len=%d err=%v, want 0", len(m2), err)
+		}
+		if g2 == g1 || integrations.KeptGeneration(g2) {
+			t.Fatalf("viewGone StagedStartupGeneration = %d (before=%d, KeptGeneration=%v), want distinct non-keepable sentinel", g2, g1, integrations.KeptGeneration(g2))
+		}
+	})
+
+	t.Run("moved_is_monotonic_nonkeepable_sentinel", func(t *testing.T) {
+		h := &heldScope{roundScope: roundScope{
+			MockManager: mm,
+			g:           roundGuard{at: integrations.RoundAt{Epoch: mm.StagingEpoch()}, staging: true},
+		}}
+		before := h.StagedStartupGeneration()
+		mm.SetScopeMocks(mk("c"), nil, true) // epoch moves while retained set stays
+		after := h.StagedStartupGeneration()
+		if after < before {
+			t.Fatalf("held StagedStartupGeneration regressed %d -> %d after move", before, after)
+		}
+		if integrations.KeptGeneration(after) || after != integrations.RestagedGeneration {
+			t.Fatalf("moved held StagedStartupGeneration = %d, want RestagedGeneration (%d)", after, integrations.RestagedGeneration)
+		}
+	})
+}
+
+func TestMockManager_StagedStartupReaderGenerationHeldSampleBeforeCheckRace(t *testing.T) {
+	const testKind models.Kind = "StagedStartupHeldRaceKind"
+	mm, _, _, w1End, _, _ := stagedStartupTestFixture(t, testKind)
+
+	mk := func() []*models.Mock {
+		return []*models.Mock{makeStagedStartupMock("x-gap", testKind, "consume", w1End.Add(time.Second), models.LifetimePerTest)}
+	}
+	mm.SetMocksWithWindow(mk(), nil, models.BaseTime, time.Now())
+	offset := int64(mm.StagedStartupGeneration()) - int64(mm.StagingEpoch())
+	mm.SetMocksWithWindow(mk(), nil, models.BaseTime, time.Now())
+	if int64(mm.StagedStartupGeneration())-int64(mm.StagingEpoch()) != offset {
+		t.Skip("generation and epoch do not move 1:1 on BaseTime staging")
+	}
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for !stop.Load() {
+			mm.SetMocksWithWindow(mk(), nil, models.BaseTime, time.Now())
+		}
+	}()
+
+	var hits atomic.Int64
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for time.Now().Before(deadline) {
+				e := mm.StagingEpoch()
+				h := &heldScope{roundScope: roundScope{
+					MockManager: mm,
+					g:           roundGuard{at: integrations.RoundAt{Epoch: e}, staging: true},
+				}}
+				g := h.StagedStartupGeneration()
+				if integrations.KeptGeneration(g) && int64(g)-offset > int64(e) {
+					hits.Add(1)
+				}
+			}
+		}()
+	}
+	time.Sleep(550 * time.Millisecond)
+	stop.Store(true)
+	wg.Wait()
+	if hits.Load() > 0 {
+		t.Fatalf("heldScope reported a later staging's keepable generation %d times", hits.Load())
 	}
 }
 
