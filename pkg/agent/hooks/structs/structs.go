@@ -58,6 +58,16 @@ const (
 	// sockets stands between the application and its callers, so the
 	// agent's death leaves the application's port to the application.
 	FlagIngressSteer uint32 = 1 << 6
+	// FlagScopedPids (bit 7; KEPLOY_FLAG_SCOPED_PIDS in headers/k_helpers.h):
+	// in native mode (!IsDocker), pid_filter and classify_process restrict
+	// interception to processes inside the run's cgroup v2 directory
+	// (AgentInfo.ScopedCgroupID, st_ino == cgrp->kn->id ==
+	// bpf_get_current_cgroup_id()) or any nested sub-cgroup below it. Processes
+	// opt in via Hooks.AddScopedPID (migrating their thread group into the
+	// scoped cgroup via cgroup.procs), exempting the outer build toolchain from
+	// interception while keeping compiled test binaries and all descendants
+	// (including reparented daemons) isolated without any tracing recursion guard.
+	FlagScopedPids uint32 = 1 << 7
 )
 
 type BpfSpinLock struct{ Val uint32 }
@@ -107,4 +117,7 @@ type AgentInfo struct {
 	Proxy              ProxyInfo
 	Flags              uint32 // extensible flag slot consumed by the BPF cgroup hooks; set via AgentInfoCustomizer and FlagKernelPortAlloc. Matches agent_info_t.flags at offset 44 (ebpf#96).
 	RecordingStartTime uint64 // boot-time NS when recording started; pre-existing processes are auto-excluded by eBPF
+	ScopedCgroupID     uint64 // cgroup2 inode ID of the run's scoped cgroup when FlagScopedPids is active in native mode
+	ScopedCgroupLevel  uint32 // host-kernel cgrp->level of ScopedCgroupID (0 when unset); enables O(1) depth-independent ancestor_ids[] check
+	ScopedPad          uint32 // explicit 8-byte alignment padding matching C agent_info_t._scoped_pad
 }

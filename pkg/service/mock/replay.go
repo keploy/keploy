@@ -411,6 +411,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     (PIDMapReader). Read here, with the compose app still parked.
 	pidBase := m.pidMapBaseline(ctx, "replay")
 	lossesBase := m.captureLossBaseline(ctx)
+	scopeStatus := m.checkScopeStatus(ctx)
 
 	// 7. Release the compose app now that the mock pool is armed. This is the
 	//    post-arm half of step 2 — see releaseComposeApp.
@@ -1081,6 +1082,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		AnsweredAsAnother: answeredAsAnotherReceipt(counts.asAnother),
 
 		CaptureIncomplete: incompleteLosses,
+		ScopedReady:       scopedReadyPtr(scopeStatus),
+		ScopedReadyReason: scopeStatus.Reason,
+		ScopedReadyRemedy: scopeStatus.Remedy,
 
 		ProcessTrackingUnread: trackingUnread,
 		CallCaptureUnread:     captureUnread,

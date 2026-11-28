@@ -106,6 +106,14 @@ type Hooks struct {
 	// SetInstance (instance.go); instanceMu guards it.
 	instanceMu   sync.Mutex
 	instanceFork link.Link
+	// scopedMu serialises cgroup-based scoped mode state (FlagScopedPids).
+	scopedMu        sync.Mutex
+	scopedRequested bool
+	scopedReady     bool
+	scopedReason    string
+	scopedRemedy    string
+	scopedCgroupDir string
+	scopedCgroupID  uint64
 	// instanceLock holds this agent's cross-PID-namespace flock ownership
 	// claim for the lifetime of loaded eBPF hooks.
 	instanceLock *instanceLock
@@ -357,6 +365,10 @@ func (h *Hooks) sendFinalAgentInfo(info structs.AgentInfo, start func(*structs.A
 	if err := send(info); err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
 		return err
+	}
+	if info.IsDocker == 0 && (info.Flags&structs.FlagScopedPids) != 0 && info.ScopedCgroupID != 0 {
+		h.logger.Info("eBPF native cgroup scoping active: only opted-in processes and their descendants will be intercepted",
+			zap.Uint64("scoped_cgroup_id", info.ScopedCgroupID))
 	}
 	h.sayBindFallback(info.Flags)
 	// The bind hooks steer from here (the flags are sent): a restarted
@@ -827,6 +839,19 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		info.Flags &^= structs.FlagProvenReady
 		info.Flags |= readyFlags
 
+		// In native scoped mode, create a dedicated cgroup v2 directory inside
+		// the client's cgroup and pass its inode ID to BPF (which self-calibrates
+		// the true host cgrp->level via keploy_scoped_cgroup_level_map) so kernel
+		// fork inheritance keeps all descendants (at any nested sub-cgroup depth,
+		// including reparented daemons) isolated without any tracing recursion
+		// guard. If no scoped cgroup can be created (e.g. read-only
+		// /sys/fs/cgroup, threaded client cgroup, or non-delegated session), fail
+		// closed to full-tree interception and record scoped_ready=false with a
+		// cause-specific remedy.
+		if info.IsDocker == 0 && (info.Flags&structs.FlagScopedPids) != 0 {
+			h.applyScopedCgroupSetup(info, cGroupPath, clientInfo.ClientNSPID, h.setupScopedCgroup)
+		}
+
 		// A client keploy cannot register would have none of its
 		// pass-through ports bypassed, so the start fails here rather than
 		// going on without them.
@@ -1004,6 +1029,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if err := h.closeInstanceFork(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the sched_process_fork hook that keeps keploy instances")
 	}
+	h.closeScopedCgroup()
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}
