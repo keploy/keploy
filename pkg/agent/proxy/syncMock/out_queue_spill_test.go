@@ -133,8 +133,10 @@ func TestOutQueueSpill_ExactFIFOAcrossRAMAndSpill(t *testing.T) {
 	mgr.SetOutputChannel(out)
 
 	// Force spilling after ~2 KiB queued in RAM so the burst spans RAM and spill.
+	base := processOutQueued.Load()
 	spill := &fakeSpillFactory{ramLimit: 2048}
 	mgr.SetOutQueueSpill(spill)
+	registerSpillCleanup(t, mgr, out, base, nil)
 
 	const total = 40
 	var delivered atomic.Int64
@@ -188,8 +190,10 @@ func TestOutQueueSpill_InterleaveRAMAndSpillExactFIFO(t *testing.T) {
 	out := make(chan *models.Mock, 2)
 	mgr.SetOutputChannel(out)
 
+	base := processOutQueued.Load()
 	spill := &fakeSpillFactory{ramLimit: 8192}
 	mgr.SetOutQueueSpill(spill)
+	registerSpillCleanup(t, mgr, out, base, nil)
 
 	const total = 1200
 	got := make([]string, 0, total)
@@ -265,13 +269,15 @@ func TestOutQueueSpill_ExhaustedSpillUsesRAMTailAndFailsClosedPastBound(t *testi
 	nonSharedBound := outQueueMaxBytes - outQueueSharedRoom
 	baseQueued := processOutQueued.Load()
 	reserve := (nonSharedBound - 20*1024) - baseQueued
+	var reserveVal atomic.Int64
 	if reserve > 0 {
 		processOutQueued.Add(reserve)
-		defer processOutQueued.Add(-reserve)
+		reserveVal.Store(reserve)
 	}
 
 	spill := &fakeSpillFactory{ramLimit: 1024, maxItems: 2}
 	mgr.SetOutQueueSpill(spill)
+	registerSpillCleanup(t, mgr, out, baseQueued, &reserveVal)
 
 	var droppedOwners []string
 	var droppedMu sync.Mutex
@@ -363,31 +369,15 @@ func TestOutQueueSpill_RAMLimitClampedToQueueBound(t *testing.T) {
 			// cross maxHead and spill into the reserved metadata headroom.
 			baseQueued := processOutQueued.Load()
 			reserve := (maxHead - sampleSize - 512) - baseQueued
+			var reserveVal atomic.Int64
 			if reserve > 0 {
 				processOutQueued.Add(reserve)
+				reserveVal.Store(reserve)
 			}
-			var reservedActive atomic.Bool
-			if reserve > 0 {
-				reservedActive.Store(true)
-			}
-			t.Cleanup(func() {
-				// Always drain and close before restoring processOutQueued so
-				// no live drainer can leak bytes into the next test.
-				doneDrain := make(chan struct{})
-				go func() {
-					defer close(doneDrain)
-					for range out {
-					}
-				}()
-				mgr.CloseOutChan()
-				<-doneDrain
-				if reservedActive.CompareAndSwap(true, false) {
-					processOutQueued.Add(-reserve)
-				}
-			})
 
 			spill := &fakeSpillFactory{ramLimit: tc.ramLimit}
 			mgr.SetOutQueueSpill(spill)
+			registerSpillCleanup(t, mgr, out, baseQueued, &reserveVal)
 
 			now := time.Now().Add(-time.Second)
 			if res := mgr.send(makeSizedMock("clamp-00", 4096, now), "tc-0", nil); res != MockTaken {
@@ -469,7 +459,7 @@ func registerSpillCleanup(t *testing.T, mgr *SyncMockManager, ch chan *models.Mo
 // substantial repeating-metadata spill capacity.
 func TestOutQueueSpill_RAMCapReserveTableAndCapacity(t *testing.T) {
 	const bound = outQueueMaxBytes - outQueueSharedRoom
-	const wantMaxHead = bound - bound/spillMetaReserveDivisor // 36 MiB
+	const wantMaxHead int64 = 37748736 // 36 MiB literal (3/4 of 48 MiB non-shared bound)
 	cases := []struct {
 		name     string
 		ramLimit int64
@@ -528,10 +518,10 @@ func TestOutQueueSpill_RAMCapReserveTableAndCapacity(t *testing.T) {
 				kept++
 			}
 		}
-		// With the 1/4 reserve (12 MiB metadata headroom for owned mocks),
-		// RAMLimit=0 keeps >50k 1 KiB repeating mocks; a tiny reserve (e.g.
-		// bound/64 = 0.75 MiB) would cap out below ~25k.
-		if kept < 45_000 {
+		t.Logf("RAMLimit=0 small repeating mocks: kept=%d/%d", kept, total)
+		// With the 1/4 reserve (12 MiB metadata headroom), RAMLimit=0 keeps
+		// ~68k-75k 1 KiB repeating mocks; a 1/8 reserve drops below ~52k.
+		if kept < 62_000 {
 			t.Fatalf("RAMLimit=0 kept only %d/%d small repeating mocks; metadata reserve too small", kept, total)
 		}
 	})
@@ -643,6 +633,7 @@ func TestOutQueueSpill_ConsumerStallStreamsDropsWithoutSlurp(t *testing.T) {
 	// exercises RAM head -> detached spill -> RAM tail in exact FIFO order.
 	spill := &fakeSpillFactory{ramLimit: 1024, maxItems: 4}
 	mgr.SetOutQueueSpill(spill)
+	registerSpillCleanup(t, mgr, out, baseQueued, nil)
 
 	const total = 10
 	var doneFalse atomic.Int64
@@ -708,8 +699,10 @@ func TestOutQueueSpill_CorruptPeekFailsClosedWithFullMetadataAndAsyncReusable(t 
 		out <- &models.Mock{Name: "filler"}
 		mgr.SetOutputChannel(out)
 
+		base := processOutQueued.Load()
 		spill := &fakeSpillFactory{ramLimit: 1, failPeekAt: 1}
 		mgr.SetOutQueueSpill(spill)
+		registerSpillCleanup(t, mgr, out, base, nil)
 
 		var toldMu sync.Mutex
 		var told []*models.Mock
@@ -846,7 +839,9 @@ func TestOutQueueSpill_CorruptPeekFailsClosedWithFullMetadataAndAsyncReusable(t 
 				out := make(chan *models.Mock, 1)
 				out <- &models.Mock{Name: "filler"}
 				mgr.SetOutputChannel(out)
+				base := processOutQueued.Load()
 				mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1, failPeekAt: 1})
+				registerSpillCleanup(t, mgr, out, base, nil)
 
 				mgr.send(makeSizedMock("head", 1024, req), "", nil) // RAM head
 				mgr.send(tc.make(req.Add(time.Millisecond)), "", nil)
@@ -866,6 +861,7 @@ func TestOutQueueSpill_CorruptPeekFailsClosedWithFullMetadataAndAsyncReusable(t 
 }
 
 func TestSetDefaultOutQueueSpill_AppliesToNewManagers(t *testing.T) {
+	base := processOutQueued.Load()
 	spill := &fakeSpillFactory{ramLimit: 1024}
 	SetDefaultOutQueueSpill(spill)
 	t.Cleanup(func() { SetDefaultOutQueueSpill(nil) })
@@ -873,6 +869,7 @@ func TestSetDefaultOutQueueSpill_AppliesToNewManagers(t *testing.T) {
 	mgr := New(zap.NewNop())
 	out := make(chan *models.Mock, 1)
 	mgr.SetOutputChannel(out)
+	registerSpillCleanup(t, mgr, out, base, nil)
 
 	now := time.Now().Add(-time.Second)
 	for i := 0; i < 10; i++ {
@@ -882,7 +879,11 @@ func TestSetDefaultOutQueueSpill_AppliesToNewManagers(t *testing.T) {
 		t.Fatal("default OutQueueSpill was not used by New() manager")
 	}
 	for i := 0; i < 10; i++ {
-		<-out
+		select {
+		case <-out:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out draining default-spill mock %d/10", i)
+		}
 	}
 	mgr.CloseOutChan()
 }
@@ -946,7 +947,9 @@ func TestOutQueueSpill_SpilledMocksNotPinnedOnHeap(t *testing.T) {
 			out := make(chan *models.Mock, 1)
 			out <- &models.Mock{Name: "filler"}
 			mgr.SetOutputChannel(out)
+			base := processOutQueued.Load()
 			mgr.SetOutQueueSpill(&nonRetainingSpillFactory{ramLimit: 1024})
+			registerSpillCleanup(t, mgr, out, base, nil)
 
 			runtime.GC()
 			runtime.GC()
@@ -1028,6 +1031,7 @@ func TestOutQueueSpill_SpilledMocksNotPinnedOnHeap(t *testing.T) {
 // does not hold SyncMockManager.outQueueMu, so OutQueued() and RAM-head reads
 // remain non-blocking while disk I/O is in flight.
 func TestOutQueueSpill_SpillIODoesNotHoldOutQueueMu(t *testing.T) {
+	base := processOutQueued.Load()
 	mgr := New(zap.NewNop())
 	mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
 	out := make(chan *models.Mock, 1)
@@ -1036,6 +1040,8 @@ func TestOutQueueSpill_SpillIODoesNotHoldOutQueueMu(t *testing.T) {
 
 	inPut := make(chan struct{})
 	releasePut := make(chan struct{})
+	var releaseOnce sync.Once
+	unlockPut := func() { releaseOnce.Do(func() { close(releasePut) }) }
 	var once sync.Once
 	spill := &fakeSpillFactory{
 		ramLimit: 1024,
@@ -1047,6 +1053,8 @@ func TestOutQueueSpill_SpillIODoesNotHoldOutQueueMu(t *testing.T) {
 		},
 	}
 	mgr.SetOutQueueSpill(spill)
+	registerSpillCleanup(t, mgr, out, base, nil)
+	t.Cleanup(unlockPut)
 
 	now := time.Now().Add(-time.Second)
 	// First queued mock goes to RAM head.
@@ -1058,38 +1066,59 @@ func TestOutQueueSpill_SpillIODoesNotHoldOutQueueMu(t *testing.T) {
 		mgr.send(makeSizedMock("slow-spill", 2048, now.Add(time.Millisecond)), "", nil)
 	}()
 
-	<-inPut
+	select {
+	case <-inPut:
+	case <-time.After(5 * time.Second):
+		unlockPut()
+		t.Fatal("timed out waiting for slow-spill to enter spill Put()")
+	}
 	// While Put() is blocked in "disk I/O", OutQueued() must NOT block on outQueueMu.
 	checked := make(chan bool, 1)
 	go func() { checked <- mgr.OutQueued() }()
 	select {
 	case q := <-checked:
 		if !q {
+			unlockPut()
 			t.Fatal("OutQueued() returned false while spill Put was in flight")
 		}
 	case <-time.After(2 * time.Second):
-		close(releasePut)
+		unlockPut()
 		t.Fatal("OutQueued() blocked on outQueueMu while spill Put() was executing")
 	}
 
-	close(releasePut)
-	<-sendDone
-	<-out // filler
-	if got := <-out; got.Name != "ram-head" {
+	unlockPut()
+	select {
+	case <-sendDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for slow-spill send to finish")
+	}
+	readOut := func(label string) *models.Mock {
+		t.Helper()
+		select {
+		case m, ok := <-out:
+			if !ok {
+				t.Fatalf("%s: out channel closed unexpectedly", label)
+			}
+			return m
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %s on out channel", label)
+			return nil
+		}
+	}
+	_ = readOut("filler")
+	if got := readOut("ram-head"); got.Name != "ram-head" {
 		t.Fatalf("first delivered = %q, want ram-head", got.Name)
 	}
-	if got := <-out; got.Name != "slow-spill" {
+	if got := readOut("slow-spill"); got.Name != "slow-spill" {
 		t.Fatalf("second delivered = %q, want slow-spill", got.Name)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for mgr.OutQueued() && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitOutQueue(t, mgr)
 	mgr.CloseOutChan()
 
 	// Slow-Peek variant: while the drainer is blocked inside
 	// lane.spill.Peek(), OutQueued() must not block on outQueueMu.
 	t.Run("slow_peek", func(t *testing.T) {
+		base := processOutQueued.Load()
 		mgr := New(zap.NewNop())
 		mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
 		out := make(chan *models.Mock, 1)
@@ -1098,6 +1127,8 @@ func TestOutQueueSpill_SpillIODoesNotHoldOutQueueMu(t *testing.T) {
 
 		inPeek := make(chan struct{})
 		releasePeek := make(chan struct{})
+		var releaseOnce sync.Once
+		unlockPeek := func() { releaseOnce.Do(func() { close(releasePeek) }) }
 		var once sync.Once
 		spill := &fakeSpillFactory{
 			ramLimit: 1024,
@@ -1109,33 +1140,52 @@ func TestOutQueueSpill_SpillIODoesNotHoldOutQueueMu(t *testing.T) {
 			},
 		}
 		mgr.SetOutQueueSpill(spill)
+		registerSpillCleanup(t, mgr, out, base, nil)
+		t.Cleanup(unlockPeek)
 
 		now := time.Now().Add(-time.Second)
 		mgr.send(makeSizedMock("ram-head", 2048, now), "", nil)
 		mgr.send(makeSizedMock("slow-peek", 2048, now.Add(time.Millisecond)), "", nil)
-		<-out // filler
-		<-out // ram-head; drainer now enters Peek() for slow-peek
-		<-inPeek
+		readOut := func(label string) *models.Mock {
+			t.Helper()
+			select {
+			case m, ok := <-out:
+				if !ok {
+					t.Fatalf("%s: out channel closed unexpectedly", label)
+				}
+				return m
+			case <-time.After(5 * time.Second):
+				unlockPeek()
+				t.Fatalf("timed out waiting for %s on out channel", label)
+				return nil
+			}
+		}
+		_ = readOut("filler")
+		_ = readOut("ram-head") // drainer now enters Peek() for slow-peek
+		select {
+		case <-inPeek:
+		case <-time.After(5 * time.Second):
+			unlockPeek()
+			t.Fatal("timed out waiting for drainer to enter spill Peek()")
+		}
 
 		checked := make(chan bool, 1)
 		go func() { checked <- mgr.OutQueued() }()
 		select {
 		case q := <-checked:
 			if !q {
+				unlockPeek()
 				t.Fatal("OutQueued() returned false while spill Peek was in flight")
 			}
 		case <-time.After(2 * time.Second):
-			close(releasePeek)
+			unlockPeek()
 			t.Fatal("OutQueued() blocked on outQueueMu while spill Peek() was executing")
 		}
-		close(releasePeek)
-		if got := <-out; got.Name != "slow-peek" {
+		unlockPeek()
+		if got := readOut("slow-peek"); got.Name != "slow-peek" {
 			t.Fatalf("delivered = %q, want slow-peek", got.Name)
 		}
-		deadline := time.Now().Add(5 * time.Second)
-		for mgr.OutQueued() && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
-		}
+		waitOutQueue(t, mgr)
 		mgr.CloseOutChan()
 	})
 }
@@ -1150,8 +1200,9 @@ func TestOutQueueSpill_NilHookMidSpillKeepsFIFO(t *testing.T) {
 	out := make(chan *models.Mock, 1)
 	out <- &models.Mock{Name: "filler"}
 	mgr.SetOutputChannel(out)
-	mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1024})
 	base := processOutQueued.Load()
+	mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1024})
+	registerSpillCleanup(t, mgr, out, base, nil)
 
 	now := time.Now().Add(-time.Second)
 	for i := 0; i < 4; i++ {
@@ -1197,10 +1248,11 @@ func TestOutQueueSpill_StallWithNilHookTail(t *testing.T) {
 	mgr := New(zap.NewNop())
 	mgr.outClock, mgr.outStall = clk, time.Hour
 	mgr.SetOutputChannel(ch)
+	base := processOutQueued.Load()
 	mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1024})
+	registerSpillCleanup(t, mgr, ch, base, nil)
 	var told atomic.Int64
 	mgr.OnDrop(func(*models.Mock) { told.Add(1) })
-	base := processOutQueued.Load()
 	now := time.Now().Add(-time.Minute)
 
 	var mu sync.Mutex
@@ -1273,18 +1325,20 @@ func TestOutQueueSpill_StallWithNilHookTail(t *testing.T) {
 
 // TestOutQueueSpill_NilHookMidSpillEnforcesBound verifies that the first mock
 // entering a nil-hook tail behind spilled mocks still respects the per-class
-// byte bound .
+// byte bound.
 func TestOutQueueSpill_NilHookMidSpillEnforcesBound(t *testing.T) {
 	SetDefaultOutQueueSpill(nil)
+	base := processOutQueued.Load()
+	var reserveVal atomic.Int64
 	ch := make(chan *models.Mock, 1)
 	ch <- &models.Mock{Name: "filler"}
 	mgr := New(zap.NewNop())
 	mgr.outClock, mgr.outStall = &stall.ManualClock{}, time.Hour
 	mgr.SetOutputChannel(ch)
 	mgr.SetOutQueueSpill(&fakeSpillFactory{ramLimit: 1024})
+	registerSpillCleanup(t, mgr, ch, base, &reserveVal)
 	var told atomic.Int64
 	mgr.OnDrop(func(*models.Mock) { told.Add(1) })
-	base := processOutQueued.Load()
 	now := time.Now().Add(-time.Minute)
 
 	for i := 0; i < 4; i++ {
@@ -1297,7 +1351,12 @@ func TestOutQueueSpill_NilHookMidSpillEnforcesBound(t *testing.T) {
 	nonShared := outQueueMaxBytes - outQueueSharedRoom
 	reserve := nonShared - processOutQueued.Load()
 	processOutQueued.Add(reserve)
-	defer processOutQueued.Add(-reserve)
+	reserveVal.Store(reserve)
+	defer func() {
+		if r := reserveVal.Swap(0); r != 0 {
+			processOutQueued.Add(-r)
+		}
+	}()
 
 	if d := mgr.send(makeSizedMock("b-0", 1<<20, now.Add(time.Second)), "tc-b0", nil); d != MockDroppedOutputFull {
 		t.Fatalf("first nil-hook tail mock with no room = %v, want MockDroppedOutputFull", d)
@@ -1394,6 +1453,7 @@ func TestOutQueueSpill_FlippingBudgetStressExactFIFOAndZeroAccounting(t *testing
 	spill := &flippingSpillFactory{ramLimit: 4096}
 	spill.allow.Store(true)
 	mgr.SetOutQueueSpill(spill)
+	registerSpillCleanup(t, mgr, out, baseQueued, nil)
 
 	const senders = 4
 	const perSender = 400
@@ -1459,7 +1519,7 @@ func TestOutQueueSpill_FlippingBudgetStressExactFIFOAndZeroAccounting(t *testing
 					return
 				}
 				if seq%37 == 0 {
-					// Let the drainer drain down to empty so senders race drainer exit .
+					// Let the drainer drain down to empty so senders race drainer exit.
 					time.Sleep(300 * time.Microsecond)
 				}
 			}
@@ -1524,6 +1584,7 @@ func TestOutQueueSpill_SendDuringDrainerExitDiscardNotStranded(t *testing.T) {
 		},
 	}
 	mgr.SetOutQueueSpill(spill)
+	registerSpillCleanup(t, mgr, out, baseQueued, nil)
 
 	mgr.send(makeSizedMock("head-0", 2048, now), "", nil)
 	mgr.send(makeSizedMock("spilled-1", 2048, now.Add(time.Millisecond)), "", nil)

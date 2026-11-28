@@ -33,6 +33,9 @@ type OutQueueSpill interface {
 	// reserved for spilled-item bookkeeping so a shared/startup RAM head can
 	// never starve owned mocks' spill metadata; values <= 0 or above that cap
 	// are clamped to maxHead = (outQueueMaxBytes - outQueueSharedRoom) * 3 / 4.
+	// Spilled shared/startup mocks still account their metadata against the
+	// 64 MiB shared bound, so an extreme shared spill can consume owned
+	// headroom before shared drops.
 	RAMLimit() int64
 }
 
@@ -70,9 +73,9 @@ type OutQueueSpillLane interface {
 	Discard() int
 }
 
-// spillMetaReserveDivisor reserves 1/4 of queueBound for spilled-item
-// bookkeeping so RAM head entries never starve spill metadata when
-// RAMLimit <= 0 or RAMLimit >= queueBound.
+// spillMetaReserveDivisor reserves 1/4 of (outQueueMaxBytes - outQueueSharedRoom)
+// for spilled-item bookkeeping so RAM head entries never starve spill metadata
+// when RAMLimit <= 0 or RAMLimit >= maxHead.
 const spillMetaReserveDivisor int64 = 4
 
 // spillRAMCap clamps ramLimit so spilled-item bookkeeping always retains

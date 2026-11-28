@@ -866,6 +866,7 @@ type SyncMockManager struct {
 	// leaf: taken under mu, or alone.
 	sendingMu    sync.Mutex
 	sendingSeq   uint64
+	sendingPeak  int
 	sending      map[uint64]time.Time
 	sendingByPtr map[*models.Mock]uint64
 
@@ -2129,17 +2130,23 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 			// before ending draining so no concurrent send is stranded.
 			m.outQueueMu.Unlock()
 			lane.spillMu.Lock()
+			var residualMetaBytes int64
 			if lane.spill != nil && lane.spill.Len() == 0 {
 				lane.spill.Discard()
 				lane.spill = nil
 				lane.spillMeta = nil
 				lane.metaPool = nil
 				if lane.spillMetaBytes > 0 {
+					residualMetaBytes = lane.spillMetaBytes
 					processOutQueued.Add(-lane.spillMetaBytes)
 					lane.spillMetaBytes = 0
 				}
 			}
 			lane.spillMu.Unlock()
+			if residualMetaBytes > 0 {
+				m.dropLogger().Warn("out-queue spill lane emptied with residual metadata bytes; refunding",
+					zap.Int64("bytes", residualMetaBytes))
+			}
 
 			m.outQueueMu.Lock()
 			if len(lane.queue) > 0 || lane.spillCount.Load() > 0 || lane.spillInFlight > 0 || len(lane.tail) > 0 {
@@ -3209,6 +3216,11 @@ func (m *SyncMockManager) trySendControlFrameFor(mock *models.Mock, epoch uint64
 	}
 }
 
+// sendingShrinkThreshold is the peak in-flight sending-map size past which
+// emptying the map releases its backing table for GC (Go maps never shrink on
+// delete, so a 100k+ spill burst would otherwise retain ~11-16 MiB uncharged).
+const sendingShrinkThreshold = 4096
+
 // noteSendingAt records a mock's request time on its way to outChan (PendingIn)
 // without retaining the *models.Mock pointer, returning the token for sentID.
 func (m *SyncMockManager) noteSendingAt(at time.Time) uint64 {
@@ -3220,6 +3232,9 @@ func (m *SyncMockManager) noteSendingAt(at time.Time) uint64 {
 	m.sendingSeq++
 	id := m.sendingSeq
 	m.sending[id] = at
+	if n := len(m.sending); n > m.sendingPeak {
+		m.sendingPeak = n
+	}
 	return id
 }
 
@@ -3230,6 +3245,13 @@ func (m *SyncMockManager) sentID(id uint64) {
 	}
 	m.sendingMu.Lock()
 	delete(m.sending, id)
+	if len(m.sending) == 0 && m.sendingPeak >= sendingShrinkThreshold {
+		m.sending = nil
+		if len(m.sendingByPtr) == 0 {
+			m.sendingByPtr = nil
+		}
+		m.sendingPeak = 0
+	}
 	m.sendingMu.Unlock()
 }
 
@@ -3255,6 +3277,9 @@ func (m *SyncMockManager) noteSending(mocks ...*models.Mock) {
 			m.sendingByPtr[mk] = id
 		}
 	}
+	if n := len(m.sending); n > m.sendingPeak {
+		m.sendingPeak = n
+	}
 }
 
 // sent says a mock's send has finished: delivered, or dropped and told.
@@ -3263,6 +3288,13 @@ func (m *SyncMockManager) sent(mk *models.Mock) {
 	if id, ok := m.sendingByPtr[mk]; ok {
 		delete(m.sendingByPtr, mk)
 		delete(m.sending, id)
+	}
+	if len(m.sending) == 0 && m.sendingPeak >= sendingShrinkThreshold {
+		m.sending = nil
+		if len(m.sendingByPtr) == 0 {
+			m.sendingByPtr = nil
+		}
+		m.sendingPeak = 0
 	}
 	m.sendingMu.Unlock()
 }
