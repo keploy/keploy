@@ -8,13 +8,15 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// InRequest reports, for r, a recorded HTTP request, whether r holds one
-// value at a place: the holds that ReadPlace reads a place of r's mock's
-// variables block with, in its replay and in its learn step alike. A URL
-// path segment that unescapes; a query name with one value (r's URLParams,
-// where it has any, before its URL's query, as the matcher reads them); a
-// header with one value, its name in any case; a body path at one JSON
-// scalar. No request (nil), or one whose URL does not parse, holds none.
+// InRequest reports, for r, a recorded HTTP request, whether r holds one value
+// at a place: the holds that ReadPlace reads a place of r's mock's variables
+// block with, in its replay and in its learn step alike. A URL path segment
+// that unescapes; a query name with one value (r's URLParams, where it has
+// any, before its URL's query, as the matcher reads them); a header with one
+// value, its name in any case; a body path at one JSON scalar (checked first,
+// even if a client sent JSON under a form Content-Type) or one single-value
+// application/x-www-form-urlencoded field. No request (nil), or one whose URL
+// does not parse, holds none.
 func InRequest(r *models.HTTPReq) func(Place) bool {
 	if r == nil {
 		return func(Place) bool { return false }
@@ -57,8 +59,15 @@ func InRequest(r *models.HTTPReq) func(Place) bool {
 		}
 		switch p.Part {
 		case PartBody:
-			_, held := JSONLeafAt(r.Body, p.Path)
-			return held
+			if IsJSONDoc(r.Body) {
+				_, held := JSONLeafAt(r.Body, p.Path)
+				return held
+			}
+			if ct := header.Get("Content-Type"); IsFormMediaType(ct) {
+				_, held := FormLeafAt(r.Body, ct, p.Path)
+				return held
+			}
+			return false
 		case PartPath:
 			if p.Index < 0 || p.Index >= len(segments) {
 				return false

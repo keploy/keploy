@@ -261,13 +261,6 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 				RemoveFormFiles(logger, formData)
 			}
 		}()
-	} else if contentType := req.Header.Get("Content-Type"); contentType == "application/x-www-form-urlencoded" {
-		decodedBody, err := url.QueryUnescape(string(reqBody))
-		if err != nil {
-			utils.LogError(logger, err, "failed to decode the url-encoded request body")
-			return
-		}
-		reqBody = []byte(decodedBody)
 	}
 
 	if resp.Header.Get("Content-Encoding") != "" {
@@ -354,6 +347,11 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			// Replay sends this request again: keep what it takes to
 			// send a repeated header on its own lines.
 			HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(req.Header),
+
+			// Mark exact "application/x-www-form-urlencoded" recordings whose
+			// body is kept raw on the wire so PairCase can distinguish them
+			// from legacy pre-decoded recordings.
+			RawFormBody: req.Header.Get("Content-Type") == "application/x-www-form-urlencoded",
 		},
 		HTTPResp: models.HTTPResp{
 			StatusCode:    resp.StatusCode,

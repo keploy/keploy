@@ -412,8 +412,9 @@ jobs:
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/variables-test-linux.sh"
 
       # The same, recorded by the released keploy and templatized and tested by
-      # this build: what an upgrading user has. The recording format did not
-      # change.
+      # this build: what an upgrading user has. When RECORD_BIN differs from
+      # REPLAY_BIN, variables-test-linux.sh sends a decode-safe form payload so
+      # legacy pre-decoded recordings stay covered alongside raw capture.
       - id: latest
         uses: ./.github/actions/download-binary
         with:

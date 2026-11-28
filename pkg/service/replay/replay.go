@@ -5147,6 +5147,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							Timestamp:  sent.HTTPReq.Timestamp,
 
 							HeaderLineLengths: sent.HTTPReq.HeaderLineLengths,
+							RawFormBody:       sent.HTTPReq.RawFormBody,
 						},
 						Res:          *httpResp,
 						TestCasePath: filepath.Join(r.config.Path, testSetID),
@@ -6302,6 +6303,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						Timestamp:  sent.HTTPReq.Timestamp,
 
 						HeaderLineLengths: sent.HTTPReq.HeaderLineLengths,
+						RawFormBody:       sent.HTTPReq.RawFormBody,
 					},
 					Res:          *httpResp,
 					TestCasePath: filepath.Join(r.config.Path, testSetID),
@@ -10070,6 +10072,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Timestamp:  testCase.HTTPReq.Timestamp,
 
 			HeaderLineLengths: testCase.HTTPReq.HeaderLineLengths,
+			RawFormBody:       testCase.HTTPReq.RawFormBody,
 		}
 		testCaseResult.Res = *actualResponse
 

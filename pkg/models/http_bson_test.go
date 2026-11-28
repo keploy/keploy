@@ -196,3 +196,48 @@ func TestHeaderLineLengthsRoundTripsThroughEveryStore(t *testing.T) {
 		}
 	}
 }
+
+// RawFormBody survives YAML, JSON, and BSON round-trips when set and is omitted
+// completely from every store when false so non-form and legacy recordings stay
+// untouched.
+func TestRawFormBodyRoundTripsThroughEveryStore(t *testing.T) {
+	req := HTTPReq{
+		Method:      "POST",
+		URL:         "http://a/form",
+		Header:      map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+		Body:        "a=1%262",
+		RawFormBody: true,
+	}
+	type codec struct {
+		name      string
+		marshal   func(interface{}) ([]byte, error)
+		unmarshal func([]byte, interface{}) error
+		key       string
+	}
+	for _, c := range []codec{
+		{"yaml", yamlLib.Marshal, yamlLib.Unmarshal, "raw_form_body"},
+		{"json", json.Marshal, json.Unmarshal, "raw_form_body"},
+		{"bson", bson.Marshal, bson.Unmarshal, "rawformbody"},
+	} {
+		data, err := c.marshal(req)
+		if err != nil {
+			t.Fatalf("%s: marshal request: %v", c.name, err)
+		}
+		var gotReq HTTPReq
+		if err := c.unmarshal(data, &gotReq); err != nil {
+			t.Fatalf("%s: unmarshal request: %v", c.name, err)
+		}
+		if !gotReq.RawFormBody {
+			t.Errorf("%s: RawFormBody = false; want true", c.name)
+		}
+
+		unmarked := HTTPReq{Method: "POST", URL: "http://a/json", Header: map[string]string{"Content-Type": "application/json"}, Body: `{}`}
+		data, err = c.marshal(unmarked)
+		if err != nil {
+			t.Fatalf("%s: marshal unmarked request: %v", c.name, err)
+		}
+		if bytes.Contains(data, []byte(c.key)) {
+			t.Errorf("%s: unmarked request stores %q:\n%s", c.name, c.key, data)
+		}
+	}
+}

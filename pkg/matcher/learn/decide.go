@@ -289,8 +289,11 @@ type Decision struct {
 	Refusal        *Refusal
 	Line           string
 	// AnsweredAfter are the recordings whose answer holds Recorded that
-	// the decision set aside because they were asked at or before the
-	// call and answered after it: R's word there decided nothing.
+	// the decision set aside because they were answered after the call in
+	// the recording (either asked at or before the call and answered after
+	// it, or recorded later in R and served earlier in F when an earlier
+	// source already held the value in both runs): R's word there decided
+	// nothing.
 	AnsweredAfter []Place
 	// Minted is set on a field a minted rule decided made anew (Input.Source):
 	// the replay checks the value it binds there against it.

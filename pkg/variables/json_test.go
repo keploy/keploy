@@ -106,3 +106,62 @@ func TestJSONUnitReadsAsEncodingJSONDecodes(t *testing.T) {
 		}
 	}
 }
+
+func TestIsJSONDocMatchesJSONValid(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"empty", "", false},
+		{"whitespace only", " \t\r\n", false},
+		{"object", `{"a":1}`, true},
+		{"array", `[1,2,3]`, true},
+		{"string scalar", `"x"`, true},
+		{"bool true", `true`, true},
+		{"bool false", `false`, true},
+		{"null scalar", `null`, true},
+		{"negative number", `-1`, true},
+		{"zero", `0`, true},
+		{"digit 1", `1`, true},
+		{"digit 2", `2`, true},
+		{"digit 3", `3`, true},
+		{"digit 4", `4`, true},
+		{"digit 5", `5`, true},
+		{"digit 6", `6`, true},
+		{"digit 7", `7`, true},
+		{"digit 8", `8`, true},
+		{"digit 9", `9`, true},
+		{"float", `3.14e-2`, true},
+		{"leading spaces and tabs object", " \t\n{}", true},
+		{"leading CRLF string", "\r\n\t\"x\"", true},
+		{"leading whitespace bool", " \n\r\ttrue ", true},
+		{"leading whitespace null", "\t null\n", true},
+		{"leading whitespace number", "\n -42", true},
+		{"form body", "a=1&b=2", false},
+		{"form body starting with t", "token=abc", false},
+		{"form body starting with n", "name=alice", false},
+		{"form body starting with digit", "1=a&2=b", false},
+		{"form body starting with bracket", "[a]=1", false},
+		{"truncated true", "tru", false},
+		{"truncated false", "fals", false},
+		{"truncated null", "nul", false},
+		{"unclosed string", `"unclosed`, false},
+		{"bad object", `{bad}`, false},
+		{"trailing value", `{} {}`, false},
+		{"plus number", `+1`, false},
+		{"UTF-8 BOM before object", "\xef\xbb\xbf{}", false},
+		{"vertical tab before object", "\v{}", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			valid := json.Valid([]byte(tc.s))
+			if valid != tc.want {
+				t.Fatalf("json.Valid(%q) = %v; test table expected %v", tc.s, valid, tc.want)
+			}
+			if got := IsJSONDoc(tc.s); got != valid {
+				t.Fatalf("IsJSONDoc(%q) = %v; want %v (json.Valid)", tc.s, got, valid)
+			}
+		})
+	}
+}

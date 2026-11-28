@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // THE TEST CASE'S OWN REQUEST.
@@ -143,8 +144,9 @@ const strayRequest = "the test case's request reached the agent while no test wa
 // (Earlier.Given), read as the HTTP adapter reads an exchange F served: each
 // part a leaf, recorded and as sent; its URL as its path's segments and its
 // query's values (url.path.<i>, url.query.<key>), never its scheme, host or
-// port, where the application is reached; a JSON body's leaves too, ahead of
-// the body whole, so a reason names the leaf, and its object keys
+// port, where the application is reached; a JSON body's leaves (or an
+// application/x-www-form-urlencoded body's body.<key> leaves) too, ahead of
+// the body whole, so a reason names the leaf, and a JSON body's object keys
 // (KeysLeaf); the text a body kept as the base64 of its bytes holds
 // (binaryText), beside the base64; the names of its query
 // parameters, headers and form fields (request{names}); and none of what
@@ -201,6 +203,7 @@ func GivenRequest(req *models.TestRequest) Earlier {
 			}
 		}
 		from := len(e.Seen)
+		var bodyWhy string
 		switch {
 		case part.Name == "url":
 			if leaves, rn, sn, ok := urlSeen(part.Recorded, part.Sent); ok {
@@ -214,7 +217,21 @@ func GivenRequest(req *models.TestRequest) Earlier {
 				continue
 			}
 		case part.Name == "body":
-			e.Seen = append(e.Seen, jsonSeen(part.Recorded, part.Sent)...)
+			if !variables.IsJSONDoc(part.Recorded) && variables.IsFormMediaType(recMedia) {
+				if leaves, rn, sn, ok := formSeen(part.Recorded, recMedia, part.Sent, sentMedia); ok {
+					e.Seen = append(e.Seen, leaves...)
+					for _, n := range rn {
+						recNames[n] = true
+					}
+					for _, n := range sn {
+						sentNames[n] = true
+					}
+				} else {
+					bodyWhy = formParseWhy(part.Recorded, part.Sent)
+				}
+			} else {
+				e.Seen = append(e.Seen, jsonSeen(part.Recorded, part.Sent)...)
+			}
 		case part.Name == "binary":
 			// A body of a text media type keploy keeps as the base64 of
 			// its bytes (models.HTTPReq.Binary): read as the text its bytes
@@ -230,7 +247,7 @@ func GivenRequest(req *models.TestRequest) Earlier {
 				e.Seen = append(e.Seen, Seen{Side: Request, Leaf: Leaf{Path: "binary{text}", Noise: "binary{text}", Type: String, Value: r}, Live: l})
 			}
 		}
-		e.Seen = append(e.Seen, Seen{Side: Request, Leaf: Leaf{Path: part.Name, Noise: part.Name, Type: String, Value: part.Recorded}, Live: part.Sent})
+		e.Seen = append(e.Seen, Seen{Side: Request, Leaf: Leaf{Path: part.Name, Noise: part.Name, Type: String, Value: part.Recorded, UnnamedWhy: bodyWhy}, Live: part.Sent})
 		if undeclaredBody(part, recMedia, sentMedia) {
 			// Read as text by its bytes: a word glued to the bytes around
 			// it is refused too (Seen.Undeclared). Not the base64 a binary
@@ -323,6 +340,120 @@ func textMedia(ct string) bool {
 		return true
 	}
 	return false
+}
+
+// formSeen are the leaves of a raw wire application/x-www-form-urlencoded test
+// request body, recorded and as sent, by key (Leaf.Path is always "body." + k
+// so oneSlotEach and placeLeafPath round-trip; formatJSONPath quotes '#', '"'
+// or '|' when formatting the variable place as body["<key>"]), with the
+// parameter names on each side; ok is false for an empty, JSON, or unparseable
+// recorded or non-empty sent body. A key that repeats on either side, is
+// empty, had no '=' in the recorded pair, holds '.', '[' or ']', or decodes to
+// invalid UTF-8 (in key or value) is marked Unnamed so it stays visible as an
+// earlier text while never naming a single-value variable place.
+func formSeen(recorded, recMedia, sent, sentMedia string) (leaves []Seen, recNames, sentNames []string, ok bool) {
+	rf, rok := variables.ParseFormBody(recorded, recMedia)
+	if !rok {
+		return nil, nil, nil, false
+	}
+	var lf url.Values
+	if sent != "" && variables.IsFormMediaType(sentMedia) {
+		var lok bool
+		lf, lok = variables.ParseFormBody(sent, sentMedia)
+		if !lok && !variables.IsJSONDoc(sent) {
+			return nil, nil, nil, false
+		}
+	}
+	hasEq := map[string]bool{}
+	for _, pair := range strings.Split(recorded, "&") {
+		if rawK, _, found := strings.Cut(pair, "="); found {
+			if dk, err := url.QueryUnescape(rawK); err == nil {
+				hasEq[dk] = true
+			}
+		}
+	}
+	join := func(vs []string) string {
+		if len(vs) == 0 {
+			return ""
+		}
+		if len(vs) == 1 {
+			return vs[0]
+		}
+		cp := append([]string(nil), vs...)
+		sort.Strings(cp)
+		return strings.Join(cp, ", ")
+	}
+	keys := make([]string, 0, len(rf))
+	for k := range rf {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		rvs := rf[k]
+		lvs := lf[k]
+		recVal, liveVal := join(rvs), join(lvs)
+		p := "body." + k
+		var unnamedWhy string
+		switch {
+		case k == "":
+			unnamedWhy = "form key is empty"
+		case !hasEq[k]:
+			unnamedWhy = "form pair has no '='"
+		case len(rvs) != 1 || len(lvs) > 1:
+			unnamedWhy = "form key repeats"
+		case strings.ContainsAny(k, ".[]"):
+			unnamedWhy = "form key holds '.', '[' or ']'"
+		case !utf8.ValidString(k) || !utf8.ValidString(recVal) || !utf8.ValidString(liveVal):
+			unnamedWhy = "form field decodes to invalid UTF-8"
+		}
+		unnamed := unnamedWhy != ""
+		leaves = append(leaves, Seen{Side: Request, Leaf: Leaf{Path: p, Noise: p, Type: String, Value: recVal, Unnamed: unnamed, UnnamedWhy: unnamedWhy}, Live: liveVal})
+		recNames = append(recNames, k)
+	}
+	for k := range lf {
+		sentNames = append(sentNames, k)
+	}
+	return leaves, recNames, sentNames, true
+}
+
+// formParseWhy explains why a non-empty, non-JSON application/x-www-form-urlencoded
+// body failed url.ParseQuery so callers can surface why individual form keys
+// could not be bound. When the recorded body fails to parse while the live sent
+// body parses cleanly, it notes that an older keploy likely decoded the body at
+// capture and suggests re-recording. When the recorded body parses cleanly but
+// the live sent body fails, it reports the live parse error.
+func formParseWhy(recBody, sentBody string) string {
+	classify := func(err error) string {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "semicolon"):
+			return "form body could not be parsed: invalid semicolon separator"
+		case strings.Contains(msg, "invalid URL escape"):
+			return "form body could not be parsed: invalid percent-escape"
+		case strings.Contains(msg, "exceeded"):
+			return "form body could not be parsed: exceeds Go URL query parameter limit"
+		default:
+			return "form body could not be parsed: " + msg
+		}
+	}
+	if recBody == "" {
+		return ""
+	}
+	_, err := url.ParseQuery(recBody)
+	if err == nil {
+		if sentBody != "" {
+			if _, serr := url.ParseQuery(sentBody); serr != nil {
+				return "live " + classify(serr)
+			}
+		}
+		return ""
+	}
+	if sentBody != "" {
+		if _, serr := url.ParseQuery(sentBody); serr == nil {
+			return "recorded form body could not be parsed (likely decoded by an older keploy at capture; re-record to capture raw bytes)"
+		}
+	}
+	return classify(err)
 }
 
 // bodyUnread is why one side of a test case's request body (part: "body",

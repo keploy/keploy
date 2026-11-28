@@ -1530,7 +1530,7 @@ func (k strictKnown) bodyDiffs(r *models.HTTPReq, input *req) []strictField {
 		return nil
 	}
 	recCT := headerValue(r.Header, "Content-Type")
-	form := mediaTypeKey(recCT) == "application/x-www-form-urlencoded"
+	form := mediaTypeKey(recCT) == "application/x-www-form-urlencoded" && !variables.IsJSONDoc(string(rec)) && !variables.IsJSONDoc(string(live))
 	// A whole recorded body the obfuscator's patterns match is one value it
 	// redacted, but for a form of one key whose value it redacted by its key
 	// (oneKeyRedacted): that form is read key by key, as any other, so

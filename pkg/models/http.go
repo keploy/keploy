@@ -55,6 +55,14 @@ type HTTPReq struct {
 	// a recording without a repeated header is unchanged.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
 
+	// RawFormBody marks a recorded request whose exact
+	// "application/x-www-form-urlencoded" body was stored raw on the wire
+	// (percent-encoded) rather than QueryUnescape'd whole as older builds
+	// stored it. Absent (false) on every other request and on legacy
+	// recordings, so YAML/JSON/BSON output is unchanged outside new exact-CT
+	// form recordings.
+	RawFormBody bool `json:"raw_form_body,omitempty" yaml:"raw_form_body,omitempty"`
+
 	// URLRendered marks a URL a replay rendered from its test set's
 	// templates (pkg/templates): each value in it is escaped for its place,
 	// so it is sent as it stands. Never stored.
@@ -298,6 +306,7 @@ type httpReqBSON struct {
 	Timestamp  string            `bson:"timestamp"`
 
 	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
+	RawFormBody       bool              `bson:"rawformbody,omitempty"`
 }
 
 type httpReqBSONReader struct {
@@ -314,6 +323,7 @@ type httpReqBSONReader struct {
 	Timestamp  bson.RawValue     `bson:"timestamp"`
 
 	HeaderLineLengths HeaderLineLengths `bson:"headerlinelengths,omitempty"`
+	RawFormBody       bool              `bson:"rawformbody,omitempty"`
 }
 
 // MarshalBSON writes HTTPReq with the Timestamp field serialised as an
@@ -334,6 +344,7 @@ func (h HTTPReq) MarshalBSON() ([]byte, error) {
 		Timestamp:  FormatMockTimestamp(h.Timestamp),
 
 		HeaderLineLengths: h.HeaderLineLengths,
+		RawFormBody:       h.RawFormBody,
 	})
 }
 
@@ -371,6 +382,7 @@ func (h *HTTPReq) UnmarshalBSON(data []byte) error {
 		Timestamp:  ts,
 
 		HeaderLineLengths: raw.HeaderLineLengths,
+		RawFormBody:       raw.RawFormBody,
 	}
 	return nil
 }

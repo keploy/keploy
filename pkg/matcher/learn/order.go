@@ -2636,7 +2636,8 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 		held, _, _ := dc.holds(h.p, h.p.t.live, r, c.rm, c.byText)
 		return h.p.side == Response && held
 	}
-	copied := len(copies(true)) > 0
+	fineCopies := copies(true)
+	copied := len(fineCopies) > 0
 	conflict := heldWhere(hs, func(h instantHold) bool {
 		return before(h.p) && inScope(h.p) && h.hr && !h.hl && (h.fr || h.p.gave) && (!copied || !asRecorded(h))
 	})
@@ -2645,6 +2646,77 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 		return dc.refuse(path, at, n, r, l, RefusalConflict,
 			strconv.Quote(r)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, l)+" there and the value did not follow", names(conflict),
 			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: givenName(path)})
+	}
+
+	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
+	windowRead := func() bool {
+		return c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
+	}
+	cutSlot := func(p evPlace) bool {
+		return c.rm != nil && c.lm != nil && dc.clientCase(p.mock) && dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm) && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && windowRead()
+	}
+
+	// excuseLate validates that every reordered late answer in lates (recorded
+	// after the call in R, served before it in F) may be set aside because the
+	// ACTUAL bind target chosen by step 2, 3, or 4 is a causally-prior in-scope
+	// fine-cut source distinct from every late mock. A late answer served only
+	// outside the test (before the test began or in an older test) is never
+	// excused so cross-test state stays refused as a pick.
+	excuseLate := func(lates []instantHold, target evPlace, requireLateFine bool) (string, []Place, bool) {
+		if len(lates) == 0 {
+			return "", nil, true
+		}
+		if c.rm == nil || c.lm == nil || !fineCut(c.rm.res) || !fineCut(c.lm.res) {
+			return "", nil, false
+		}
+		var seen []string
+		var aside []Place
+		type asideKey struct {
+			mock, path string
+		}
+		seenPlaces := map[asideKey]bool{}
+		for _, late := range lates {
+			if target.mock == late.p.mock || late.p.outsideTest != "" {
+				return "", nil, false
+			}
+			if requireLateFine && (!late.hr || !late.fr || !late.fl || late.p.same()) {
+				return "", nil, false
+			}
+			if !slices.Contains(seen, late.p.name) {
+				seen = append(seen, late.p.name)
+			}
+			ak := asideKey{mock: late.p.mock, path: late.p.path}
+			if !seenPlaces[ak] {
+				seenPlaces[ak] = true
+				aside = append(aside, Place{Mock: late.p.mock, Side: Response, Path: late.p.path})
+			}
+		}
+		truncated := len(seen) > maxLinePlaces
+		if truncated {
+			seen = seen[:maxLinePlaces]
+		}
+		joined := strings.Join(seen, ", ")
+		if truncated {
+			joined += ", …"
+		}
+		return "; set aside " + joined + ", which round F gave before the call but which was recorded after it; " + target.name + " held the value before the call in both runs", aside, true
+	}
+	withAside := func(d Decision, aside []Place) Decision {
+		if d.Outcome == OutcomeRefused {
+			return d
+		}
+		for _, p := range aside {
+			if !slices.Contains(d.AnsweredAfter, p) {
+				d.AnsweredAfter = append(d.AnsweredAfter, p)
+			}
+		}
+		return d
+	}
+
+	var latePicks []instantHold
+	refuseLatePick := func() Decision {
+		p := latePicks[0].p
+		return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.fieldNoise(path))
 	}
 
 	// 1. Pick: (i) round F's moment stands at an answer or the test case's
@@ -2682,10 +2754,13 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 			return dc.refuse(path, at, n, r, l, RefusalPick, why, []string{p.name}, dc.fieldNoise(path))
 		// An answer recorded after the call that round F gave before it:
 		// in round F the value may be a pick from it, as main reads it.
-		// The recorded application never read it, so R's moment standing
-		// there too (by another cut) says nothing.
+		// Collect it here (after checking swappable) and defer the excuse
+		// check to the actual bind target in step 2, 3, or 4.
 		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut():
-			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.fieldNoise(path))
+			if h.hr && dc.swappable(p, *c) {
+				return untold(swapNote)
+			}
+			latePicks = append(latePicks, h)
 		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
 			return untold(p.why)
 		case h.hr && dc.swappable(p, *c):
@@ -2732,37 +2807,72 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 	// the value is that read (5, 7), as an answer's is at step 3 and as main
 	// reads it; with no such read it stays a slot, which the adapter that
 	// cannot bind another form refuses.
-	readIn := func(w *Window) bool { return w.holdsRead(*c.rm, *c.lm, dc.dr.zone) }
-	windowRead := func() bool {
-		return c.rm != nil && c.lm != nil && (readIn(dc.in.Window) || dc.dr.clientTests && readIn(dc.in.Window.sinceBegin()))
-	}
-	cutSlot := func(p evPlace) bool {
-		return c.rm != nil && c.lm != nil && dc.clientCase(p.mock) && dc.cutOfFinerOnly(p.t.rec, p.t.live, r, *c.rm) && dc.cutOfFinerOnly(p.t.live, p.t.rec, l, *c.lm) && windowRead()
-	}
 	gave := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && h.p.gave })
 	slots, again := oneSource(oneSlotEach(heldWhere(hs, func(h instantHold) bool {
 		return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() && !cutSlot(h.p)
 	})), *c)
 	if len(gave) > 0 {
-		return dc.bound(path, at, n, *c, gave, ": a value the test gave keploy, which the call sends as given in both runs")
+		note := ""
+		var aside []Place
+		if len(latePicks) > 0 {
+			target, _ := dc.chosenTarget(gave, *c)
+			validGiven := slices.ContainsFunc(hs, func(h instantHold) bool {
+				q := h.p
+				if q.mock != target.mock || q.name != target.name || !q.at.Equal(target.at) {
+					return false
+				}
+				if !before(q) || !h.hr || !h.hl || !q.gave || q.same() {
+					return false
+				}
+				// For q.gave, dc.holds returns early on p.gave with exact text
+				// matching, so h.hr && h.hl already proves asText on both runs.
+				rf, _, _ := dc.holds(q, q.t.live, r, c.rm, c.byText)
+				fr, _, _ := dc.holds(q, q.t.rec, l, c.lm, c.byText)
+				return !rf && !fr
+			})
+			var ok bool
+			if validGiven {
+				note, aside, ok = excuseLate(latePicks, target, false)
+			}
+			if !ok {
+				return refuseLatePick()
+			}
+		}
+		return withAside(dc.bound(path, at, n, *c, gave, ": a value the test gave keploy, which the call sends as given in both runs"+note), aside)
 	}
 	switch len(slots) {
 	case 0:
 	case 1:
-		return dc.bound(path, at, n, *c, slots, ": the test case's request holds it, templated, in both runs"+again)
+		note := ""
+		var aside []Place
+		if len(latePicks) > 0 {
+			target, _ := dc.chosenTarget(slots, *c)
+			rf, _, _ := dc.holds(target, target.t.live, r, c.rm, c.byText)
+			fr, _, _ := dc.holds(target, target.t.rec, l, c.lm, c.byText)
+			if target.same() || cutSlot(target) || !asText(target.t.rec, r) || !asText(target.t.live, l) || rf || fr {
+				return refuseLatePick()
+			}
+			var ok bool
+			note, aside, ok = excuseLate(latePicks, target, false)
+			if !ok {
+				return refuseLatePick()
+			}
+		}
+		return withAside(dc.bound(path, at, n, *c, slots, ": the test case's request holds it, templated, in both runs"+again+note), aside)
 	default:
+		if len(latePicks) > 0 {
+			return refuseLatePick()
+		}
 		return dc.refuse(path, at, n, r, l, RefusalTwoSources,
 			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.fieldNoise(path))
 	}
 
 	// 3. Answer: an answer of the call's scope or the start-up, given
 	// before the call in both runs, holds R's value, and F's text there
-	// holds F's or may (fGaveIt).
-	// fGaveIt: F's text at an answer holds F's moment, a view F served there
-	// does, or F served it with no view told or read (fMay). Where F served
-	// it changed and no view it gave holds F's moment, F's application took
-	// its moment from elsewhere: the answer is no source, in or outside the
-	// call's scope alike (an answer F never served is never before in F).
+	// holds F's or may (fGaveIt). Where F served it changed and no view it
+	// gave holds F's moment, F's application took its moment from elsewhere:
+	// the answer is no source, in or outside the call's scope alike (an
+	// answer F never served is never before in F).
 	fGaveIt := func(h instantHold) bool { return h.p.fMay || h.hl || dc.inAView(h.p, *c) }
 	answer := func(h instantHold) bool {
 		p := h.p
@@ -2797,36 +2907,89 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 	}
 	if len(answers) > 0 && !ownRead {
 		// An answer recorded after the call that round F gave the
-		// application before it, holding F's moment, is a second source:
+		// application before it, holding F's moment, is a second source
+		// (unless excuseLate validates the actual chosen step-3 bind target):
 		// the bind would be a guess between the two.
 		// So is another test's answer given before the call whose view in
 		// round F keploy cannot tell, holding R's moment apart from F's.
 		late, why := dc.setSecondSource(*c)
+		var step3Lates []instantHold
 		for _, h := range hs {
 			p := h.p
 			switch {
 			case late != "" || p.side != Response || p.given:
 			case p.fGave && p.state == stateNotBefore && h.hl:
-				late, why = p.name, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it"
+				step3Lates = append(step3Lates, h)
 			case !inScope(p) && p.state == stateBefore && p.fUnstated && h.hr && !h.hl:
 				late, why = p.name, "the recorded moment stands in "+p.name+", another test's answer given before the call, whose view in round F keploy cannot tell"
 			}
 		}
 		if late != "" {
+			if len(latePicks) > 0 {
+				return refuseLatePick()
+			}
 			return dc.refuse(path, at, n, r, l, RefusalUnknown, why+", beside "+answers[0].name+": two sources", []string{late, answers[0].name},
+				Edit{Kind: EditReRecord}, dc.fieldNoise(path))
+		}
+		allLates := append(slices.Clone(latePicks), step3Lates...)
+		refuseStep3Late := func() Decision {
+			if len(latePicks) > 0 {
+				return refuseLatePick()
+			}
+			p := step3Lates[0].p
+			w := "round F's moment stands in " + p.name + ", which round F gave before the call but which was recorded after it"
+			return dc.refuse(path, at, n, r, l, RefusalUnknown, w+", beside "+answers[0].name+": two sources", []string{p.name, answers[0].name},
 				Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		// A send before every such answer, at a fine cut, showing the same
 		// moment: the answer reads back what the application wrote, and
 		// the value is bound where a word's is, at its earliest place.
-		if fine := copies(true); len(fine) > 0 && earliest(fine).at.Before(earliest(answers).at) {
-			return dc.copied(path, at, n, *c, fine, fineCopy)
+		if len(fineCopies) > 0 && earliest(fineCopies).at.Before(earliest(answers).at) {
+			target, _ := dc.chosenTarget(fineCopies, *c)
+			note, aside, ok := excuseLate(allLates, target, false)
+			if !ok {
+				return refuseStep3Late()
+			}
+			return withAside(dc.copied(path, at, n, *c, fineCopies, fineCopy+note), aside)
 		}
-		return dc.bound(path, at, n, *c, answers, ": an answer given before the call holds it: the dependency's value")
+		note := ""
+		var aside []Place
+		if len(allLates) > 0 {
+			target, _ := dc.chosenTarget(answers, *c)
+			validAns := slices.ContainsFunc(hs, func(h instantHold) bool {
+				q := h.p
+				if q.mock != target.mock || q.name != target.name || !q.at.Equal(target.at) {
+					return false
+				}
+				if q.side != Response || q.given || !inScope(q) || !before(q) || !h.hr || !h.hl || !h.fr || !h.fl || !byText(h) {
+					return false
+				}
+				rf, _, _ := dc.holds(q, q.t.live, r, c.rm, c.byText)
+				fr, _, _ := dc.holds(q, q.t.rec, l, c.lm, c.byText)
+				return !rf && !fr
+			})
+			var ok bool
+			if validAns {
+				note, aside, ok = excuseLate(allLates, target, true)
+			}
+			if !ok {
+				return refuseStep3Late()
+			}
+		}
+		return withAside(dc.bound(path, at, n, *c, answers, ": an answer given before the call holds it: the dependency's value"+note), aside)
 	}
 
-	if fine := copies(true); len(fine) > 0 {
-		return dc.copied(path, at, n, *c, fine, fineCopy)
+	if len(fineCopies) > 0 {
+		target, _ := dc.chosenTarget(fineCopies, *c)
+		note, aside, ok := excuseLate(latePicks, target, false)
+		if !ok {
+			return refuseLatePick()
+		}
+		return withAside(dc.copied(path, at, n, *c, fineCopies, fineCopy+note), aside)
+	}
+
+	if len(latePicks) > 0 {
+		return refuseLatePick()
 	}
 
 	// An answer outside the call's scope that would bind it at step 3 were
@@ -3289,12 +3452,9 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 	return d
 }
 
-// bound is a Value bound at the earliest of src, rule following that
-// place's name; From says Run where it is the start-up's or an earlier
-// test's (the run's variable), Given (Client) where it is the test case's
-// request (a client test's), and Clock where its call's learn step learned
-// it as a plain read of the clock (valueByForm reads it).
-func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
+// chosenTarget returns the exact place and address bound() binds to for src,
+// applying the non-client JWT fallback when earliest(src) is unbindable.
+func (dc *decider) chosenTarget(src []evPlace, c changedInstant) (evPlace, variables.Address) {
 	first := earliest(src)
 	fromAt := dc.fromAt(first, c.r, c.l)
 	if !dc.isClient(first.mock) && first.leaf.Path != "" && unbindableJWTClaim(fromAt, first, c.r, c.l) {
@@ -3302,14 +3462,28 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 		// signed JWT claim (which fromAt leaves unbindable when !client); pick
 		// the earliest bindable place across all of src (non-client or client).
 		if p, pa, ok := dc.earliestBindable(src, c.r, c.l); ok {
-			first, fromAt = p, pa
+			return p, pa
 		}
 	}
+	return first, fromAt
+}
+
+// bound is a Value bound at the earliest of src, rule following that
+// place's name; From says Run where it is the start-up's or an earlier
+// test's (the run's variable), Given (Client) where it is the test case's
+// request (a client test's), and Clock where its call's learn step learned
+// it as a plain read of the clock (valueByForm reads it).
+func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
+	first, fromAt := dc.chosenTarget(src, c)
 	if first.trailed {
 		rule += ", sent in " + dc.in.Trails.Test + ", which this call trails"
 	}
 	if len(c.clientAside) > 0 {
-		rule += "; set aside " + strings.Join(c.clientAside, ", ") + " under keploy.yml's rule " + c.clientRule
+		prefix := "; set aside "
+		if strings.Contains(rule, "; set aside ") {
+			prefix = "; also set aside "
+		}
+		rule += prefix + strings.Join(c.clientAside, ", ") + " under keploy.yml's rule " + c.clientRule
 	}
 	name, places := first.name, names(src)
 	for _, p := range c.clientAside {
@@ -3327,9 +3501,14 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 			}
 		}
 	}
-	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
+	how := "bound to " + name + rule + answeredAt(c.valueEcho, c.rec)
+	unbindable := fromAt.Place.Part == 0 && first.leaf.UnnamedWhy != ""
+	if unbindable {
+		how = name + " holds it, but keploy cannot bind it there (" + first.leaf.UnnamedWhy + ")" + rule + answeredAt(c.valueEcho, c.rec)
+	}
+	d := dc.learnedWord(path, at, n, c.r, c.l, OutcomeValue, how, places, unbindable)
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
-		Given: first.given, Client: dc.isClient(first.mock), Clock: first.clock, Offset: first.offset}
+		Given: first.given, Client: dc.isClient(first.mock), Clock: first.clock, Offset: first.offset, UnbindableWhy: first.leaf.UnnamedWhy}
 	d.FromAt = fromAt
 	d.Echo = c.valueEcho
 	return d
@@ -4360,6 +4539,10 @@ func (p Place) BindAt() (at, live string, ok bool) {
 
 // learned is a decided word and its line.
 func (dc *decider) learned(path string, at variables.Address, n int, r, f string, o WordOutcome, rule string, places []string) Decision {
+	return dc.learnedWord(path, at, n, r, f, o, rule, places, false)
+}
+
+func (dc *decider) learnedWord(path string, at variables.Address, n int, r, f string, o WordOutcome, rule string, places []string, unbindable bool) Decision {
 	at.Word = n
 	from := ""
 	if dc.allScope {
@@ -4368,6 +4551,7 @@ func (dc *decider) learned(path string, at variables.Address, n int, r, f string
 	return Decision{At: at, Recorded: r, Full: f, Outcome: o, Line: learnedLine(learnedWord{
 		Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f,
 		Outcome: o, Rule: rule, Places: places, From: from, Noise: noiseName(dc.in, path),
+		Unbindable: unbindable,
 	})}
 }
 

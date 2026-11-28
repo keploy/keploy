@@ -304,14 +304,14 @@ func TestTakeRequestGivesNothingOfARequestItsClientDidNotSendWhole(t *testing.T)
 }
 
 // A request's body is taken as a recording reads it: a form sent URL-encoded
-// is unescaped, a body of no length read as empty, and a request with none
-// still taken.
+// is kept raw (preserving percent-encoded delimiters like %26 and %3D), a body
+// of no length read as empty, and a request with none still taken.
 func TestTakeRequestReadsABodyAsARecordingDoes(t *testing.T) {
 	log := &requestLog{}
 	log.wants.Store(true)
 	pm := &IngressProxyManager{logger: zap.NewNop()}
 	pm.SetRequestTaker(log)
-	pm.takeRequest(readRequest(t, "POST /f HTTP/1.1\r\nHost: api\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 13\r\n\r\nname=app%2D12"), time.Now())
+	pm.takeRequest(readRequest(t, "POST /f HTTP/1.1\r\nHost: api\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 28\r\n\r\nname=app%2D12&note=x%26y%3Dz"), time.Now())
 	get := readRequest(t, "GET /s/12 HTTP/1.1\r\nHost: api\r\n\r\n")
 	pm.takeRequest(get, time.Now())
 	if get.Body != http.NoBody {
@@ -319,7 +319,7 @@ func TestTakeRequestReadsABodyAsARecordingDoes(t *testing.T) {
 	}
 	pm.takeRequest(readRequest(t, "POST /f HTTP/1.1\r\nHost: api\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 3\r\n\r\n%zz"), time.Now())
 	got := log.list()
-	if len(got) != 3 || got[0].req.Body != "name=app-12" || got[1].req.Body != "" || got[1].unread != "" || got[1].req.URL != "http://api/s/12" ||
+	if len(got) != 3 || got[0].req.Body != "name=app%2D12&note=x%26y%3Dz" || got[1].req.Body != "" || got[1].unread != "" || got[1].req.URL != "http://api/s/12" ||
 		got[2].req.Body != "%zz" {
 		t.Fatalf("taken %+v", got)
 	}

@@ -282,7 +282,7 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 	switch {
 	case len(p.body) == 0:
 		s.Fixed["body"] = ""
-	case p.mediaType == "application/x-www-form-urlencoded":
+	case p.mediaType == "application/x-www-form-urlencoded" && !variables.IsJSONDoc(string(p.body)):
 		form, err := url.ParseQuery(string(p.body))
 		if err != nil {
 			s.Fixed["body"] = "text " + string(p.body)
@@ -2720,6 +2720,8 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				// token in this run holds the value at no place of it.
 				if claim := learn.ClaimRefused(from.Mock, from.Path, sentText(earlier, from.Mock, from.Path), from.Live, r.Value, from.Client); claim != "" {
 					why = r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + " " + strings.TrimPrefix(claim, from.Mock+" sent this value ")
+				} else if from.UnbindableWhy != "" {
+					why = r.Path + " carries a value " + from.Mock + " sent " + learn.SentWhere(from) + " at " + from.Path + ", which keploy cannot bind (" + from.UnbindableWhy + ")"
 				}
 				if l.Why != "" {
 					why += "; " + l.Why

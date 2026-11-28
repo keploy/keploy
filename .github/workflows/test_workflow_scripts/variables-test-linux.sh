@@ -17,17 +17,19 @@
 # {{string .id}}.
 #
 # The learn step (row L) writes, on each mock, where the variable is:
-#   POST /orders   orderId: bound at body.id,    answered at body.id
-#   GET  /orders/x orderId: used at url.path[1], answered at body.id
-#   POST /users    id:      bound at body.id,    answered at body.id
-#   GET  /users/x  id:      used at url.path[1], answered at body.id (bound by
-#                           the test case's request, which sends the template)
+#   POST /orders     orderId:  bound at body.id,    answered at body.id
+#   GET  /orders/x   orderId:  used at url.path[1], answered at body.id
+#   POST /users      id:       bound at body.id,    answered at body.id
+#   GET  /users/x    id:       used at url.path[1], answered at body.id (bound by
+#                              the test case's request, which sends the template)
+#   POST /form-store formCode: bound at body.code,  answered at body.code
 # This script writes that block itself, as L would (L is built in parallel).
 #
-#   1. record two creates and a user created and read back (four test cases).
+#   1. record two creates, a user created and read back, and a form-urlencoded
+#      POST (five test cases).
 #   2. KEPLOY_PROVEN=1 keploy test without the block: the set fails (the calls
 #      carry a new id; a miss fails its test).
-#   3. keploy templatize, then the variables block on the eight mocks; the
+#   3. keploy templatize, then the variables block on the nine mocks; the
 #      recorded values stay as recorded (mocks are byte-literal).
 #   4. KEPLOY_PROVEN=1 keploy test: the set passes. Each test case binds
 #      orderId where its create sends it, its two read-backs are asserted to
@@ -72,8 +74,8 @@ fail() {
 }
 
 cat > dep.py <<'PY'
-import http.server, json, socketserver, sys
-PORT = int(sys.argv[1]); orders = {}; users = {}
+import http.server, json, socketserver, sys, urllib.parse
+PORT = int(sys.argv[1]); orders = {}; users = {}; forms = {}
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def _send(self, code, obj):
@@ -81,7 +83,13 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(code); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_POST(self):
-        o = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        if self.path == "/form-store":
+            qs = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True, strict_parsing=True)
+            code = qs["code"][0]; note = qs["note"][0]; tag = qs["tag"][0]
+            forms[code] = {"note": note, "tag": tag}
+            return self._send(201, {"code": code, "note": note, "tag": tag})
+        o = json.loads(raw)
         if self.path == "/users":
             users[str(o["id"])] = o
             return self._send(201, {"id": o["id"], "name": o["name"]})
@@ -101,7 +109,7 @@ with socketserver.ThreadingTCPServer(("127.0.0.1", PORT), H) as s: s.serve_forev
 PY
 
 cat > app.py <<'PY'
-import http.server, json, secrets, socketserver, sys, urllib.error, urllib.request
+import http.server, json, secrets, socketserver, sys, urllib.error, urllib.parse, urllib.request
 PORT = int(sys.argv[1]); DEP = "http://127.0.0.1:%s" % sys.argv[2]
 # A regression to replay with. "wrong-read": the read-backs ask the dependency
 # for another id than the one the create sent. "stale-read:<id>": they ask for
@@ -114,6 +122,11 @@ def dep(method, path, obj=None):
     data = json.dumps(obj).encode() if obj is not None else None
     hdrs = {"Content-Type": "application/json"}
     r = urllib.request.Request(DEP + path, data=data, method=method, headers=hdrs)
+    with urllib.request.urlopen(r, timeout=10) as resp: return json.loads(resp.read())
+def dep_form(path, fields):
+    data = urllib.parse.urlencode(fields).encode("utf-8")
+    hdrs = {"Content-Type": "application/x-www-form-urlencoded"}
+    r = urllib.request.Request(DEP + path, data=data, method="POST", headers=hdrs)
     with urllib.request.urlopen(r, timeout=10) as resp: return json.loads(resp.read())
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -132,6 +145,17 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(502, {"error": str(e)})
         self._send(200, {"id": got.get("id"), "name": got.get("name")})
     def do_POST(self):
+        if self.path == "/form-submit":
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8")
+            qs = urllib.parse.parse_qs(raw, keep_blank_values=True, strict_parsing=True)
+            note = qs["note"][0]; tag = qs["tag"][0]
+            code = "f" + secrets.token_hex(6)
+            try:
+                saved = dep_form("/form-store", {"code": code, "note": note, "tag": tag})
+            except Exception as e:
+                return self._send(502, {"error": str(e)})
+            return self._send(201, {"note": saved.get("note"), "tag": saved.get("tag"),
+                                    "code_matched": saved.get("code") == code})
         if self.path == "/users":
             name = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}").get("name", "ann")
             uid = "u" + secrets.token_hex(6)  # a new id on every run
@@ -169,7 +193,7 @@ cat > declare.py <<'PY'
 import re, sys
 path = sys.argv[1]
 docs = open(path).read().split("\n---\n")
-out, binds, uses, users, recorded = [], 0, 0, 0, []
+out, binds, uses, users, forms, recorded = [], 0, 0, 0, 0, []
 for d in docs:
     if not re.search(r"^kind: Http$", d, re.M):
         out.append(d); continue
@@ -177,7 +201,12 @@ for d in docs:
     if not m:
         out.append(d); continue
     method, url = m.group(1), m.group(2)
-    if method == "POST" and url.endswith("/orders"):
+    if method == "POST" and url.endswith("/form-store"):
+        rid = re.search(r'code=(f[0-9a-f]+)', d)
+        rid = rid.group(1)
+        d = d.rstrip("\n") + "\nvariables:\n    formCode:\n        recorded: %s\n        bind: body.code\n        answer:\n            - body.code\n" % rid
+        forms += 1
+    elif method == "POST" and url.endswith("/orders"):
         rid = re.search(r'\\"id\\": ?\\"(o[0-9a-f]+)\\"|"id": ?"(o[0-9a-f]+)"', d)
         rid = rid.group(1) or rid.group(2)
         d = d.rstrip("\n") + "\nvariables:\n    orderId:\n        recorded: %s\n        bind: body.id\n        answer:\n            - body.id\n" % rid
@@ -196,8 +225,8 @@ for d in docs:
         d = d.rstrip("\n") + "\nvariables:\n    orderId:\n        recorded: %s\n        use:\n            - url.path[1]\n        answer:\n            - body.id\n" % rid
         uses += 1
     out.append(d)
-if binds != 2 or uses != 4 or users != 2:
-    sys.exit("found %d creates, %d read-backs and %d user calls, want 2, 4 and 2" % (binds, uses, users))
+if binds != 2 or uses != 4 or users != 2 or forms != 1:
+    sys.exit("found %d creates, %d read-backs, %d user calls and %d form calls, want 2, 4, 2 and 1" % (binds, uses, users, forms))
 open(path, "w").write("\n---\n".join(out))
 print(recorded[0])
 PY
@@ -292,12 +321,29 @@ user="$(curl -s -XPOST "http://127.0.0.1:$APP/users" -H 'Content-Type: applicati
 UID_REC="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$user" 2>/dev/null)"
 [ -n "$UID_REC" ] || fail "the user create answered '$user'"
 curl -s "http://127.0.0.1:$APP/users/$UID_REC" | grep "\"$UID_REC\"" >/dev/null || fail "the user read-back did not answer the id"
-wait_for_tests 4 || fail "keploy record wrote $(test_files) test cases, want 4"
+if [ "$RECORD_BIN" = "$REPLAY_BIN" ]; then
+  form_out="$(curl -s -XPOST "http://127.0.0.1:$APP/form-submit" -H 'Content-Type: application/x-www-form-urlencoded' --data 'note=x%26y%3Dz+50%25+off&tag=a%2Bb')"
+  echo "$form_out" | grep '"note": "x&y=z 50% off"' >/dev/null && echo "$form_out" | grep '"tag": "a+b"' >/dev/null && echo "$form_out" | grep '"code_matched": true' >/dev/null ||
+    fail "the form submit answered '$form_out'"
+else
+  # Older released RECORD_BIN URL-decoded form bodies at capture; send a
+  # decode-safe form payload in the record-latest/test-build compatibility lane.
+  form_out="$(curl -s -XPOST "http://127.0.0.1:$APP/form-submit" -H 'Content-Type: application/x-www-form-urlencoded' --data 'note=alpha_note&tag=beta_tag')"
+  echo "$form_out" | grep '"note": "alpha_note"' >/dev/null && echo "$form_out" | grep '"tag": "beta_tag"' >/dev/null && echo "$form_out" | grep '"code_matched": true' >/dev/null ||
+    fail "the form submit answered '$form_out'"
+fi
+wait_for_tests 5 || fail "keploy record wrote $(test_files) test cases, want 5"
 stop_pid "$REC_PID"; REC_PID=""; own
 kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null
-[ "$(test_files)" -eq 4 ] || { fail "recorded $(test_files) test cases, want 4"; tail -30 record.log; exit 1; }
+[ "$(test_files)" -eq 5 ] || { fail "recorded $(test_files) test cases, want 5"; tail -30 record.log; exit 1; }
+FORM_TC="$(grep -l 'url: .*/form-submit$' keploy/test-set-0/tests/*.yaml | head -n1)"
+[ -n "$FORM_TC" ] || fail "no recorded form-submit test case found"
+if [ "$RECORD_BIN" = "$REPLAY_BIN" ]; then
+  grep -q 'note=x%26y%3Dz+50%25+off&tag=a%2Bb' "$FORM_TC" ||
+    fail "recorded form test case did not preserve raw percent-encoded body: $(grep -m1 'body:' "$FORM_TC" 2>/dev/null)"
+fi
 MOCKS=keploy/test-set-0/mocks.yaml
-[ "$(grep -c '^kind: Http$' "$MOCKS" 2>/dev/null)" -ge 8 ] || { fail "the eight dependency calls were not recorded as mocks"; tail -30 record.log; exit 1; }
+[ "$(grep -c '^kind: Http$' "$MOCKS" 2>/dev/null)" -ge 9 ] || { fail "the nine dependency calls were not recorded as mocks"; tail -30 record.log; exit 1; }
 cp -a keploy keploy.plain
 
 echo "== 2. KEPLOY_PROVEN=1 keploy test without the variables: the set fails =="
@@ -364,8 +410,75 @@ grep -q "taken at test case $URN request" "$(REPORT)" || { fail "step 8c: the re
 echo "== 9. switch off: the block is not read =="
 replay off ""
 OFF="$(case_statuses)"
-[ "$(echo "$OFF" | grep -c .)" -eq 4 ] || fail "switch off: the report holds $(echo "$OFF" | grep -c .) test cases, want 4"
+[ "$(echo "$OFF" | grep -c .)" -eq 5 ] || fail "switch off: the report holds $(echo "$OFF" | grep -c .) test cases, want 5"
 grep -q 'variable_mismatch\|kind: variable\|^ *variables:$' "$(REPORT)" && fail "switch off: a report mentions a variable"
+FTN="$(basename "$FORM_TC" .yaml)"
+python3 - "$(REPORT)" "$FTN" <<'PY' || fail "switch off: $FTN body diff was not limited to code_matched (form bytes corrupted?)"
+import json, re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+tc_id = sys.argv[2]
+# Split report entries at each test entry ("- kind: ...") using stdlib only.
+blocks = re.split(r"(?m)^(?=[ \t]*- kind:)", text)
+tc_block = next((b for b in blocks if re.search(rf"(?m)^\s*test_case_id:\s*['\"]?{re.escape(tc_id)}['\"]?\s*$", b)), None)
+assert tc_block is not None, f"missing {tc_id} in report"
+
+def yaml_section(block, key):
+    lines = block.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(rf"^([ \t]*){re.escape(key)}:[ \t]*$", line)
+        if not m:
+            continue
+        base = len(m.group(1))
+        out = []
+        for sub in lines[i + 1 :]:
+            if not sub.strip():
+                out.append(sub)
+                continue
+            if len(sub) - len(sub.lstrip(" \t")) <= base:
+                break
+            out.append(sub)
+        return "\n".join(out)
+    return None
+
+sc_sec = yaml_section(tc_block, "status_code")
+if sc_sec is not None:
+    assert "normal: false" not in sc_sec, f"status_code diff in {tc_id}: {sc_sec}"
+body_sec = yaml_section(tc_block, "body_result")
+assert body_sec is not None, f"missing body_result in {tc_id}"
+assert "normal: false" in body_sec, "expected code_matched body diff with KEPLOY_PROVEN unset"
+
+def extract_json_field(sec, key):
+    # YAML may serialize the JSON string as single-quoted, double-quoted, bare, or block scalar (| / |-).
+    lines = sec.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(rf"^([ \t]*)(?:-\s+)?{re.escape(key)}:[ \t]*(.*)$", line)
+        if not m:
+            continue
+        base = len(m.group(1))
+        raw = m.group(2).strip()
+        if raw in ("|", "|-", "|+", ">", ">-", ">+"):
+            chunk = []
+            for sub in lines[i + 1 :]:
+                if not sub.strip():
+                    continue
+                if len(sub) - len(sub.lstrip(" \t")) <= base:
+                    break
+                chunk.append(sub.strip())
+            raw = "".join(chunk)
+        elif raw.startswith("'") and raw.endswith("'"):
+            raw = raw[1:-1].replace("''", "'")
+        elif raw.startswith('"') and raw.endswith('"'):
+            raw = json.loads(raw)
+        return json.loads(raw)
+    raise AssertionError(f"missing {key} in body_result: {sec}")
+
+exp = extract_json_field(body_sec, "expected")
+act = extract_json_field(body_sec, "actual")
+assert exp["note"] == act["note"], f"note drifted: {exp} vs {act}"
+assert exp["tag"] == act["tag"], f"tag drifted: {exp} vs {act}"
+assert exp["code_matched"] is True and act["code_matched"] is False, f"unexpected code_matched: {exp} vs {act}"
+PY
 cp keploy.plain/test-set-0/mocks.yaml "$MOCKS"
 replay offplain ""
 OFFPLAIN="$(case_statuses)"
