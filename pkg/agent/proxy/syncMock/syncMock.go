@@ -2136,14 +2136,16 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 				lane.spill = nil
 				lane.spillMeta = nil
 				lane.metaPool = nil
-				if lane.spillMetaBytes > 0 {
+				if lane.spillMetaBytes != 0 {
 					residualMetaBytes = lane.spillMetaBytes
-					processOutQueued.Add(-lane.spillMetaBytes)
+					if lane.spillMetaBytes > 0 {
+						processOutQueued.Add(-lane.spillMetaBytes)
+					}
 					lane.spillMetaBytes = 0
 				}
 			}
 			lane.spillMu.Unlock()
-			if residualMetaBytes > 0 {
+			if residualMetaBytes != 0 {
 				m.dropLogger().Warn("out-queue spill lane emptied with residual metadata bytes; refunding",
 					zap.Int64("bytes", residualMetaBytes))
 			}
@@ -3317,6 +3319,9 @@ func (m *SyncMockManager) noteTaken(batch []ownedMock) {
 			m.sending[id] = batch[i].mock.Spec.ReqTimestampMock
 			batch[i].sendID = id
 		}
+	}
+	if n := len(m.sending); n > m.sendingPeak {
+		m.sendingPeak = n
 	}
 }
 

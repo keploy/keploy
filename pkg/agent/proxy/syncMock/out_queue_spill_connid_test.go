@@ -488,22 +488,50 @@ func TestOutQueueSpill_ConnIDFoldExactAccounting(t *testing.T) {
 
 // TestOutQueueSpill_SendingMapShrinksAfterLargePeak verifies that once a large
 // in-flight burst drains completely, SyncMockManager releases the m.sending
-// map backing table instead of retaining it indefinitely.
+// map backing table on both the noteSendingAt and noteTaken paths instead of
+// retaining it indefinitely.
 func TestOutQueueSpill_SendingMapShrinksAfterLargePeak(t *testing.T) {
-	m := New(zap.NewNop())
-	now := time.Now()
-	ids := make([]uint64, sendingShrinkThreshold+128)
-	for i := range ids {
-		ids[i] = m.noteSendingAt(now)
-	}
-	for _, id := range ids {
-		m.sentID(id)
-	}
-	m.sendingMu.Lock()
-	isNil := m.sending == nil
-	peak := m.sendingPeak
-	m.sendingMu.Unlock()
-	if !isNil || peak != 0 {
-		t.Fatalf("after draining %d entries: sending==nil=%v sendingPeak=%d, want true, 0", len(ids), isNil, peak)
-	}
+	t.Run("noteSendingAt", func(t *testing.T) {
+		m := New(zap.NewNop())
+		now := time.Now()
+		ids := make([]uint64, sendingShrinkThreshold+128)
+		for i := range ids {
+			ids[i] = m.noteSendingAt(now)
+		}
+		for _, id := range ids {
+			m.sentID(id)
+		}
+		m.sendingMu.Lock()
+		isNil := m.sending == nil
+		peak := m.sendingPeak
+		m.sendingMu.Unlock()
+		if !isNil || peak != 0 {
+			t.Fatalf("after draining %d noteSendingAt entries: sending==nil=%v sendingPeak=%d, want true, 0", len(ids), isNil, peak)
+		}
+	})
+
+	t.Run("noteTaken", func(t *testing.T) {
+		m := New(zap.NewNop())
+		now := time.Now()
+		batch := make([]ownedMock, sendingShrinkThreshold+128)
+		for i := range batch {
+			batch[i] = ownedMock{
+				mock:  &models.Mock{Name: fmt.Sprintf("u-%05d", i), Spec: models.MockSpec{ReqTimestampMock: now}},
+				owner: "tc",
+			}
+		}
+		m.mu.Lock()
+		m.noteTaken(batch)
+		m.mu.Unlock()
+		for i := range batch {
+			m.sentID(batch[i].sendID)
+		}
+		m.sendingMu.Lock()
+		isNil := m.sending == nil
+		peak := m.sendingPeak
+		m.sendingMu.Unlock()
+		if !isNil || peak != 0 {
+			t.Fatalf("after draining %d noteTaken entries: sending==nil=%v sendingPeak=%d, want true, 0", len(batch), isNil, peak)
+		}
+	})
 }
