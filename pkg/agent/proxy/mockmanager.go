@@ -159,10 +159,12 @@ type MockManager struct {
 	storedByKind map[models.Kind]*uint64
 
 	// NEW: per-kind trees (guarded by treesMu)
-	treesMu          sync.RWMutex
-	filteredByKind   map[models.Kind]*TreeDb
-	unfilteredByKind map[models.Kind]*TreeDb
-	readThrough      readThroughStore
+	treesMu             sync.RWMutex
+	filteredByKind      map[models.Kind]*TreeDb
+	unfilteredByKind    map[models.Kind]*TreeDb
+	stagedStartupByKind map[models.Kind][]*models.Mock
+	stagedStartupGen    uint64
+	readThrough         readThroughStore
 
 	logger *zap.Logger
 
@@ -868,6 +870,10 @@ func (m *MockManager) IsClosed() bool {
 // previous test-set's connection pools into the next one.
 //
 // What it clears:
+//   - stagedStartupByKind: per-kind snapshot of models.StagingWithStartup
+//     mocks retained across per-test refiles for StagedStartupReader; clearing
+//     here ensures a subsequent window-only staging in a new replay session
+//     never sees the previous set's declared startup mocks.
 //   - connectionTrees / connectionLastTs: per-connID dedicated trees
 //     populated by AddConnectionMock from the previous test-set's
 //     LifetimeConnection mocks. SetMocksWithWindow only seeds new
@@ -910,6 +916,8 @@ func (m *MockManager) ResetForReplaySession() {
 	m.unfilteredDeleted.Store(false)
 	m.treesMu.Lock()
 	m.retainedDirty = nil
+	m.stagedStartupByKind = nil
+	m.stagedStartupGen++
 	m.treesMu.Unlock()
 	m.spentMu.Lock()
 	m.spent = nil
@@ -2514,10 +2522,33 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 			startupNames[mk.Name] = struct{}{}
 		}
 	}
+	var newStagedStartup map[models.Kind][]*models.Mock
+	if isInitialStaging && models.StagedAtStagingRegistered() {
+		seen := make(map[*models.Mock]struct{})
+		for _, list := range [][]*models.Mock{filtered, unfiltered, explicitStartup} {
+			for _, mk := range list {
+				if mk == nil || !models.IsStagedAtStaging(mk) {
+					continue
+				}
+				if _, dup := seen[mk]; dup {
+					continue
+				}
+				seen[mk] = struct{}{}
+				if newStagedStartup == nil {
+					newStagedStartup = make(map[models.Kind][]*models.Mock)
+				}
+				newStagedStartup[mk.Kind] = append(newStagedStartup[mk.Kind], mk)
+			}
+		}
+	}
 	m.treesMu.Lock()
 	m.startup = newStartup
 	m.startupKeys = newStartupKeys
 	m.startupNames.Store(&startupNames)
+	if isInitialStaging {
+		m.stagedStartupByKind = newStagedStartup
+		m.stagedStartupGen++
+	}
 	// Initial staging files the session pool in the startup tier too; an
 	// explicit startup slice may share mocks with it as well.
 	m.startupShared.Store(isInitialStaging || len(explicitStartup) > 0)
@@ -3639,6 +3670,41 @@ func (m *MockManager) getStartupMocksByKindIn(v *exactView, kind models.Kind) ([
 	})
 	return results, nil
 }
+
+// GetStagedStartupMocksByKind implements integrations.StagedStartupReader.
+// It returns a fresh copy of the mocks of kind that a models.StagingWithStartup
+// need declared and that were staged at the latest BaseTime staging.
+// Retained across subsequent per-test window refiles for the lifetime of the
+// staged set so lazy parser sessions opening after test 1 still see gap and
+// later-window server pushes; cleared on ResetForReplaySession and replaced on
+// every BaseTime staging. Ignores consumption (DeleteStartupMock /
+// DeleteFilteredMock) and overlaps GetStartupMocksByKind before test 1;
+// callers may cache the returned slice keyed by StagedStartupGeneration().
+func (m *MockManager) GetStagedStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	m.treesMu.RLock()
+	src := m.stagedStartupByKind[kind]
+	if len(src) == 0 {
+		m.treesMu.RUnlock()
+		return nil, nil
+	}
+	out := make([]*models.Mock, len(src))
+	copy(out, src)
+	m.treesMu.RUnlock()
+	return out, nil
+}
+
+// StagedStartupGeneration implements integrations.StagedStartupReader.
+// It advances whenever stagedStartupByKind is replaced (BaseTime staging) or
+// cleared (ResetForReplaySession), and remains constant across per-test window
+// refiles and SetScopeMocks(open).
+func (m *MockManager) StagedStartupGeneration() uint64 {
+	m.treesMu.RLock()
+	gen := m.stagedStartupGen
+	m.treesMu.RUnlock()
+	return gen
+}
+
+var _ integrations.StagedStartupReader = (*MockManager)(nil)
 
 // GetSessionScopedMocks returns session-tier + connection-tagged mocks
 // strictly — startup-tier mocks are NOT included. Parsers opting into

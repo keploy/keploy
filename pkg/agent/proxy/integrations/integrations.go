@@ -1263,6 +1263,48 @@ type StagedRecordingReader interface {
 	RangeStagedRecordings(kind models.Kind, keys []string, visit func(m *models.Mock) bool) error
 }
 
+// StagedStartupReader is an optional MockMemDb capability exposing the
+// per-test mocks a parser declared via models.StagingWithStartup (such as
+// broker server pushes recorded across a set, including inter-test gaps).
+//
+// Unlike GetStartupMocksByKind — which the first test window refiles to only
+// mocks recorded before firstWindowStart — GetStagedStartupMocksByKind retains
+// the set's declared StagingWithStartup mocks across per-test window refiles
+// for the lifetime of the staged set, so a parser session that opens lazily
+// after test 1 still sees every declared mock of its kind. ResetForReplaySession
+// clears the retained set, and every BaseTime staging replaces it (set
+// boundaries, fenced stagings, mid-set restages, RearmAppStart, and
+// SetScopeMocks(!open)). Retention applies to every kind that registers a
+// StagingWithStartup need (bounded to one staging's declared mocks), even if a
+// kind does not read this facet.
+//
+// What this facet does NOT do:
+//   - It ignores consumption: mocks already taken via DeleteStartupMock or
+//     DeleteFilteredMock are still returned.
+//   - Before test 1's refile, it overlaps GetStartupMocksByKind and returns the
+//     same *models.Mock pointers.
+//   - Under KEPLOY_PROVEN, heldScope.GetStagedStartupMocksByKind reads the live
+//     manager guarded by the held-call mark rather than an immutable exactView
+//     snapshot (v.shownOf), unlike sibling heldScope reads.
+//
+// Callers are responsible for delivery-once semantics and view ownership.
+// StagedStartupGeneration returns a monotonic counter covering the reader's
+// effective view: on MockManager it advances whenever the retained set is
+// replaced (any BaseTime staging) or cleared (ResetForReplaySession), staying
+// constant across per-test window refiles and SetScopeMocks(open); on
+// scopedMockDb it adds the worker view version so worker-scope and
+// mapped-universe changes advance it too; on heldScope it follows the same
+// sample-before-check sentinel contract as StagingGenerations (reporting a
+// non-keepable RestagedGeneration / ElsewhereGeneration once the staging moves
+// or the held view is gone). Callers tracking their own delivery state can
+// safely cache GetStagedStartupMocksByKind keyed on StagedStartupGeneration
+// alone (using KeptGeneration before caching). As with MockManager, consumption
+// via DeleteFilteredMock on a scoped view does not advance the generation.
+type StagedStartupReader interface {
+	GetStagedStartupMocksByKind(kind models.Kind) ([]*models.Mock, error)
+	StagedStartupGeneration() uint64
+}
+
 // BackgroundRecordingReader is an optional MockMemDb capability: the staged
 // set's background recordings of kind (its mappings.yaml worker: and startup:
 // mocks, models.MockFilterParams.BackgroundMocks), served or not and whatever
