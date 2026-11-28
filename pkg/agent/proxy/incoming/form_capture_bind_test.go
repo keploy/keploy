@@ -75,10 +75,12 @@ func TestWireFormURLEncodedRoundTripThroughCaptureLearnAndReplay(t *testing.T) {
 
 			recReq := capture(ct, recWire, rReqAt)
 			liveReq := capture(ct, liveWire, fReqAt)
-			wantRawFlag := ct == "application/x-www-form-urlencoded"
-			if recReq.RawFormBody != wantRawFlag || liveReq.RawFormBody != wantRawFlag {
-				t.Fatalf("RawFormBody = (rec=%v, live=%v); want %v for %q", recReq.RawFormBody, liveReq.RawFormBody, wantRawFlag, ct)
+			if liveReq.RawFormBody {
+				t.Fatalf("takeRequest live RawFormBody = true; want false for %q (PairCase decodes live by CT alone)", ct)
 			}
+			// Recorded requests come from hooks/conn Capture, which sets
+			// RawFormBody on exact "application/x-www-form-urlencoded" only.
+			recReq.RawFormBody = ct == "application/x-www-form-urlencoded"
 
 			tr := learn.NewTracker()
 			tr.SetClientTests(true)
@@ -174,10 +176,17 @@ func TestWireFormURLEncodedRoundTripThroughCaptureLearnAndReplay(t *testing.T) {
 					t.Fatalf("legacy pair ann = (%d,%v); want post-signup-1", idxAnn, okAnn)
 				}
 				// Newly captured exact-CT raw recordings carry RawFormBody=true
-				// and pair cleanly without encoded-delimiter tie swaps.
+				// (set by hooks/conn Capture) and pair cleanly against live
+				// requests from takeRequest (RawFormBody=false) without
+				// encoded-delimiter tie swaps.
+				recordedExact := func(rawBody string, at time.Time) *models.HTTPReq {
+					r := capture(ct, rawBody, at)
+					r.RawFormBody = true
+					return r
+				}
 				rawExactCases := []learn.ClientCase{
-					{Name: "post-amp", Req: capture(ct, "a=1&2", rReqAt)},
-					{Name: "post-enc", Req: capture(ct, "a=1%262", rReqAt.Add(time.Millisecond))},
+					{Name: "post-amp", Req: recordedExact("a=1&2", rReqAt)},
+					{Name: "post-enc", Req: recordedExact("a=1%262", rReqAt.Add(time.Millisecond))},
 				}
 				idxEnc, okEnc := learn.PairCase(rawExactCases, make([]bool, len(rawExactCases)), capture(ct, "a=1%262", fReqAt), true)
 				if !okEnc || rawExactCases[idxEnc].Name != "post-enc" {
@@ -189,7 +198,7 @@ func TestWireFormURLEncodedRoundTripThroughCaptureLearnAndReplay(t *testing.T) {
 				}
 				// Mixed legacy + re-recorded set pairs both ways cleanly.
 				mixedCases := []learn.ClientCase{
-					{Name: "s1-new", Req: capture(ct, "state=s1&redirect_uri=https%3A%2F%2Fa.io%2Fcb", rReqAt)},
+					{Name: "s1-new", Req: recordedExact("state=s1&redirect_uri=https%3A%2F%2Fa.io%2Fcb", rReqAt)},
 					{Name: "s2-old", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "state=s2&redirect_uri=https://a.io/cb"}},
 				}
 				idxS1, okS1 := learn.PairCase(mixedCases, make([]bool, len(mixedCases)), capture(ct, "state=s1&redirect_uri=https%3A%2F%2Fa.io%2Fcb", fReqAt), true)

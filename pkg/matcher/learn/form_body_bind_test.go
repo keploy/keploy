@@ -20,7 +20,8 @@ import (
 func TestGivenRequestReadsFormURLEncodedBody(t *testing.T) {
 	formReq := func(recCT, sentCT, recBody, sentBody string) *models.TestRequest {
 		return &models.TestRequest{
-			Test: "post-oauth-par-2",
+			Test:        "post-oauth-par-2",
+			RawFormBody: recCT == "application/x-www-form-urlencoded",
 			Parts: []models.TestRequestPart{
 				{Name: "url", Recorded: "http://localhost:8083/oauth/par", Sent: "http://localhost:8083/oauth/par"},
 				{Name: "header.Content-Type", Recorded: recCT, Sent: sentCT},
@@ -256,11 +257,12 @@ func TestFormURLEncodedClientRequestBindsInDecideAndClassify(t *testing.T) {
 			"device_os":             {"linux"},
 		}.Encode()
 		return &models.HTTPReq{
-			Method:    "POST",
-			URL:       "http://localhost:8083/oauth/par",
-			Timestamp: at,
-			Header:    map[string]string{"Content-Type": ct, "Host": "localhost:8083"},
-			Body:      body,
+			Method:      "POST",
+			URL:         "http://localhost:8083/oauth/par",
+			Timestamp:   at,
+			Header:      map[string]string{"Content-Type": ct, "Host": "localhost:8083"},
+			Body:        body,
+			RawFormBody: ct == "application/x-www-form-urlencoded",
 		}
 	}
 
@@ -816,7 +818,8 @@ func TestPairCaseMixedPrimaryTiePreservesRecordingOrder(t *testing.T) {
 func TestFormSeenMarksMissingEqAndInvalidUTF8UnnamedAndBindsHashKey(t *testing.T) {
 	mk := func(recBody, liveBody string) *models.TestRequest {
 		return &models.TestRequest{
-			Test: "post-edge-1",
+			Test:        "post-edge-1",
+			RawFormBody: true,
 			Parts: []models.TestRequestPart{
 				{Name: "header.Content-Type", Recorded: "application/x-www-form-urlencoded", Sent: "application/x-www-form-urlencoded"},
 				{Name: "body", Recorded: recBody, Sent: liveBody},
@@ -883,11 +886,12 @@ func TestFormSeenMarksMissingEqAndInvalidUTF8UnnamedAndBindsHashKey(t *testing.T
 		rInst, fInst := "cli-inst-"+ns(rNanos), "cli-inst-"+ns(fNanos)
 		mkReq := func(body string, at time.Time) *models.HTTPReq {
 			return &models.HTTPReq{
-				Method:    "POST",
-				URL:       "http://localhost:8083/oauth/par",
-				Timestamp: at,
-				Header:    map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Host": "localhost:8083"},
-				Body:      body,
+				Method:      "POST",
+				URL:         "http://localhost:8083/oauth/par",
+				Timestamp:   at,
+				Header:      map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Host": "localhost:8083"},
+				Body:        body,
+				RawFormBody: true,
 			}
 		}
 		earlier := clientPlaced(t, "post-hash-1", mkReq("inst%231="+rInst, rReq), mkReq("inst%231="+fInst, fReq), fReq)
@@ -937,22 +941,33 @@ func TestDecideNamesUnbindableFormKeyAndParseReasons(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name     string
-		recBody  string
-		liveBody string
-		wantWhy  string
+		name        string
+		ct          string
+		rawFormBody bool
+		recBody     string
+		liveBody    string
+		wantWhy     string
+		forbidWhy   string
 	}{
-		{"repeated key", "installation_id=" + rInst + "&installation_id=" + rInst, "installation_id=" + fInst, "form key repeats"},
-		{"dotted key", "user.installation_id=" + rInst, "user.installation_id=" + fInst, "form key holds '.', '[' or ']'"},
-		{"bracketed key", "user[0]=" + rInst, "user[0]=" + fInst, "form key holds '.', '[' or ']'"},
-		{"invalid percent-escape", "discount=50%&installation_id=" + rInst, "discount=50%&installation_id=" + fInst, "invalid percent-escape"},
-		{"legacy pre-decoded percent-escape", "discount=50%&installation_id=" + rInst, "discount=50%25&installation_id=" + fInst, "re-record"},
-		{"live sent invalid percent-escape", "discount=50%25&installation_id=" + rInst, "discount=50%&installation_id=" + fInst, "live form body could not be parsed: invalid percent-escape"},
-		{"semicolon separator", "a=1;b=2&installation_id=" + rInst, "a=1;b=2&installation_id=" + fInst, "invalid semicolon separator"},
-		{"parameter limit", tooManyParams(rInst), tooManyParams(fInst), "exceeds Go URL query parameter limit"},
+		{"repeated key", "application/x-www-form-urlencoded", true, "installation_id=" + rInst + "&installation_id=" + rInst, "installation_id=" + fInst, "form key repeats", ""},
+		{"dotted key", "application/x-www-form-urlencoded", true, "user.installation_id=" + rInst, "user.installation_id=" + fInst, "form key holds '.', '[' or ']'", ""},
+		{"bracketed key", "application/x-www-form-urlencoded", true, "user[0]=" + rInst, "user[0]=" + fInst, "form key holds '.', '[' or ']'", ""},
+		{"invalid percent-escape", "application/x-www-form-urlencoded", true, "discount=50%&installation_id=" + rInst, "discount=50%&installation_id=" + fInst, "invalid percent-escape", "older keploy"},
+		{"raw recording parse failure with clean live does not blame older keploy", "application/x-www-form-urlencoded", true, "discount=50%&installation_id=" + rInst, "discount=50%25&installation_id=" + fInst, "invalid percent-escape", "older keploy"},
+		{"parameterized CT parse failure with clean live does not blame older keploy", "application/x-www-form-urlencoded; charset=utf-8", false, "discount=50%&installation_id=" + rInst, "discount=50%25&installation_id=" + fInst, "invalid percent-escape", "older keploy"},
+		{"legacy pre-decoded percent-escape", "application/x-www-form-urlencoded", false, "discount=50%&installation_id=" + rInst, "discount=50%25&installation_id=" + fInst, "re-record", ""},
+		{"legacy pre-decoded clean-parsing ampersand split", "application/x-www-form-urlencoded", false, "redirect_uri=https://a.io/cb?a=1&nonce=" + rInst, "redirect_uri=https%3A%2F%2Fa.io%2Fcb%3Fa%3D1%26nonce%3D" + fInst, "re-record", ""},
+		{"live sent invalid percent-escape", "application/x-www-form-urlencoded", true, "discount=50%25&installation_id=" + rInst, "discount=50%&installation_id=" + fInst, "live form body could not be parsed: invalid percent-escape", ""},
+		{"semicolon separator", "application/x-www-form-urlencoded", true, "a=1;b=2&installation_id=" + rInst, "a=1;b=2&installation_id=" + fInst, "invalid semicolon separator", "older keploy"},
+		{"parameter limit", "application/x-www-form-urlencoded", true, tooManyParams(rInst), tooManyParams(fInst), "exceeds Go URL query parameter limit", "older keploy"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			earlier := clientPlaced(t, "post-oauth-par-2", mkReq(tc.recBody, rReq), mkReq(tc.liveBody, fReq), fReq)
+			rec := mkReq(tc.recBody, rReq)
+			rec.Header["Content-Type"] = tc.ct
+			rec.RawFormBody = tc.rawFormBody
+			live := mkReq(tc.liveBody, fReq)
+			live.Header["Content-Type"] = tc.ct
+			earlier := clientPlaced(t, "post-oauth-par-2", rec, live, fReq)
 			in := iCall("body.docs.msgs.0.installation_id", String, rInst, fInst, rCall, fCall, nil, earlier, nil)
 			in.Drifts = oClientDrifts()
 			in.PlaceOf = placeAll
@@ -967,6 +982,116 @@ func TestDecideNamesUnbindableFormKeyAndParseReasons(t *testing.T) {
 			}
 			if !strings.Contains(d.Line, tc.wantWhy) || !strings.Contains(d.From.UnbindableWhy, tc.wantWhy) {
 				t.Fatalf("line=%q unbindableWhy=%q; want substring %q", d.Line, d.From.UnbindableWhy, tc.wantWhy)
+			}
+			if tc.forbidWhy != "" && (strings.Contains(d.Line, tc.forbidWhy) || strings.Contains(d.From.UnbindableWhy, tc.forbidWhy)) {
+				t.Fatalf("line=%q unbindableWhy=%q; must not contain %q", d.Line, d.From.UnbindableWhy, tc.forbidWhy)
+			}
+		})
+	}
+}
+
+func TestIncomingRequestPropagatesRawFormBodyAndLegacyCleanPlusHint(t *testing.T) {
+	recRaw := &models.HTTPReq{
+		Method:      "POST",
+		URL:         "http://localhost:8083/oauth/par",
+		Header:      map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+		Body:        "token=a%2Bb",
+		RawFormBody: true,
+	}
+	recLegacy := &models.HTTPReq{
+		Method: "POST",
+		URL:    "http://localhost:8083/oauth/par",
+		Header: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+		Body:   "token=a+b",
+	}
+	live := &models.HTTPReq{
+		Method: "POST",
+		URL:    "http://localhost:8083/oauth/par",
+		Header: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+		Body:   "token=c%2Bd",
+	}
+	if tr := IncomingRequest("raw-case", recRaw, live); !tr.RawFormBody {
+		t.Fatal("IncomingRequest dropped RawFormBody=true")
+	}
+	if tr := IncomingRequest("legacy-case", recLegacy, live); tr.RawFormBody {
+		t.Fatal("IncomingRequest set RawFormBody=true on unmarked legacy request")
+	}
+
+	// Clean-parsing legacy body ('+' decoded from %2B): body leaf carries
+	// the re-record hint while marked raw body carries none.
+	eLegacy := GivenRequest(IncomingRequest("legacy-case", recLegacy, live))
+	eRaw := GivenRequest(IncomingRequest("raw-case", recRaw, live))
+	bodyWhy := func(e Earlier) string {
+		for _, s := range e.Seen {
+			if s.Leaf.Path == "body" {
+				return s.Leaf.UnnamedWhy
+			}
+		}
+		return ""
+	}
+	if got := bodyWhy(eLegacy); !strings.Contains(got, "re-record") {
+		t.Fatalf("legacy exact-CT body UnnamedWhy = %q; want re-record hint", got)
+	}
+	if got := bodyWhy(eRaw); got != "" {
+		t.Fatalf("marked raw exact-CT body UnnamedWhy = %q; want empty", got)
+	}
+}
+
+func TestQueryUnescapePrefixSingleAllocation(t *testing.T) {
+	in := strings.Repeat("a%26b+c=", 512)
+	if testing.AllocsPerRun(50, func() {
+		got := queryUnescapePrefix(in, pairWordsBytes)
+		if len(got) == 0 {
+			t.Fatal("unexpected empty result")
+		}
+	}) > 1 {
+		t.Fatalf("queryUnescapePrefix allocated more than once (expected single strings.Builder buffer)")
+	}
+}
+
+// TestLegacyFormBodyKeepsItsBindingsAndNamesTheHintWhereTheDecodeSplitIt: a
+// recording of the exact form media type with no RawFormBody (an older
+// keploy's, or one whose marker a hop dropped) binds its keys where they parse,
+// as it did before the marker: a body with no escape at all, one whose '+'
+// came from %2B, and one with an escaped value in another key. Only a key the
+// whole-body decode made (out of %26 or %3D), which the request as sent does
+// not hold, names the re-record hint, never a conflict.
+func TestLegacyFormBodyKeepsItsBindingsAndNamesTheHintWhereTheDecodeSplitIt(t *testing.T) {
+	rNanos := int64(1794207702156240454)
+	rReq := time.Unix(0, rNanos).Add(131 * time.Microsecond)
+	gap := 69*time.Second + 3*time.Millisecond
+	fNanos, fReq := rNanos+gap.Nanoseconds(), rReq.Add(gap)
+	rCall, fCall := rReq.Add(2*time.Millisecond), fReq.Add(2*time.Millisecond)
+	ns := func(v int64) string { return strconv.FormatInt(v, 10) }
+	rInst, fInst := "cli-inst-"+ns(rNanos), "cli-inst-"+ns(fNanos)
+	placeAll := func(l Leaf, _ bool) (string, bool) { return VarPlace(l, true) }
+	const exactCT = "application/x-www-form-urlencoded"
+	mk := func(body string, at time.Time) *models.HTTPReq {
+		return &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Timestamp: at,
+			Header: map[string]string{"Content-Type": exactCT, "Host": "localhost:8083"}, Body: body}
+	}
+	for _, tc := range []struct {
+		name, rec, live, wantPath string
+	}{
+		{"no escape", "client_id=demo-cli&installation_id=" + rInst + "&device_os=linux", "client_id=demo-cli&installation_id=" + fInst + "&device_os=linux", "body.installation_id"},
+		{"plus from %2B", "token=pkce+" + rInst, "token=pkce%2B" + fInst, "body.token"},
+		{"escape in another key", "redirect_uri=https://a.io/cb&installation_id=" + rInst, "redirect_uri=https%3A%2F%2Fa.io%2Fcb&installation_id=" + fInst, "body.installation_id"},
+		{"key the decode split out", "redirect_uri=https://a.io/cb?a=1&nonce=" + rInst, "redirect_uri=https%3A%2F%2Fa.io%2Fcb%3Fa%3D1%26nonce%3D" + fInst, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			earlier := clientPlaced(t, "post-oauth-par-2", mk(tc.rec, rReq), mk(tc.live, fReq), fReq)
+			in := iCall("body.docs.msgs.0.installation_id", String, rInst, fInst, rCall, fCall, nil, earlier, nil)
+			in.Drifts = oClientDrifts()
+			in.PlaceOf = placeAll
+			d := oWord(t, Decide(in), ns(rNanos), ns(fNanos))
+			if tc.wantPath != "" {
+				if d.Outcome != OutcomeValue || d.From.Path != tc.wantPath || d.From.UnbindableWhy != "" {
+					t.Fatalf("legacy %s: %s (path=%q why=%q); want bound at %s", tc.name, oDescribe([]Decision{d}), d.From.Path, d.From.UnbindableWhy, tc.wantPath)
+				}
+				return
+			}
+			if !strings.Contains(d.From.UnbindableWhy, "re-record") || !strings.Contains(d.Line, "re-record") || strings.Contains(d.Line, "conflict") {
+				t.Fatalf("legacy %s: line=%q why=%q; want the re-record hint and no conflict", tc.name, d.Line, d.From.UnbindableWhy)
 			}
 		})
 	}

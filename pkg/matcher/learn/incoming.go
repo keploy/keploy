@@ -227,11 +227,12 @@ func queryUnescapePrefix(s string, limit int) string {
 	if !hasEscape {
 		return s[:scan]
 	}
-	out := make([]byte, 0, scan)
-	for i := 0; i < len(s) && len(out) < limit; {
+	var out strings.Builder
+	out.Grow(scan)
+	for i := 0; i < len(s) && out.Len() < limit; {
 		switch s[i] {
 		case '+':
-			out = append(out, ' ')
+			_ = out.WriteByte(' ')
 			i++
 		case '%':
 			if i+2 >= len(s) {
@@ -242,14 +243,14 @@ func queryUnescapePrefix(s string, limit int) string {
 			if !ok1 || !ok2 {
 				return s[:scan]
 			}
-			out = append(out, hi<<4|lo)
+			_ = out.WriteByte(hi<<4 | lo)
 			i += 3
 		default:
-			out = append(out, s[i])
+			_ = out.WriteByte(s[i])
 			i++
 		}
 	}
-	return string(out)
+	return out.String()
 }
 
 func unhex(c byte) (byte, bool) {
@@ -350,6 +351,7 @@ func IncomingRequest(name string, rec, live *models.HTTPReq) *models.TestRequest
 		return out
 	}
 	out.RecordedAt = rec.Timestamp
+	out.RawFormBody = rec.RawFormBody
 	switch {
 	case rec.BodyRef.Path != "" || live.BodyRef.Path != "":
 		out.Unread = "its body is kept apart from the test case, which keploy does not read for a client test's request"
