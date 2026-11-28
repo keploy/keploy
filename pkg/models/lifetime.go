@@ -183,9 +183,15 @@ func (m *Mock) DeriveLifetime() {
 		m.cacheReadThroughState()
 	}
 	if m.TestModeInfo.LifetimeDerived {
+		if m.TestModeInfo.messageDeliveryState == deliveryUnknown {
+			m.cacheMessageDeliveryState()
+		}
 		return
 	}
 	m.derive(true)
+	if m.TestModeInfo.messageDeliveryState == deliveryUnknown {
+		m.cacheMessageDeliveryState()
+	}
 }
 
 // RecordedAsState reports whether m is session or connection state by what

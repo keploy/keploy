@@ -136,6 +136,9 @@ type diskEntry struct {
 	length      int
 	respOff     int64
 	respLen     int
+	// messageDelivery records models.IsMessageDelivery(m) before a large HTTP
+	// response is elided to disk, so readAt restores it via MarkMessageDelivery.
+	messageDelivery bool
 }
 
 // responseSpillMinBytes: only answers at least this big are kept apart from
@@ -250,6 +253,9 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		}
 	}
 
+	// Capture IsMessageDelivery before eliding a spilled response body.
+	isDelivery := models.IsMessageDelivery(m)
+
 	// Elide a spilled response for encoding, then restore (caller drops m anyway).
 	httpResp, mongoResp := m.Spec.HTTPResp, m.Spec.MongoResponses
 	if spill {
@@ -275,7 +281,8 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		return fmt.Errorf("disk mocks: write %q: %w", m.Name, err)
 	}
 	e := diskEntry{reqTsNano: placeNano(m.Spec.ReqTimestampMock), resTsNano: placeNano(m.Spec.ResTimestampMock),
-		placeTsNano: placeNano(models.PlaceOf(m)), off: off, length: n, respOff: respOff, respLen: respLen}
+		placeTsNano: placeNano(models.PlaceOf(m)), off: off, length: n, respOff: respOff, respLen: respLen,
+		messageDelivery: isDelivery}
 	d.byName[m.Name] = e
 	d.entries = append(d.entries, e)
 	// Listed by kind (RangeKind) for the kinds diskListsKind names.
@@ -516,6 +523,9 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 		(*f)(m)
 	}
 	m.SetStoredSize(int64(e.length + e.respLen))
+	if e.messageDelivery {
+		m.MarkMessageDelivery()
+	}
 	if e.respOff >= 0 {
 		respOff, respLen := e.respOff, e.respLen
 		m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
