@@ -4,10 +4,14 @@ package user
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 
 	"github.com/denisbrodbeck/machineid"
 	"go.keploy.io/server/v3/config"
@@ -18,7 +22,8 @@ import (
 )
 
 type KeployConfig struct {
-	UpdatePrompt string `yaml:"updatePrompt" json:"updatePrompt"`
+	UpdatePrompt   string `yaml:"updatePrompt" json:"updatePrompt"`
+	InstallationID string `yaml:"installationID,omitempty" json:"installationID,omitempty"`
 }
 
 type Db struct {
@@ -55,8 +60,12 @@ func (db *Db) ReadKeployConfig() (*KeployConfig, error) {
 }
 
 func (db *Db) WriteKeployConfig(data *KeployConfig) error {
-	// Open the keploy.yaml file
-	path := HomeDir() + "/keploy.yaml"
+	// Ensure the config directory exists before opening keploy.yaml.
+	dir := HomeDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "keploy.yaml")
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return err
@@ -96,31 +105,76 @@ var machineID = machineid.ID
 // installationAppID keys the installation id to keploy (installationID).
 const installationAppID = "keploy"
 
+// processFallbackIDMu guards processFallbackID when neither machineid nor a
+// writable ~/.keploy/keploy.yaml is available (for example, a read-only
+// container filesystem).
+var (
+	processFallbackIDMu sync.Mutex
+	processFallbackID   string
+)
+
 // GetInstallationID returns this machine's installation id: a keyed hash of
 // the OS machine id, never the id itself, which systemd says must not leave
-// the machine (machine-id(5)); "" when the machine has none. In a container
-// keploy started (KEPLOY_INDOCKER), it is the INSTALLATION_ID the host keploy
-// passed, already hashed there.
+// the machine (machine-id(5)). In a container keploy started (KEPLOY_INDOCKER),
+// it uses the INSTALLATION_ID the host keploy passed when present. When neither
+// a host-passed ID nor an OS machine id is available (containers, CI runners
+// without /etc/machine-id, or restricted environments), it loads or persists a
+// randomly generated 64-hex fallback ID in ~/.keploy/keploy.yaml (or caches
+// one in memory if the home directory is read-only) so OSS events still carry
+// a stable, unique installation id instead of falling back to "unattributed".
 func (db *Db) GetInstallationID(_ context.Context) (string, error) {
-	var id string
-	inDocker := os.Getenv("KEPLOY_INDOCKER")
-	if inDocker == "true" {
-		id = os.Getenv("INSTALLATION_ID")
-	} else {
-		raw, err := machineID()
-		if err != nil {
-			db.logger.Debug("failed to get machine id", zap.Error(err))
-			return "", nil
+	if os.Getenv("KEPLOY_INDOCKER") == "true" {
+		if id := strings.TrimSpace(os.Getenv("INSTALLATION_ID")); id != "" {
+			return id, nil
 		}
-		if raw != "" {
-			id = installationID(raw)
+		return db.fallbackInstallationID(), nil
+	}
+	raw, err := machineID()
+	if err == nil && strings.TrimSpace(raw) != "" {
+		return installationID(raw), nil
+	}
+	if err != nil && db.logger != nil {
+		db.logger.Debug("failed to get machine id; using persisted fallback installation id", zap.Error(err))
+	}
+	return db.fallbackInstallationID(), nil
+}
+
+// fallbackInstallationID returns a persisted random 64-hex installation ID from
+// ~/.keploy/keploy.yaml, creating and saving one on first call. If reading and
+// writing keploy.yaml both fail (for example in a read-only container), it
+// falls back to a process-scoped random 64-hex ID.
+func (db *Db) fallbackInstallationID() string {
+	if cfg, err := db.ReadKeployConfig(); err == nil && cfg != nil {
+		if id := strings.TrimSpace(cfg.InstallationID); id != "" {
+			return id
 		}
 	}
-	if id == "" {
-		db.logger.Debug("got empty machine id")
-		return "", nil
+	id := randomInstallationID()
+	cfg, err := db.ReadKeployConfig()
+	if err != nil || cfg == nil {
+		cfg = &KeployConfig{}
 	}
-	return id, nil
+	cfg.InstallationID = id
+	if err := db.WriteKeployConfig(cfg); err == nil {
+		return id
+	} else if db.logger != nil {
+		db.logger.Debug("failed to persist fallback installation id; using process-scoped fallback", zap.Error(err))
+	}
+	processFallbackIDMu.Lock()
+	defer processFallbackIDMu.Unlock()
+	if processFallbackID == "" {
+		processFallbackID = id
+	}
+	return processFallbackID
+}
+
+// randomInstallationID returns a fresh 64-char hex string from crypto/rand.
+func randomInstallationID() string {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return installationID("keploy-fallback")
+	}
+	return hex.EncodeToString(buf[:])
 }
 
 // installationID is the id keploy sends for the machine whose OS id is raw:

@@ -3,6 +3,9 @@ package user
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"go.uber.org/zap"
@@ -14,6 +17,27 @@ func withMachineID(t *testing.T, raw string, err error) {
 	old := machineID
 	machineID = func() (string, error) { return raw, err }
 	t.Cleanup(func() { machineID = old })
+}
+
+func withTempHome(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		t.Setenv("HOMEDRIVE", "")
+		t.Setenv("HOMEPATH", "")
+		t.Setenv("USERPROFILE", dir)
+	} else {
+		t.Setenv("HOME", dir)
+	}
+	processFallbackIDMu.Lock()
+	processFallbackID = ""
+	processFallbackIDMu.Unlock()
+	t.Cleanup(func() {
+		processFallbackIDMu.Lock()
+		processFallbackID = ""
+		processFallbackIDMu.Unlock()
+	})
+	return dir
 }
 
 // The installation id is the keyed hash of the OS machine id, never the id:
@@ -31,13 +55,11 @@ func TestGetInstallationIDSendsAKeyedHashOfTheMachineID(t *testing.T) {
 		want     string
 	}{
 		{name: "a machine id is sent hashed", raw: raw, want: want},
-		{name: "a machine with an empty id sends none, not the hash of nothing", raw: "", want: ""},
-		{name: "a machine whose id cannot be read sends none", raw: raw, err: errors.New("no machine id"), want: ""},
 		{name: "a container keploy started sends the host's id as given", inDocker: "true", raw: "container-id", envID: want, want: want},
-		{name: "a container given no id sends none", inDocker: "true", raw: "container-id", want: ""},
 		{name: "KEPLOY_INDOCKER other than true reads the machine", inDocker: "1", raw: raw, envID: "host-id", want: want},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			withTempHome(t)
 			t.Setenv("KEPLOY_INDOCKER", tc.inDocker)
 			t.Setenv("INSTALLATION_ID", tc.envID)
 			withMachineID(t, tc.raw, tc.err)
@@ -47,6 +69,64 @@ func TestGetInstallationIDSendsAKeyedHashOfTheMachineID(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("GetInstallationID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// When machineid is unavailable or empty, or KEPLOY_INDOCKER=true has no
+// INSTALLATION_ID, GetInstallationID persists and reuses a unique random 64-hex
+// fallback ID in ~/.keploy/keploy.yaml instead of returning "" (unattributed)
+// or the constant hash of "".
+func TestGetInstallationIDPersistsFallbackWhenMachineIDUnavailable(t *testing.T) {
+	emptyHash := installationID("")
+	for _, tc := range []struct {
+		name     string
+		inDocker string
+		raw      string
+		err      error
+	}{
+		{name: "empty machine id", raw: ""},
+		{name: "machine id error", raw: "", err: errors.New("no machine id")},
+		{name: "container with no INSTALLATION_ID", inDocker: "true", raw: "container-id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home1 := withTempHome(t)
+			t.Setenv("KEPLOY_INDOCKER", tc.inDocker)
+			t.Setenv("INSTALLATION_ID", "")
+			withMachineID(t, tc.raw, tc.err)
+
+			db := New(zap.NewNop(), nil)
+			first, err := db.GetInstallationID(context.Background())
+			if err != nil {
+				t.Fatalf("first GetInstallationID: %v", err)
+			}
+			if len(first) != 64 {
+				t.Fatalf("first fallback id = %q (len %d), want 64-hex", first, len(first))
+			}
+			if first == emptyHash {
+				t.Fatalf("fallback id must not be HMAC of empty string (%q)", emptyHash)
+			}
+			// Verify persisted in ~/.keploy/keploy.yaml and stable across calls.
+			if _, statErr := os.Stat(filepath.Join(home1, ".keploy", "keploy.yaml")); statErr != nil {
+				t.Fatalf("expected persisted keploy.yaml: %v", statErr)
+			}
+			second, err := db.GetInstallationID(context.Background())
+			if err != nil {
+				t.Fatalf("second GetInstallationID: %v", err)
+			}
+			if second != first {
+				t.Fatalf("second GetInstallationID = %q, want persisted %q", second, first)
+			}
+
+			// A distinct home directory receives a distinct fallback ID.
+			withTempHome(t)
+			other, err := db.GetInstallationID(context.Background())
+			if err != nil {
+				t.Fatalf("other home GetInstallationID: %v", err)
+			}
+			if len(other) != 64 || other == first {
+				t.Fatalf("other home id = %q, want distinct 64-hex from %q", other, first)
 			}
 		})
 	}

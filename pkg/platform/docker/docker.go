@@ -990,8 +990,16 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 	envVars = append(envVars, fmt.Sprintf("CERT_EXPORT_PATH=%s", KeployTLSMountPath))
 
-	// Add installation ID if available
-	if installationID := os.Getenv("INSTALLATION_ID"); installationID != "" {
+	// Add installation ID from config (falling back to env) so containerized
+	// compose agents inherit the host CLI's installation ID.
+	installationID := ""
+	if idc.conf != nil {
+		installationID = strings.TrimSpace(idc.conf.InstallationID)
+	}
+	if installationID == "" {
+		installationID = strings.TrimSpace(os.Getenv("INSTALLATION_ID"))
+	}
+	if installationID != "" {
 		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
 	}
 	// A run that is keploy's own (KEPLOY_INTERNAL, a CI run of a keploy/
