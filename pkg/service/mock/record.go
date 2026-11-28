@@ -431,6 +431,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//     (PIDMapReader). Read here, with the compose app still parked.
 	pidBase := m.pidMapBaseline(ctx, "record")
 	lossesBase := m.captureLossBaseline(ctx)
+	_ = m.checkScopeStatus(ctx)
 
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.

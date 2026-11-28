@@ -107,6 +107,61 @@ func scopeBodyErr(what string, err error) *models.ScopeError {
 	}
 }
 
+type pidScoperSvc interface {
+	ScopePID(ctx context.Context, caller int) (bool, *models.ScopeError)
+}
+
+type scopeStatusSvc interface {
+	ScopeStatus(ctx context.Context) models.ScopeStatus
+}
+
+// HandleScopeStatus reports whether native Linux cgroup-based Go toolchain
+// scoping was requested and armed (ready=true) or fell back to full-tree
+// interception (ready=false with reason and remedy).
+func (a *Agent) HandleScopeStatus(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.svc.(scopeStatusSvc)
+	if !ok {
+		render.Status(r, http.StatusOK)
+		render.JSON(w, r, models.ScopeStatus{})
+		return
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, s.ScopeStatus(r.Context()))
+}
+
+// HandleScopePID opts the calling process (read from the connection, never
+// from the request body) and every descendant in its real_parent tree into
+// interception when the hooks run with structs.FlagScopedPids. Unlike
+// HandleInstance, it is available regardless of the proven switch so
+// non-proven replays also exempt the outer build toolchain. Returns 200 with
+// scoped=false when FlagScopedPids is inactive (e.g. Docker mode or non-Linux),
+// 422 when the caller is not part of this keploy run, and 500 when the kernel
+// map update fails. Launchers should verify the returned pid matches getpid().
+func (a *Agent) HandleScopePID(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.svc.(pidScoperSvc)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	caller, err := a.caller(r)
+	if err != nil {
+		a.refuse(w, r, &models.ScopeError{
+			Status:  http.StatusInternalServerError,
+			Code:    models.ScopeErrNoCaller,
+			Message: "keploy's agent could not tell which process called it: " + err.Error(),
+			Remedy:  "run the test command on the machine keploy's agent runs on",
+		})
+		return
+	}
+	scoped, serr := s.ScopePID(r.Context(), caller)
+	if serr != nil {
+		a.refuse(w, r, serr)
+		return
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]any{"status": "ok", "scoped": scoped, "pid": caller})
+}
+
 // HandleInstance claims the run for the calling test process
 // (models.InstanceReq), or for the running child the caller names that it
 // started. The caller is read from the connection, never from the body.

@@ -1328,8 +1328,20 @@ func TestRolloverStartupCarryBoundedAcrossMultipleCuts(t *testing.T) {
 
 		// Total startup bytes carried into the test's set from all earlier sets
 		// must stay within sr.limit, and the earliest startup mock must be present.
+		// Locate lastSet in rr.ro.sets after stop() in case an additional cut
+		// completed between reading lastSet and stop() returning.
+		lastIdx := -1
+		for idx, id := range rr.ro.sets {
+			if id == lastSet {
+				lastIdx = idx
+				break
+			}
+		}
+		if lastIdx <= 0 {
+			t.Fatalf("last set %s not found after s0 in %v", lastSet, rr.ro.sets)
+		}
 		earlier := map[string]struct{}{}
-		for _, id := range rr.ro.sets[:len(rr.ro.sets)-1] {
+		for _, id := range rr.ro.sets[:lastIdx] {
 			s := readSet(t, rr.dir, id)
 			for name := range s.mocks {
 				earlier[name] = struct{}{}
@@ -1351,7 +1363,7 @@ func TestRolloverStartupCarryBoundedAcrossMultipleCuts(t *testing.T) {
 
 		// Sets before firstTest that never receive a test (s1, s2, ...) are
 		// not backfilled with mock-0.
-		for _, id := range rr.ro.sets[1 : len(rr.ro.sets)-1] {
+		for _, id := range rr.ro.sets[1:lastIdx] {
 			s := readSet(t, rr.dir, id)
 			if _, wrong := s.mocks["mock-0"]; wrong {
 				t.Fatalf("set %s (never received a test) was unnecessarily backfilled with mock-0", id)

@@ -296,6 +296,13 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 			fmt.Sprintf("keploy could not give test worker process %d an instance of its own: processes of gone workers are still in every one of its %d instances", me.pid, coreAgent.MaxInstanceID),
 			"stop the processes earlier test workers left running")
 	}
+	if h, ok := a.Hooks.(coreAgent.PIDScoper); ok && h.ScopedPidsActive() {
+		if err := h.AddScopedPID(uint32(me.pid), me.start); err != nil {
+			a.endInstances([]uint32{id})
+			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+				"keploy could not migrate the test worker into the scoped cgroup: "+err.Error(), "check the agent's log")
+		}
+	}
 	es, serr := a.serveWorker(me.pid, id)
 	if serr != nil {
 		a.endInstances([]uint32{id})

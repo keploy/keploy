@@ -30,6 +30,7 @@ const (
 	unixconnMapKeployAgentRegistrationMap  = "keploy_agent_registration_map"
 	unixconnMapKeployClientKernelPidMap    = "keploy_client_kernel_pid_map"
 	unixconnMapKeployClientRegistrationMap = "keploy_client_registration_map"
+	unixconnMapKeployScopedCgroupLevelMap  = "keploy_scoped_cgroup_level_map"
 	unixconnMapOrigDstByCookie             = "orig_dst_by_cookie"
 	unixconnMapPendingBinds                = "pending_binds"
 	unixconnMapPidMapInsertFailures        = "pid_map_insert_failures"
@@ -126,6 +127,7 @@ type unixconnMapSpecs struct {
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
+	KeployScopedCgroupLevelMap  *ebpf.MapSpec `ebpf:"keploy_scoped_cgroup_level_map"`
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.MapSpec `ebpf:"pending_binds"`
 	PidMapInsertFailures        *ebpf.MapSpec `ebpf:"pid_map_insert_failures"`
@@ -182,6 +184,7 @@ type unixconnMaps struct {
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
+	KeployScopedCgroupLevelMap  *ebpf.Map `ebpf:"keploy_scoped_cgroup_level_map"`
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.Map `ebpf:"pending_binds"`
 	PidMapInsertFailures        *ebpf.Map `ebpf:"pid_map_insert_failures"`
@@ -214,6 +217,7 @@ func (m *unixconnMaps) Close() error {
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
+		m.KeployScopedCgroupLevelMap,
 		m.OrigDstByCookie,
 		m.PendingBinds,
 		m.PidMapInsertFailures,

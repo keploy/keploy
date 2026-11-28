@@ -68,6 +68,10 @@ type replayDetail struct {
 	// faults is the mocks the agent holds whose answer ends in a fault, by
 	// name: the summary names each one served (logFaultsServed).
 	faults map[string]*models.Mock
+	// runnerFailed reports that the test command exited non-zero on its own
+	// (not killed by keploy or Ctrl+C), used to classify pre-test setup
+	// failures when zero test windows ran.
+	runnerFailed bool
 }
 
 // actualCapture keeps the app's incoming requests during a replay, in memory only.

@@ -326,6 +326,24 @@ type InstanceStamper interface {
 	InstanceRefusal() error
 }
 
+// PIDScoper is the optional extension implemented by hooks that support
+// opt-in cgroup-based subtree interception (structs.FlagScopedPids): when
+// active, only processes inside the run's scoped cgroup v2 directory (and
+// nested sub-cgroups below it) are matched by pid_filter and classify_process,
+// leaving an outer build toolchain outside interception.
+type PIDScoper interface {
+	// AddScopedPID migrates the process nsTgid (in the agent's PID namespace,
+	// verified against startTicks from /proc/<pid>/stat field 22) into the
+	// run's scoped cgroup so it and every descendant it forks stay isolated.
+	AddScopedPID(nsTgid uint32, startTicks uint64) error
+	// ScopedPidsActive reports whether these hooks were loaded with
+	// structs.FlagScopedPids armed in native mode.
+	ScopedPidsActive() bool
+	// ScopedStatus reports whether scoped mode was requested, whether the
+	// scoped cgroup is armed, and why it fell back if not.
+	ScopedStatus() models.ScopeStatus
+}
+
 // InstanceLoss counts the processes an instance forked that the kernel
 // could not put in it (its membership map was full, or it could not read the
 // new process), so their connections carry no instance.
