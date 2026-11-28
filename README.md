@@ -111,6 +111,9 @@ source /dev/stdin <<<"$(curl -fsSL https://keploy.io/install.sh || echo 'echo Ke
 
 ### 2. Record Test Cases
 
+On Linux, Keploy may prompt for your `sudo` password when it needs elevated
+privileges for eBPF operations.
+
 Start your app under Keploy to convert real API calls into tests and mocks.
 
 ```bash
