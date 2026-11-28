@@ -54,7 +54,17 @@ func TestAStartUpReadInAWindowThatBecameNoTestCaseIsOneAnyTestMayNeed(t *testing
 			core, logs := observer.New(zapcore.DebugLevel)
 			m := New(zap.New(core))
 			m.SetRevokeCapable(true)
-			fullLane(t, m)
+			_, clk := fullLane(t, m)
+			t.Cleanup(func() {
+				clk.Advance(time.Hour)
+				deadline := time.Now().Add(5 * time.Second)
+				for m.OutQueued() && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+				if m.OutQueued() {
+					t.Errorf("abandoned lane still queued after stall give-up")
+				}
+			})
 			t0 := time.Now().Add(-time.Minute)
 			m.StartRecordSession()
 			tc.before(m, t0)
@@ -351,7 +361,17 @@ func TestTheSentListLetsGoTheHalfThatStartedFirst(t *testing.T) {
 func TestAStartUpReadInAFilteredProbesWindowIsKeptOrSaid(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	m := New(zap.New(core))
-	fullLane(t, m)
+	_, clk := fullLane(t, m)
+	t.Cleanup(func() {
+		clk.Advance(time.Hour)
+		deadline := time.Now().Add(5 * time.Second)
+		for m.OutQueued() && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if m.OutQueued() {
+			t.Errorf("abandoned lane still queued after stall give-up")
+		}
+	})
 	t0 := time.Now().Add(-time.Minute)
 	m.StartRecordSession()
 	m.OpenWindow(t0, nil).Close() // the filtered probe's window: no test case comes of it
