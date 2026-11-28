@@ -1395,6 +1395,15 @@ func (s *scopedMockDb) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, 
 	return s.keep(s.MockMemDb.GetStartupMocks())
 }
 
+func (s *scopedMockDb) GetStagedStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	if sr, ok := s.MockMemDb.(integrations.StagedStartupReader); ok {
+		return s.keep(sr.GetStagedStartupMocksByKind(kind))
+	}
+	return nil, nil
+}
+
+var _ integrations.StagedStartupReader = (*scopedMockDb)(nil)
+
 func (s *scopedMockDb) MatchReadThrough(live *models.Mock) (*models.Mock, bool) {
 	if s == nil || s.MockMemDb == nil {
 		return nil, false

@@ -33,7 +33,12 @@ const (
 	// two tests included, which no test's own window holds. The mock
 	// manager files what is staged as startup traffic, and the set's first
 	// test refiles that tier to what was recorded before it, as for every
-	// staged mock: a parser that needs a declared mock later keeps it.
+	// staged mock. For parsers whose sessions may open lazily after test 1
+	// (with no staging-time hook), the mock manager also retains the latest
+	// BaseTime staging's declared StagingWithStartup mocks for the lifetime
+	// of the set (cleared on ResetForReplaySession and replaced on every
+	// BaseTime staging) and exposes them through
+	// integrations.StagedStartupReader.GetStagedStartupMocksByKind.
 	//
 	// A carry-over mock (models.IsCarryOver: RegisterCarryOver, a
 	// StagingRelease need) is never staged so: carry-over keeps it

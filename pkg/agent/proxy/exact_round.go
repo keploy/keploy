@@ -1554,6 +1554,12 @@ func (h *heldScope) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, err
 	return h.held(h.getStartupMocksByKindIn(h.readView(), kind))
 }
 
+func (h *heldScope) GetStagedStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	return h.held(h.MockManager.GetStagedStartupMocksByKind(kind))
+}
+
+var _ integrations.StagedStartupReader = (*heldScope)(nil)
+
 // RangeSessionMocksWithKey is the manager's keyed walk of the session tier
 // (integrations.SessionKeyReader), each mock checked after it is read: the
 // walk stops once the staging moved, or the call's view was replaced
