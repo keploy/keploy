@@ -388,6 +388,38 @@ func TestAsyncReorderOfUnixNanoEmailBindsInsteadOfPick(t *testing.T) {
 		oRefused(t, "unstated a0 + stated q + late mock-323", d, RefusalPick, "mock-323", "recorded after it")
 	})
 
+	t.Run("GUARD: step 3b validates chosenTarget (earliest answer), not last answer in slice", func(t *testing.T) {
+		// Case 1: answers[0] (earliest, mock-240) is non-moving while
+		// answers[1] (later, mock-250) is valid. chosenTarget picks mock-240
+		// so late mock-323 must stay refused rather than being excused by
+		// answers[len-1].
+		a0NonMoving := Earlier{
+			Mock: "mock-240", At: rBase.Add(1 * time.Millisecond), Own: true,
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "body.email", Noise: "body.email", Type: String, Value: rEmail}, Live: rEmail + " " + fEmail}},
+		}
+		qValid := Earlier{
+			Mock: "mock-250", At: rBase.Add(5 * time.Millisecond), Own: true,
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "body.email", Noise: "body.email", Type: String, Value: rEmail}, Live: fEmail}},
+		}
+		d := oWord(t, Decide(callWith([]Earlier{a0NonMoving, qValid}, []Raw{lateRaw(rEmail, fEmail)})), rWord, fWord)
+		oRefused(t, "earliest non-moving a0 + later valid q + late mock-323", d, RefusalPick, "mock-323", "recorded after it")
+
+		// Case 2: answers[0] (earliest, mock-240) is valid while answers[1]
+		// (later, mock-250) is non-moving. chosenTarget picks mock-240 so late
+		// mock-323 is excused and the decision binds at mock-240.
+		a0Valid := Earlier{
+			Mock: "mock-240", At: rBase.Add(1 * time.Millisecond), Own: true,
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "body.email", Noise: "body.email", Type: String, Value: rEmail}, Live: fEmail}},
+		}
+		qNonMoving := Earlier{
+			Mock: "mock-250", At: rBase.Add(5 * time.Millisecond), Own: true,
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "body.email", Noise: "body.email", Type: String, Value: rEmail}, Live: rEmail + " " + fEmail}},
+		}
+		d = oWord(t, Decide(callWith([]Earlier{a0Valid, qNonMoving}, []Raw{lateRaw(rEmail, fEmail)})), rWord, fWord)
+		iValue(t, "earliest valid a0 + later non-moving q + late mock-323", d, "mock-240")
+		checkExcusedLine(t, "earliest valid a0 + later non-moving q", d, "mock-323", "mock-240 body.email")
+	})
+
 	t.Run("GUARD: out-of-scope earlier answer beside late mock-323 stays RefusalPick", func(t *testing.T) {
 		otherAns := Earlier{
 			Mock: "mock-250", At: rBase.Add(5 * time.Millisecond), Own: false, Run: true,

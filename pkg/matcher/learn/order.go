@@ -2824,9 +2824,8 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 				if !before(q) || !h.hr || !h.hl || !q.gave || q.same() {
 					return false
 				}
-				if !asText(q.t.rec, r) || !asText(q.t.live, l) {
-					return false
-				}
+				// For q.gave, dc.holds returns early on p.gave with exact text
+				// matching, so h.hr && h.hl already proves asText on both runs.
 				rf, _, _ := dc.holds(q, q.t.live, r, c.rm, c.byText)
 				fr, _, _ := dc.holds(q, q.t.rec, l, c.lm, c.byText)
 				return !rf && !fr

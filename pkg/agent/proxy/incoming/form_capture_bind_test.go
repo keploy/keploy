@@ -75,6 +75,10 @@ func TestWireFormURLEncodedRoundTripThroughCaptureLearnAndReplay(t *testing.T) {
 
 			recReq := capture(ct, recWire, rReqAt)
 			liveReq := capture(ct, liveWire, fReqAt)
+			wantRawFlag := ct == "application/x-www-form-urlencoded"
+			if recReq.RawFormBody != wantRawFlag || liveReq.RawFormBody != wantRawFlag {
+				t.Fatalf("RawFormBody = (rec=%v, live=%v); want %v for %q", recReq.RawFormBody, liveReq.RawFormBody, wantRawFlag, ct)
+			}
 
 			tr := learn.NewTracker()
 			tr.SetClientTests(true)
@@ -168,6 +172,33 @@ func TestWireFormURLEncodedRoundTripThroughCaptureLearnAndReplay(t *testing.T) {
 				idxAnn, okAnn := learn.PairCase(legacyCases, make([]bool, len(legacyCases)), liveAnn, true)
 				if !okAnn || legacyCases[idxAnn].Name != "post-signup-1" {
 					t.Fatalf("legacy pair ann = (%d,%v); want post-signup-1", idxAnn, okAnn)
+				}
+				// Newly captured exact-CT raw recordings carry RawFormBody=true
+				// and pair cleanly without encoded-delimiter tie swaps.
+				rawExactCases := []learn.ClientCase{
+					{Name: "post-amp", Req: capture(ct, "a=1&2", rReqAt)},
+					{Name: "post-enc", Req: capture(ct, "a=1%262", rReqAt.Add(time.Millisecond))},
+				}
+				idxEnc, okEnc := learn.PairCase(rawExactCases, make([]bool, len(rawExactCases)), capture(ct, "a=1%262", fReqAt), true)
+				if !okEnc || rawExactCases[idxEnc].Name != "post-enc" {
+					t.Fatalf("exact raw pair enc = (%d,%v); want post-enc", idxEnc, okEnc)
+				}
+				idxAmp, okAmp := learn.PairCase(rawExactCases, make([]bool, len(rawExactCases)), capture(ct, "a=1&2", fReqAt), true)
+				if !okAmp || rawExactCases[idxAmp].Name != "post-amp" {
+					t.Fatalf("exact raw pair amp = (%d,%v); want post-amp", idxAmp, okAmp)
+				}
+				// Mixed legacy + re-recorded set pairs both ways cleanly.
+				mixedCases := []learn.ClientCase{
+					{Name: "s1-new", Req: capture(ct, "state=s1&redirect_uri=https%3A%2F%2Fa.io%2Fcb", rReqAt)},
+					{Name: "s2-old", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "state=s2&redirect_uri=https://a.io/cb"}},
+				}
+				idxS1, okS1 := learn.PairCase(mixedCases, make([]bool, len(mixedCases)), capture(ct, "state=s1&redirect_uri=https%3A%2F%2Fa.io%2Fcb", fReqAt), true)
+				if !okS1 || mixedCases[idxS1].Name != "s1-new" {
+					t.Fatalf("mixed pair s1 = (%d,%v); want s1-new", idxS1, okS1)
+				}
+				idxS2, okS2 := learn.PairCase(mixedCases, make([]bool, len(mixedCases)), capture(ct, "state=s2&redirect_uri=https%3A%2F%2Fa.io%2Fcb", fReqAt), true)
+				if !okS2 || mixedCases[idxS2].Name != "s2-old" {
+					t.Fatalf("mixed pair s2 = (%d,%v); want s2-old", idxS2, okS2)
 				}
 			} else {
 				rawCases := []learn.ClientCase{

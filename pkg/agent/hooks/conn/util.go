@@ -347,6 +347,11 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			// Replay sends this request again: keep what it takes to
 			// send a repeated header on its own lines.
 			HeaderLineLengths: pkg.ToYamlHTTPHeaderLineLengths(req.Header),
+
+			// Mark exact "application/x-www-form-urlencoded" recordings whose
+			// body is kept raw on the wire so PairCase can distinguish them
+			// from legacy pre-decoded recordings.
+			RawFormBody: req.Header.Get("Content-Type") == "application/x-www-form-urlencoded",
 		},
 		HTTPResp: models.HTTPResp{
 			StatusCode:    resp.StatusCode,

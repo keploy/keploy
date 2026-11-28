@@ -314,171 +314,502 @@ func TestPairCaseLegacyDecodedFormMatchesRawLiveOutOfOrder(t *testing.T) {
 	const exactCT = "application/x-www-form-urlencoded"
 	const charsetCT = "application/x-www-form-urlencoded; charset=utf-8"
 
+	type recSpec struct {
+		name   string
+		body   string
+		legacy bool // true => stored pre-decoded by an older build (RawFormBody=false)
+	}
 	type livePair struct{ body, want string }
 	type pairRow struct {
-		name         string
-		cts          []string
-		recs         [][2]string
-		lives        []livePair
-		seqOnlyExact bool // true when exact-CT live[1] is ambiguous against unused live[0] (same as legacy exact-CT decoded body)
+		name  string
+		cts   []string
+		recs  []recSpec
+		lives []livePair
 	}
 
 	rows := []pairRow{
-		// Exact-CT legacy decoded recordings (older builds only decoded exact CT,
-		// never charset-parameterized CT) paired against raw live requests.
+		// Legacy pre-decoded exact-CT recordings (RawFormBody=false; older builds
+		// only decoded exact CT, never charset-parameterized CT) paired against
+		// raw live requests across all 4 recording/arrival orders.
 		{
-			name: "exact-CT legacy @ reversed",
+			name: "legacy @",
 			cts:  []string{exactCT},
-			recs: [][2]string{{"ann", "email=ann@example.com&plan=pro"}, {"bob", "email=bob@example.com&plan=pro"}},
+			recs: []recSpec{
+				{name: "ann", body: "email=ann@example.com&plan=pro", legacy: true},
+				{name: "bob", body: "email=bob@example.com&plan=pro", legacy: true},
+			},
 			lives: []livePair{
-				{"email=bob%40example.com&plan=pro", "bob"},
 				{"email=ann%40example.com&plan=pro", "ann"},
+				{"email=bob%40example.com&plan=pro", "bob"},
 			},
 		},
 		{
-			name: "exact-CT legacy plus/space (plus-rec first, live space first)",
+			name: "legacy plus/space",
 			cts:  []string{exactCT},
-			recs: [][2]string{{"plus", "q=a+b&k=1"}, {"space", "q=a b&k=1"}},
-			lives: []livePair{
-				{"q=a+b&k=1", "space"},
-				{"q=a%2Bb&k=1", "plus"},
+			recs: []recSpec{
+				{name: "plus", body: "q=a+b&k=1", legacy: true},
+				{name: "space", body: "q=a b&k=1", legacy: true},
 			},
-		},
-		{
-			name: "exact-CT legacy plus/space (space-rec first, live plus first)",
-			cts:  []string{exactCT},
-			recs: [][2]string{{"space", "q=a b&k=1"}, {"plus", "q=a+b&k=1"}},
 			lives: []livePair{
 				{"q=a%2Bb&k=1", "plus"},
 				{"q=a+b&k=1", "space"},
 			},
 		},
 		{
-			name: "exact-CT legacy email plus/space (plus-rec first)",
+			name: "legacy email plus/space",
 			cts:  []string{exactCT},
-			recs: [][2]string{{"post-plus", "email=ann+x@example.com&plan=pro"}, {"post-space", "email=ann x@example.com&plan=pro"}},
+			recs: []recSpec{
+				{name: "post-plus", body: "email=ann+x@example.com&plan=pro", legacy: true},
+				{name: "post-space", body: "email=ann x@example.com&plan=pro", legacy: true},
+			},
 			lives: []livePair{
-				{"email=ann+x%40example.com&plan=pro", "post-space"},
 				{"email=ann%2Bx%40example.com&plan=pro", "post-plus"},
+				{"email=ann+x%40example.com&plan=pro", "post-space"},
 			},
 		},
 		{
-			name: "exact-CT legacy literal %20 vs space",
+			name: "legacy literal %20 vs space",
 			cts:  []string{exactCT},
-			recs: [][2]string{{"lit", "q=a%20b&k=1"}, {"space", "q=a b&k=1"}},
+			recs: []recSpec{
+				{name: "lit", body: "q=a%20b&k=1", legacy: true},
+				{name: "space", body: "q=a b&k=1", legacy: true},
+			},
+			lives: []livePair{
+				{"q=a%2520b&k=1", "lit"},
+				{"q=a+b&k=1", "space"},
+			},
+		},
+		{
+			name: "legacy # key",
+			cts:  []string{exactCT},
+			recs: []recSpec{
+				{name: "v1", body: "inst#1=v1", legacy: true},
+				{name: "v2", body: "inst#1=v2", legacy: true},
+			},
+			lives: []livePair{
+				{"inst%231=v1", "v1"},
+				{"inst%231=v2", "v2"},
+			},
+		},
+		{
+			name: "legacy encoded delimiter a=1%262 vs a=1%2B2",
+			cts:  []string{exactCT},
+			recs: []recSpec{
+				{name: "amp", body: "a=1&2", legacy: true},
+				{name: "plus", body: "a=1+2", legacy: true},
+			},
+			lives: []livePair{
+				{"a=1%262", "amp"},
+				{"a=1%2B2", "plus"},
+			},
+		},
+		{
+			name: "legacy JSON-under-form plus/space",
+			cts:  []string{exactCT},
+			recs: []recSpec{
+				{name: "space", body: `{"q":"a b","k":"1"}`, legacy: true},
+				{name: "plus", body: `{"q":"a+b","k":"1"}`, legacy: true},
+			},
+			lives: []livePair{
+				{`{"q":"a+b","k":"1"}`, "space"},
+				{`{"q":"a%2Bb","k":"1"}`, "plus"},
+			},
+		},
+		{
+			name: "legacy JSON-under-form @",
+			cts:  []string{exactCT},
+			recs: []recSpec{
+				{name: "ann", body: `{"email":"ann@x.io"}`, legacy: true},
+				{name: "bob", body: `{"email":"bob@x.io"}`, legacy: true},
+			},
+			lives: []livePair{
+				{`{"email":"ann%40x.io"}`, "ann"},
+				{`{"email":"bob%40x.io"}`, "bob"},
+			},
+		},
+		// Mixed legacy (RawFormBody=false) + newly re-recorded (RawFormBody=true)
+		// sets at the same exact-CT endpoint.
+		{
+			name: "mixed legacy + raw OAuth redirect_uri",
+			cts:  []string{exactCT},
+			recs: []recSpec{
+				{name: "s1-new", body: "state=s1&redirect_uri=https%3A%2F%2Fa.io%2Fcb", legacy: false},
+				{name: "s2-old", body: "state=s2&redirect_uri=https://a.io/cb", legacy: true},
+			},
+			lives: []livePair{
+				{"state=s1&redirect_uri=https%3A%2F%2Fa.io%2Fcb", "s1-new"},
+				{"state=s2&redirect_uri=https%3A%2F%2Fa.io%2Fcb", "s2-old"},
+			},
+		},
+		{
+			name: "mixed legacy + raw email and note",
+			cts:  []string{exactCT},
+			recs: []recSpec{
+				{name: "ann-new", body: "email=ann%40example.com&plan=pro&note=a+b+c", legacy: false},
+				{name: "bob-old", body: "email=bob@example.com&plan=pro&note=a b c", legacy: true},
+			},
+			lives: []livePair{
+				{"email=ann%40example.com&plan=pro&note=a+b+c", "ann-new"},
+				{"email=bob%40example.com&plan=pro&note=a+b+c", "bob-old"},
+			},
+		},
+		{
+			name: "mixed legacy + raw timestamp",
+			cts:  []string{exactCT},
+			recs: []recSpec{
+				{name: "d1-new", body: "id=7&at=2026-11-28T10%3A00%3A00%2B05%3A30", legacy: false},
+				{name: "d2-old", body: "id=8&at=2026-11-28T10:00:00+05:30", legacy: true},
+			},
+			lives: []livePair{
+				{"id=7&at=2026-11-28T10%3A00%3A00%2B05%3A30", "d1-new"},
+				{"id=8&at=2026-11-28T10%3A00%3A00%2B05%3A30", "d2-old"},
+			},
+		},
+		{
+			name: "mixed legacy plus vs new space",
+			cts:  []string{exactCT},
+			recs: []recSpec{
+				{name: "plus-old", body: "q=a+b&k=1", legacy: true},
+				{name: "space-new", body: "q=a+b&k=1", legacy: false},
+			},
+			lives: []livePair{
+				{"q=a%2Bb&k=1", "plus-old"},
+				{"q=a+b&k=1", "space-new"},
+			},
+		},
+		// New raw recordings (RawFormBody=true on exact CT, false on charset CT):
+		// decoded primary scoring + raw-vs-raw tie-breaking pairs every case in
+		// all 4 orders, including encoded delimiters and JSON under form CT.
+		{
+			name: "new raw @",
+			cts:  []string{exactCT, charsetCT},
+			recs: []recSpec{
+				{name: "ann", body: "email=ann%40example.com&plan=pro"},
+				{name: "bob", body: "email=bob%40example.com&plan=pro"},
+			},
+			lives: []livePair{
+				{"email=ann%40example.com&plan=pro", "ann"},
+				{"email=bob%40example.com&plan=pro", "bob"},
+			},
+		},
+		{
+			name: "new raw encoded delimiter a=1%262 vs a=1&2",
+			cts:  []string{exactCT, charsetCT},
+			recs: []recSpec{
+				{name: "enc", body: "a=1%262"},
+				{name: "amp", body: "a=1&2"},
+			},
+			lives: []livePair{
+				{"a=1%262", "enc"},
+				{"a=1&2", "amp"},
+			},
+		},
+		{
+			name: "new raw encoded delimiter q=a%26b%3Dc vs q=a&b=c",
+			cts:  []string{exactCT, charsetCT},
+			recs: []recSpec{
+				{name: "enc", body: "q=a%26b%3Dc"},
+				{name: "split", body: "q=a&b=c"},
+			},
+			lives: []livePair{
+				{"q=a%26b%3Dc", "enc"},
+				{"q=a&b=c", "split"},
+			},
+		},
+		{
+			name: "new raw encoded slash x=a%2Fb vs x=a&y=b",
+			cts:  []string{exactCT, charsetCT},
+			recs: []recSpec{
+				{name: "enc", body: "x=a%2Fb"},
+				{name: "split", body: "x=a&y=b"},
+			},
+			lives: []livePair{
+				{"x=a%2Fb", "enc"},
+				{"x=a&y=b", "split"},
+			},
+		},
+		{
+			name: "new raw plus/space q=a+b&k=1 vs q=a%2Bb&k=1",
+			cts:  []string{exactCT, charsetCT},
+			recs: []recSpec{
+				{name: "space", body: "q=a+b&k=1"},
+				{name: "plus", body: "q=a%2Bb&k=1"},
+			},
 			lives: []livePair{
 				{"q=a+b&k=1", "space"},
-				{"q=a%2520b&k=1", "lit"},
+				{"q=a%2Bb&k=1", "plus"},
 			},
 		},
 		{
-			name: "exact-CT mixed legacy + raw set",
-			cts:  []string{exactCT},
-			recs: [][2]string{{"ann-legacy", "email=ann@example.com&plan=pro"}, {"bob-raw", "email=bob%40example.com&plan=pro"}},
-			lives: []livePair{
-				{"email=bob%40example.com&plan=pro", "bob-raw"},
-				{"email=ann%40example.com&plan=pro", "ann-legacy"},
-			},
-		},
-		// Raw recordings with encoded delimiters: restoring dual emission on the
-		// stored side causes tie swaps on both exact-CT and charset-CT rows.
-		{
-			name: "raw encoded delimiter a=1%262 vs a=1&2 (enc first)",
+			name: "new raw space encoding tie q=a+b&k=1 vs q=a%20b&k=1",
 			cts:  []string{exactCT, charsetCT},
-			recs: [][2]string{{"enc", "a=1%262"}, {"amp", "a=1&2"}},
-			lives: []livePair{
-				{"a=1&2", "amp"},
-				{"a=1%262", "enc"},
+			recs: []recSpec{
+				{name: "plus-space", body: "q=a+b&k=1"},
+				{name: "pct20-space", body: "q=a%20b&k=1"},
 			},
-			seqOnlyExact: true,
-		},
-		{
-			name: "charset-CT raw encoded delimiter a=1%262 vs a=1&2 (amp first)",
-			cts:  []string{charsetCT},
-			recs: [][2]string{{"amp", "a=1&2"}, {"enc", "a=1%262"}},
 			lives: []livePair{
-				{"a=1%262", "enc"},
-				{"a=1&2", "amp"},
+				{"q=a+b&k=1", "plus-space"},
+				{"q=a%20b&k=1", "pct20-space"},
 			},
 		},
 		{
-			name: "raw encoded delimiter q=a%26b%3Dc vs q=a&b=c",
+			name: "new raw %20 vs + distinct ids",
 			cts:  []string{exactCT, charsetCT},
-			recs: [][2]string{{"enc", "q=a%26b%3Dc"}, {"split", "q=a&b=c"}},
-			lives: []livePair{
-				{"q=a&b=c", "split"},
-				{"q=a%26b%3Dc", "enc"},
+			recs: []recSpec{
+				{name: "one", body: "q=a%20b&id=1"},
+				{name: "two", body: "q=a+b&id=2"},
 			},
-			seqOnlyExact: true,
-		},
-		{
-			name: "raw encoded slash x=a%2Fb vs x=a&y=b",
-			cts:  []string{exactCT, charsetCT},
-			recs: [][2]string{{"enc", "x=a%2Fb"}, {"split", "x=a&y=b"}},
 			lives: []livePair{
-				{"x=a&y=b", "split"},
-				{"x=a%2Fb", "enc"},
-			},
-			seqOnlyExact: true,
-		},
-		{
-			name: "raw %20 vs + distinct cases",
-			cts:  []string{exactCT, charsetCT},
-			recs: [][2]string{{"one", "q=a%20b&id=1"}, {"two", "q=a+b&id=2"}},
-			lives: []livePair{
-				{"q=a+b&id=2", "two"},
 				{"q=a%20b&id=1", "one"},
+				{"q=a+b&id=2", "two"},
 			},
 		},
-		// JSON body sent under form Content-Type carrying %26 / %3D must not be
-		// QueryUnescape'd into a false tie against a split-delimiter body.
 		{
-			name: "JSON under form CT with percent escapes",
+			name: "new raw JSON under form CT with percent escapes",
 			cts:  []string{exactCT, charsetCT},
-			recs: [][2]string{
-				{"lit", `{"q":"a&b=c","k":"1"}`},
-				{"enc", `{"q":"a%26b%3Dc","k":"1"}`},
+			recs: []recSpec{
+				{name: "lit", body: `{"q":"a&b=c","k":"1"}`},
+				{name: "enc", body: `{"q":"a%26b%3Dc","k":"1"}`},
 			},
 			lives: []livePair{
-				{`{"q":"a%26b%3Dc","k":"1"}`, "enc"},
 				{`{"q":"a&b=c","k":"1"}`, "lit"},
+				{`{"q":"a%26b%3Dc","k":"1"}`, "enc"},
+			},
+		},
+		{
+			name: "new raw three candidates enc, split, other",
+			cts:  []string{exactCT, charsetCT},
+			recs: []recSpec{
+				{name: "enc", body: "q=a%26b&n=1"},
+				{name: "split", body: "q=a&b=&n=2"},
+				{name: "other", body: "q=c&n=3"},
+			},
+			lives: []livePair{
+				{"q=a%26b&n=1", "enc"},
+				{"q=a&b=&n=2", "split"},
+				{"q=c&n=3", "other"},
 			},
 		},
 	}
 
+	orders := map[bool]string{false: "fwd", true: "rev"}
 	for _, hdrKey := range []string{"Content-Type", "content-type"} {
 		for _, row := range rows {
 			for _, ct := range row.cts {
-				t.Run(hdrKey+"/"+ct+"/"+row.name, func(t *testing.T) {
-					req := func(body string) *models.HTTPReq {
-						return &models.HTTPReq{
-							Method: "POST",
-							URL:    "http://api/signup",
-							Header: map[string]string{hdrKey: ct},
-							Body:   body,
-						}
-					}
-					cases := make([]ClientCase, 0, len(row.recs))
-					for _, rc := range row.recs {
-						cases = append(cases, ClientCase{Name: rc[0], Req: req(rc[1])})
-					}
-					used := make([]bool, len(cases))
-					for _, lv := range row.lives {
-						if !(row.seqOnlyExact && ct == exactCT) {
-							freshIdx, ok := PairCase(cases, make([]bool, len(cases)), req(lv.body), true)
-							if !ok || cases[freshIdx].Name != lv.want {
-								t.Fatalf("fresh PairCase(%q) = (%d %q, %v); want %q", lv.body, freshIdx, cases[freshIdx].Name, ok, lv.want)
+				for _, recRev := range []bool{false, true} {
+					for _, liveRev := range []bool{false, true} {
+						sub := hdrKey + "/" + ct + "/" + row.name + "/rec=" + orders[recRev] + "/live=" + orders[liveRev]
+						t.Run(sub, func(t *testing.T) {
+							recs := append([]recSpec(nil), row.recs...)
+							if recRev {
+								for i, j := 0, len(recs)-1; i < j; i, j = i+1, j-1 {
+									recs[i], recs[j] = recs[j], recs[i]
+								}
 							}
-						}
-						seqIdx, ok := PairCase(cases, used, req(lv.body), true)
-						if !ok || cases[seqIdx].Name != lv.want {
-							t.Fatalf("seq PairCase(%q) = (%d %q, %v); want %q", lv.body, seqIdx, cases[seqIdx].Name, ok, lv.want)
-						}
-						used[seqIdx] = true
+							lives := append([]livePair(nil), row.lives...)
+							if liveRev {
+								for i, j := 0, len(lives)-1; i < j; i, j = i+1, j-1 {
+									lives[i], lives[j] = lives[j], lives[i]
+								}
+							}
+							mkReq := func(body string, rawForm bool) *models.HTTPReq {
+								return &models.HTTPReq{
+									Method:      "POST",
+									URL:         "http://api/signup",
+									Header:      map[string]string{hdrKey: ct},
+									Body:        body,
+									RawFormBody: rawForm,
+								}
+							}
+							cases := make([]ClientCase, 0, len(recs))
+							for _, rc := range recs {
+								cases = append(cases, ClientCase{
+									Name: rc.name,
+									Req:  mkReq(rc.body, ct == exactCT && !rc.legacy),
+								})
+							}
+							used := make([]bool, len(cases))
+							for _, lv := range lives {
+								liveReq := mkReq(lv.body, ct == exactCT)
+								freshIdx, ok := PairCase(cases, make([]bool, len(cases)), liveReq, true)
+								if !ok || cases[freshIdx].Name != lv.want {
+									t.Fatalf("fresh PairCase(%q) = (%d %q, %v); want %q", lv.body, freshIdx, cases[freshIdx].Name, ok, lv.want)
+								}
+								seqIdx, ok := PairCase(cases, used, liveReq, true)
+								if !ok || cases[seqIdx].Name != lv.want {
+									t.Fatalf("seq PairCase(%q) = (%d %q, %v); want %q", lv.body, seqIdx, cases[seqIdx].Name, ok, lv.want)
+								}
+								used[seqIdx] = true
+							}
+						})
 					}
-				})
+				}
 			}
 		}
+	}
+}
+
+func TestQueryUnescapePrefixBoundsAndEscapes(t *testing.T) {
+	// Boundary test: a %26 escape straddling raw byte index limit-1 and limit.
+	raw := strings.Repeat("a", 15) + "%26" + "z+1%3D2"
+	full, err := url.QueryUnescape(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for limit := 0; limit <= len(full)+2; limit++ {
+		want := full
+		if len(want) > limit {
+			want = want[:limit]
+		}
+		if got := queryUnescapePrefix(raw, limit); got != want {
+			t.Fatalf("queryUnescapePrefix(limit=%d) = %q; want %q", limit, got, want)
+		}
+	}
+
+	// Fast path with no escapes returns exact bounded slice.
+	plain := "abcdef123456"
+	if got := queryUnescapePrefix(plain, 6); got != "abcdef" {
+		t.Fatalf("plain bounded = %q; want abcdef", got)
+	}
+
+	// Invalid escape within prefix falls back to raw prefix.
+	for _, bad := range []string{"a=50%&b=1", "a=1%2", "a=%zz&b=1"} {
+		if got := queryUnescapePrefix(bad, 64); got != bad {
+			t.Fatalf("invalid escape %q = %q; want raw fallback", bad, got)
+		}
+	}
+}
+
+func TestPairCaseMixedPrimaryTiePreservesRecordingOrder(t *testing.T) {
+	const exactCT = "application/x-www-form-urlencoded"
+	for _, hdrKey := range []string{"Content-Type", "content-type"} {
+		mkReq := func(body string, rawForm bool) *models.HTTPReq {
+			return &models.HTTPReq{
+				Method:      "POST",
+				URL:         "http://api/signup",
+				Header:      map[string]string{hdrKey: exactCT},
+				Body:        body,
+				RawFormBody: rawForm,
+			}
+		}
+
+		// Mixed set differing only in run-made values (clock/nonce): legacy
+		// recorded first, re-recorded second. Both tie on primary decoded
+		// words; recording order must decide, never ranking the marked case
+		// ahead of the legacy case by shared raw words.
+		t.Run(hdrKey+"/mixed run-made values tie goes by recording order", func(t *testing.T) {
+			cases := []ClientCase{
+				{Name: "old-1", Req: mkReq("n=111&op=x", false)},
+				{Name: "new-2", Req: mkReq("n=222&op=x", true)},
+			}
+			used := make([]bool, len(cases))
+			live1 := mkReq("n=333&op=x", true)
+			live2 := mkReq("n=444&op=x", true)
+			if i, ok := PairCase(cases, make([]bool, len(cases)), live1, true); !ok || cases[i].Name != "old-1" {
+				t.Fatalf("fresh live1 = (%d %q, %v); want old-1", i, cases[i].Name, ok)
+			}
+			i1, ok1 := PairCase(cases, used, live1, true)
+			if !ok1 || cases[i1].Name != "old-1" {
+				t.Fatalf("seq live1 = (%d %q, %v); want old-1", i1, cases[i1].Name, ok1)
+			}
+			used[i1] = true
+			i2, ok2 := PairCase(cases, used, live2, true)
+			if !ok2 || cases[i2].Name != "new-2" {
+				t.Fatalf("seq live2 = (%d %q, %v); want new-2", i2, cases[i2].Name, ok2)
+			}
+		})
+
+		// Mixed set with escaped field + run-made values: legacy holds decoded
+		// '@', re-recorded holds raw '%40'. Both tie on decoded words;
+		// recording order must decide so re-recorded never steals live1 by raw
+		// '%40' words that the legacy recording no longer holds.
+		t.Run(hdrKey+"/mixed escaped run-made values tie goes by recording order", func(t *testing.T) {
+			cases := []ClientCase{
+				{Name: "old-1", Req: mkReq("email=ann@example.com&n=111", false)},
+				{Name: "new-2", Req: mkReq("email=ann%40example.com&n=222", true)},
+			}
+			used := make([]bool, len(cases))
+			live1 := mkReq("email=ann%40example.com&n=333", true)
+			live2 := mkReq("email=ann%40example.com&n=444", true)
+			if i, ok := PairCase(cases, make([]bool, len(cases)), live1, true); !ok || cases[i].Name != "old-1" {
+				t.Fatalf("fresh live1 = (%d %q, %v); want old-1", i, cases[i].Name, ok)
+			}
+			i1, ok1 := PairCase(cases, used, live1, true)
+			if !ok1 || cases[i1].Name != "old-1" {
+				t.Fatalf("seq live1 = (%d %q, %v); want old-1", i1, cases[i1].Name, ok1)
+			}
+			used[i1] = true
+			i2, ok2 := PairCase(cases, used, live2, true)
+			if !ok2 || cases[i2].Name != "new-2" {
+				t.Fatalf("seq live2 = (%d %q, %v); want new-2", i2, cases[i2].Name, ok2)
+			}
+		})
+
+		// Mixed legacy "a=1&2" + single re-recorded "a=1%262": both decode to
+		// "a=1&2" and tie on primary score. Because the legacy recording is
+		// never eliminated by raw words it no longer holds, recording order
+		// decides for both fresh live "a=1%262" and fresh live "a=1&2".
+		t.Run(hdrKey+"/mixed legacy amp + new enc preserves recording order", func(t *testing.T) {
+			cases := []ClientCase{
+				{Name: "amp-old", Req: mkReq("a=1&2", false)},
+				{Name: "enc-new", Req: mkReq("a=1%262", true)},
+			}
+			used := make([]bool, len(cases))
+			liveAmp := mkReq("a=1&2", true)
+			liveEnc := mkReq("a=1%262", true)
+			if i, ok := PairCase(cases, make([]bool, len(cases)), liveEnc, true); !ok || cases[i].Name != "amp-old" {
+				t.Fatalf("fresh liveEnc = (%d %q, %v); want amp-old (recording order)", i, cases[i].Name, ok)
+			}
+			if i, ok := PairCase(cases, make([]bool, len(cases)), liveAmp, true); !ok || cases[i].Name != "amp-old" {
+				t.Fatalf("fresh liveAmp = (%d %q, %v); want amp-old", i, cases[i].Name, ok)
+			}
+			i1, ok1 := PairCase(cases, used, liveAmp, true)
+			if !ok1 || cases[i1].Name != "amp-old" {
+				t.Fatalf("seq liveAmp = (%d %q, %v); want amp-old", i1, cases[i1].Name, ok1)
+			}
+			used[i1] = true
+			i2, ok2 := PairCase(cases, used, liveEnc, true)
+			if !ok2 || cases[i2].Name != "enc-new" {
+				t.Fatalf("seq liveEnc = (%d %q, %v); want enc-new", i2, cases[i2].Name, ok2)
+			}
+		})
+
+		// Mixed 3-candidate tie with two marked candidates + one legacy
+		// candidate: raw-vs-raw still eliminates the strictly worse marked
+		// candidate (enc-new on live "a=1&2"), while never eliminating an
+		// unmarked legacy candidate ahead in recording order.
+		t.Run(hdrKey+"/mixed two marked + legacy eliminates worse marked without dropping legacy", func(t *testing.T) {
+			liveAmp := mkReq("a=1&2", true)
+			liveEnc := mkReq("a=1%262", true)
+
+			// Marked candidates before legacy: enc-new is dropped on live "a=1&2",
+			// so amp-new wins instead of enc-new.
+			markedFirst := []ClientCase{
+				{Name: "enc-new", Req: mkReq("a=1%262", true)},
+				{Name: "amp-new", Req: mkReq("a=1&2", true)},
+				{Name: "amp-old", Req: mkReq("a=1&2", false)},
+			}
+			if i, ok := PairCase(markedFirst, make([]bool, len(markedFirst)), liveAmp, true); !ok || markedFirst[i].Name != "amp-new" {
+				t.Fatalf("markedFirst liveAmp = (%d %q, %v); want amp-new", i, markedFirst[i].Name, ok)
+			}
+			if i, ok := PairCase(markedFirst, make([]bool, len(markedFirst)), liveEnc, true); !ok || markedFirst[i].Name != "enc-new" {
+				t.Fatalf("markedFirst liveEnc = (%d %q, %v); want enc-new", i, markedFirst[i].Name, ok)
+			}
+
+			// Legacy first before two marked candidates: legacy is never dropped
+			// by raw-vs-raw, so recording order still picks amp-old.
+			legacyFirst := []ClientCase{
+				{Name: "amp-old", Req: mkReq("a=1&2", false)},
+				{Name: "enc-new", Req: mkReq("a=1%262", true)},
+				{Name: "amp-new", Req: mkReq("a=1&2", true)},
+			}
+			if i, ok := PairCase(legacyFirst, make([]bool, len(legacyFirst)), liveAmp, true); !ok || legacyFirst[i].Name != "amp-old" {
+				t.Fatalf("legacyFirst liveAmp = (%d %q, %v); want amp-old", i, legacyFirst[i].Name, ok)
+			}
+			if i, ok := PairCase(legacyFirst, make([]bool, len(legacyFirst)), liveEnc, true); !ok || legacyFirst[i].Name != "amp-old" {
+				t.Fatalf("legacyFirst liveEnc = (%d %q, %v); want amp-old", i, legacyFirst[i].Name, ok)
+			}
+		})
 	}
 }
 

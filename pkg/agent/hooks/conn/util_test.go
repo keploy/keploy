@@ -417,6 +417,52 @@ func TestARecordingWithoutRepeatedHeadersGainsNothingOnDisk(t *testing.T) {
 	if bytes.Contains(onDisk, []byte("header_line_lengths")) {
 		t.Errorf("a recording without a repeated request header stores something new:\n%s", onDisk)
 	}
+	if bytes.Contains(onDisk, []byte("raw_form_body")) {
+		t.Errorf("a non-form recording stores raw_form_body:\n%s", onDisk)
+	}
+}
+
+func TestExactFormCaptureSetsRawFormBodyAndParameterizedOmitsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		ct       string
+		body     string
+		wantFlag bool
+	}{
+		{"exact form CT", "application/x-www-form-urlencoded", "a=1%262&b=x+y", true},
+		{"charset form CT", "application/x-www-form-urlencoded; charset=utf-8", "a=1%262&b=x+y", false},
+		{"json CT", "application/json", `{"a":"1%262"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := fmt.Sprintf("POST /submit HTTP/1.1\r\nHost: localhost:8080\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n%s",
+				tc.ct, len(tc.body), tc.body)
+			req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}
+			tcChan := make(chan *models.TestCase, 1)
+			Capture(context.Background(), zap.NewNop(), tcChan, req, resp, time.Now(), time.Now(), models.IncomingOptions{}, false, false, 8080)
+			got := <-tcChan
+			if got.HTTPReq.RawFormBody != tc.wantFlag {
+				t.Fatalf("RawFormBody = %v; want %v", got.HTTPReq.RawFormBody, tc.wantFlag)
+			}
+			if got.HTTPReq.Body != tc.body {
+				t.Fatalf("Body = %q; want %q", got.HTTPReq.Body, tc.body)
+			}
+			doc, err := testdb.EncodeTestcase(*got, zap.NewNop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			onDisk, err := yamlLib.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hasKey := bytes.Contains(onDisk, []byte("raw_form_body")); hasKey != tc.wantFlag {
+				t.Fatalf("YAML contains raw_form_body = %v; want %v:\n%s", hasKey, tc.wantFlag, onDisk)
+			}
+		})
+	}
 }
 
 // A multipart file part is captured into a temp file of the capturing process

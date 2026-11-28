@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // A CLIENT TEST'S OWN REQUESTS.
@@ -84,11 +83,16 @@ type caseCursor struct {
 // pairs with the one whose recording holds the most of live's words
 // (pairWords: of its URL, and of its body where body says keploy read it),
 // each counted once, and with the first of those in the recording's order.
-// For exact "application/x-www-form-urlencoded" non-JSON live requests (never
-// charset-parameterized CTs, which older builds already stored raw), each
-// candidate is also scored against url.QueryUnescape(live.Body) so legacy
-// pre-decoded recordings still pair, taking max(raw, decoded) with ties
-// preferring raw then recording order.
+// For exact "application/x-www-form-urlencoded" live requests (never
+// charset-parameterized CTs, which older builds already stored raw), every
+// candidate is scored in the legacy decoded space: a bounded 64 KiB prefix
+// of the live body and of each marked raw candidate (HTTPReq.RawFormBody)
+// is query-unescaped, while unmarked legacy candidates are read as stored.
+// When two or more tied candidates are marked RawFormBody, marked
+// candidates strictly outscored raw-vs-raw by another marked candidate are
+// eliminated (unmarked legacy candidates are never eliminated by raw words
+// they no longer hold), and the first remaining candidate in recording
+// order wins.
 // A word every request left holds tells none from another, and one none
 // holds (a value this run made: a name from its clock, an id) is no nearer
 // one than another. So requests that send the same words but for the values
@@ -117,40 +121,80 @@ func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool) 
 	case 1:
 		return left[0], true
 	}
-	// Score each recorded case against two views of the live request: its
-	// raw wire words, and (for an exact-CT, non-JSON form body) the legacy
-	// whole-body QueryUnescape view that older keploy recordings stored.
-	// Taking max(raw, decoded) per case—with ties preferring the raw view,
-	// then recording order—pairs legacy pre-decoded recordings while keeping
-	// stored-side pairWords plain and leaving charset-parameterized forms
-	// raw-only. Note that on exact CT, when QueryUnescape splits a raw token
-	// (such as %26 or +) into more words, a candidate holding those split
-	// words can outscore raw without a persisted format marker.
-	sent := map[string]bool{}
-	pairWords(live, body, func(w string) { sent[w] = true })
-	var dec map[string]bool
-	if body && isExactFormCT(live.Header) && !variables.IsJSONDoc(live.Body) {
-		if d, err := url.QueryUnescape(live.Body); err == nil && d != live.Body {
-			dl := *live
-			dl.Body = d
-			dec = map[string]bool{}
-			pairWords(&dl, body, func(w string) { dec[w] = true })
-		}
+	// Primary score: for exact-CT form live requests, compare in the legacy
+	// whole-body QueryUnescape space (decoding a bounded prefix of live and
+	// of any candidate marked RawFormBody, while taking unmarked legacy
+	// candidates as stored). For every other Content-Type, compare raw words.
+	exactForm := body && isExactFormCT(live.Header)
+	liveBody := live.Body
+	if exactForm {
+		liveBody = queryUnescapePrefix(live.Body, pairWordsBytes)
 	}
-	best, most, mostRaw := left[0], 0, 0
+	sent := map[string]bool{}
+	pairWordsBody(live, body, liveBody, func(w string) { sent[w] = true })
+
+	most := -1
+	var tied []int
 	for _, i := range left {
-		held, heldDec := map[string]bool{}, map[string]bool{}
-		pairWords(cases[i].Req, body, func(w string) {
+		req := cases[i].Req
+		bodyText := req.Body
+		if exactForm && req.RawFormBody {
+			bodyText = queryUnescapePrefix(req.Body, pairWordsBytes)
+		}
+		held := map[string]bool{}
+		pairWordsBody(req, body, bodyText, func(w string) {
 			if sent[w] {
 				held[w] = true
 			}
-			if dec[w] {
-				heldDec[w] = true
-			}
 		})
-		score := max(len(held), len(heldDec))
-		if score > most || score == most && len(held) > mostRaw {
-			best, most, mostRaw = i, score, len(held)
+		score := len(held)
+		if score > most {
+			most = score
+			tied = append(tied[:0], i)
+		} else if score == most {
+			tied = append(tied, i)
+		}
+	}
+	best := tied[0]
+	// When two or more tied exact-CT candidates are marked RawFormBody, drop
+	// any marked candidate strictly outscored raw-vs-raw by another marked
+	// candidate, then take the first remaining candidate in recording order.
+	// Unmarked legacy candidates are never dropped so they are never ranked
+	// below marked ones by raw words they no longer hold. Computed lazily
+	// only when a primary tie has at least two marked candidates.
+	if len(tied) > 1 && exactForm {
+		markedCount := 0
+		for _, i := range tied {
+			if cases[i].Req.RawFormBody {
+				markedCount++
+			}
+		}
+		if markedCount >= 2 {
+			sentRaw := map[string]bool{}
+			pairWords(live, body, func(w string) { sentRaw[w] = true })
+			rawScores := make([]int, len(tied))
+			bestMarkedRaw := -1
+			for k, i := range tied {
+				if !cases[i].Req.RawFormBody {
+					continue
+				}
+				heldRaw := map[string]bool{}
+				pairWords(cases[i].Req, body, func(w string) {
+					if sentRaw[w] {
+						heldRaw[w] = true
+					}
+				})
+				rawScores[k] = len(heldRaw)
+				if rawScores[k] > bestMarkedRaw {
+					bestMarkedRaw = rawScores[k]
+				}
+			}
+			for k, i := range tied {
+				if !cases[i].Req.RawFormBody || rawScores[k] == bestMarkedRaw {
+					best = i
+					break
+				}
+			}
 		}
 	}
 	return best, true
@@ -162,6 +206,62 @@ func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool) 
 func isExactFormCT(h map[string]string) bool {
 	return h["Content-Type"] == "application/x-www-form-urlencoded" ||
 		h["content-type"] == "application/x-www-form-urlencoded"
+}
+
+// queryUnescapePrefix decodes at most limit decoded bytes of s with the same
+// rules as url.QueryUnescape ('+' -> ' ', %XX -> byte) without decoding past
+// the pairWords window or splitting a %XX escape across the boundary. If an
+// invalid percent-escape appears in that prefix, it returns the raw prefix.
+func queryUnescapePrefix(s string, limit int) string {
+	if limit <= 0 || len(s) == 0 {
+		return ""
+	}
+	scan := min(len(s), limit)
+	hasEscape := false
+	for i := 0; i < scan; i++ {
+		if s[i] == '%' || s[i] == '+' {
+			hasEscape = true
+			break
+		}
+	}
+	if !hasEscape {
+		return s[:scan]
+	}
+	out := make([]byte, 0, scan)
+	for i := 0; i < len(s) && len(out) < limit; {
+		switch s[i] {
+		case '+':
+			out = append(out, ' ')
+			i++
+		case '%':
+			if i+2 >= len(s) {
+				return s[:scan]
+			}
+			hi, ok1 := unhex(s[i+1])
+			lo, ok2 := unhex(s[i+2])
+			if !ok1 || !ok2 {
+				return s[:scan]
+			}
+			out = append(out, hi<<4|lo)
+			i += 3
+		default:
+			out = append(out, s[i])
+			i++
+		}
+	}
+	return string(out)
+}
+
+func unhex(c byte) (byte, bool) {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0', true
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10, true
+	case 'A' <= c && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
 }
 
 // pairWordsBytes is the most of a request's body PairCase reads the words
@@ -182,30 +282,57 @@ const pairWordsBytes = 64 << 10
 // another run's value holds by chance, pairing the request with a
 // recording that is not its own.
 func pairWords(req *models.HTTPReq, body bool, each func(string)) {
-	words := func(s string) {
-		for _, w := range strings.FieldsFunc(s, func(r rune) bool { return r <= ' ' || strings.ContainsRune(pairWordEnds, r) }) {
-			each(w)
-		}
-	}
-	words(req.URL)
+	pairWordsBody(req, body, req.Body, each)
+}
+
+func pairWordsBody(req *models.HTTPReq, body bool, bodyText string, each func(string)) {
+	pairWordsIn(req.URL, each)
 	if !body {
 		return
 	}
-	text := req.Body
-	if len(text) > pairWordsBytes {
-		text = text[:pairWordsBytes]
+	if len(bodyText) > pairWordsBytes {
+		bodyText = bodyText[:pairWordsBytes]
 	}
-	words(text)
+	pairWordsIn(bodyText, each)
 	for _, f := range req.Form {
 		for _, v := range f.Values {
-			words(v)
+			pairWordsIn(v, each)
 		}
+	}
+}
+
+func pairWordsIn(s string, each func(string)) {
+	start := -1
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b < 128 && pairWordSep[b] {
+			if start >= 0 {
+				each(s[start:i])
+				start = -1
+			}
+		} else if start < 0 {
+			start = i
+		}
+	}
+	if start >= 0 {
+		each(s[start:])
 	}
 }
 
 // pairWordEnds are the marks, beside a space and a control byte, that end a
 // word of pairWords.
 const pairWordEnds = "\"'`,;&=?/{}[]()<>"
+
+var pairWordSep = func() [128]bool {
+	var t [128]bool
+	for b := 0; b <= ' '; b++ {
+		t[b] = true
+	}
+	for i := 0; i < len(pairWordEnds); i++ {
+		t[pairWordEnds[i]] = true
+	}
+	return t
+}()
 
 // IncomingRequest is the client test's request live, which reached the
 // application in record's full round, beside the one rec it pairs with in
