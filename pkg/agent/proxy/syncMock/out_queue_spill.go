@@ -28,10 +28,11 @@ type OutQueueSpill interface {
 	NewLane() OutQueueSpillLane
 
 	// RAMLimit returns the process-wide queued byte threshold at which the
-	// output queue begins spilling instead of growing in RAM. A quarter of
-	// queueBound is always reserved for spilled-item bookkeeping, so values
-	// <= 0 or above queueBound - queueBound/4 are clamped to
-	// queueBound - queueBound/4.
+	// output queue begins spilling instead of growing in RAM. A quarter of the
+	// smaller per-test bound (outQueueMaxBytes - outQueueSharedRoom) is always
+	// reserved for spilled-item bookkeeping so a shared/startup RAM head can
+	// never starve owned mocks' spill metadata; values <= 0 or above that cap
+	// are clamped to maxHead = (outQueueMaxBytes - outQueueSharedRoom) * 3 / 4.
 	RAMLimit() int64
 }
 
@@ -87,12 +88,18 @@ func spillRAMCap(bound, ramLimit int64) int64 {
 	return ramLimit
 }
 
-// spillItemMetaBaseBytes covers the compact spillItemMeta struct (~136 B) plus
-// slice growth slack per spilled mock. Metadata maps are interned per lane
-// (spillInternedMap) so repeating pod metadata costs ~0 B per additional mock.
+// spillItemMetaBaseBytes covers the compact spillItemMeta struct (128 B) plus
+// slice growth slack per spilled mock. Metadata maps (excluding per-connection
+// connID whenever it matches mock.ConnectionID or mock.ConnectionID is empty)
+// are interned per lane (spillInternedMap) so repeating pod metadata across
+// thousands of connections costs 0 B per additional mock.
+//
+// spillItemDoneBytes covers the production sendTaken done closure (~80 B) plus
+// its m.sending[sendID] map entry (~48 B) and map bucket slack so live heap
+// stays at or below processOutQueued on both send and noteTaken+sendTaken paths.
 const (
 	spillItemMetaBaseBytes int64 = 160
-	spillItemDoneBytes     int64 = 32
+	spillItemDoneBytes     int64 = 192
 	spillItemAsyncBase     int64 = 64
 	spillMapHeaderBytes    int64 = 256
 	// spillMapEntryBytes uses mockSize's 2*16+mapEntryOverhead (48 B) plus
@@ -103,14 +110,18 @@ const (
 )
 
 const (
-	spillFlagStartup  uint8 = 1 << 0
-	spillFlagUndeliv  uint8 = 1 << 1
-	spillFlagReusable uint8 = 1 << 2
+	spillFlagStartup        uint8 = 1 << 0
+	spillFlagUndeliv        uint8 = 1 << 1
+	spillFlagReusable       uint8 = 1 << 2
+	spillFlagHasMetaConnID  uint8 = 1 << 3
+	spillFlagConnIDFromMeta uint8 = 1 << 4
 )
 
+const spillMetaConnIDKey = "connID"
+
 // spillInternedMap holds one immutable cloned metadata map shared by all
-// spilled items on a lane that carry identical key/value pairs. Guarded by
-// lane.spillMu.
+// spilled items on a lane that carry identical internable key/value pairs.
+// Guarded by lane.spillMu.
 type spillInternedMap struct {
 	m      map[string]string
 	bytes  int64
@@ -137,6 +148,30 @@ type spillItemMeta struct {
 	metaBytes int64 // per-item bytes charged (excludes shared md.bytes)
 }
 
+// spillOmitMetaConnID reports whether mock.Spec.Metadata["connID"] can be
+// folded into spillItemMeta.connID (zero extra struct fields) rather than
+// fragmenting the per-lane interned metadata pool across connections.
+func spillOmitMetaConnID(mock *models.Mock) bool {
+	if mock == nil || mock.Spec.Metadata == nil {
+		return false
+	}
+	v, ok := mock.Spec.Metadata[spillMetaConnIDKey]
+	if !ok {
+		return false
+	}
+	return mock.ConnectionID == "" || mock.ConnectionID == v
+}
+
+func spillMetadataInternedCount(md map[string]string, omitConnID bool) int {
+	n := len(md)
+	if omitConnID {
+		if _, has := md[spillMetaConnIDKey]; has {
+			n--
+		}
+	}
+	return n
+}
+
 func spillMetadataMapBytes(md map[string]string) int64 {
 	if len(md) == 0 {
 		return 0
@@ -148,10 +183,46 @@ func spillMetadataMapBytes(md map[string]string) int64 {
 	return n
 }
 
-func spillMetadataKey(md map[string]string) string {
-	keys := make([]string, 0, len(md))
+func spillMetadataMapBytesOpt(md map[string]string, omitConnID bool) int64 {
+	if !omitConnID {
+		return spillMetadataMapBytes(md)
+	}
+	if spillMetadataInternedCount(md, true) == 0 {
+		return 0
+	}
+	n := spillMapHeaderBytes
+	for k, v := range md {
+		if k == spillMetaConnIDKey {
+			continue
+		}
+		n += int64(len(k)+len(v)) + spillMapEntryBytes
+	}
+	return n
+}
+
+func cloneSpillMetadata(md map[string]string, omitConnID bool) map[string]string {
+	cnt := spillMetadataInternedCount(md, omitConnID)
+	if cnt == 0 {
+		return nil
+	}
+	out := make(map[string]string, cnt)
+	for k, v := range md {
+		if omitConnID && k == spillMetaConnIDKey {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func spillMetadataKey(md map[string]string, omitConnID bool) string {
+	cnt := spillMetadataInternedCount(md, omitConnID)
+	keys := make([]string, 0, cnt)
 	total := 0
 	for k, v := range md {
+		if omitConnID && k == spillMetaConnIDKey {
+			continue
+		}
 		keys = append(keys, k)
 		total += len(k) + len(v) + 16
 	}
@@ -181,7 +252,11 @@ func spillItemBaseRamBytes(mock *models.Mock, owner string, done func(delivered 
 		n += spillItemDoneBytes
 	}
 	if mock != nil {
-		n += int64(len(mock.Name) + len(mock.ConnectionID) + len(mock.Kind))
+		connID := mock.ConnectionID
+		if connID == "" && spillOmitMetaConnID(mock) {
+			connID = mock.Spec.Metadata[spillMetaConnIDKey]
+		}
+		n += int64(len(mock.Name) + len(connID) + len(mock.Kind))
 		if mock.Spec.Async != nil {
 			n += spillItemAsyncBase + int64(len(mock.Spec.Async.Lane)+len(mock.Spec.Async.AnchorAfter))
 		}
@@ -189,9 +264,11 @@ func spillItemBaseRamBytes(mock *models.Mock, owner string, done func(delivered 
 	return n
 }
 
-func (im spillItemMeta) isStartup() bool { return im.flags&spillFlagStartup != 0 }
-func (im spillItemMeta) undeliv() bool   { return im.flags&spillFlagUndeliv != 0 }
-func (im spillItemMeta) reusable() bool  { return im.flags&spillFlagReusable != 0 }
+func (im spillItemMeta) isStartup() bool      { return im.flags&spillFlagStartup != 0 }
+func (im spillItemMeta) undeliv() bool        { return im.flags&spillFlagUndeliv != 0 }
+func (im spillItemMeta) reusable() bool       { return im.flags&spillFlagReusable != 0 }
+func (im spillItemMeta) hasMetaConnID() bool  { return im.flags&spillFlagHasMetaConnID != 0 }
+func (im spillItemMeta) connIDFromMeta() bool { return im.flags&spillFlagConnIDFromMeta != 0 }
 
 func buildSpillItemMeta(mock *models.Mock, owner string, done func(delivered bool, epoch uint64), md *spillInternedMap, itemBytes int64) spillItemMeta {
 	meta := spillItemMeta{
@@ -204,6 +281,13 @@ func buildSpillItemMeta(mock *models.Mock, owner string, done func(delivered boo
 		meta.kind = mock.Kind
 		meta.name = mock.Name
 		meta.connID = mock.ConnectionID
+		if spillOmitMetaConnID(mock) {
+			meta.flags |= spillFlagHasMetaConnID
+			if meta.connID == "" {
+				meta.connID = mock.Spec.Metadata[spillMetaConnIDKey]
+				meta.flags |= spillFlagConnIDFromMeta
+			}
+		}
 		meta.reqTime = mock.Spec.ReqTimestampMock
 		meta.lifetime = mock.TestModeInfo.Lifetime
 		if mock.TestModeInfo.IsStartup {
@@ -228,15 +312,25 @@ func (im spillItemMeta) stubMock() *models.Mock {
 	if im.md != nil && len(im.md.m) > 0 {
 		md = maps.Clone(im.md.m)
 	}
+	if im.hasMetaConnID() {
+		if md == nil {
+			md = make(map[string]string, 1)
+		}
+		md[spillMetaConnIDKey] = im.connID
+	}
 	var async *models.AsyncMeta
 	if im.async != nil {
 		a := *im.async
 		async = &a
 	}
+	connID := im.connID
+	if im.connIDFromMeta() {
+		connID = ""
+	}
 	m := &models.Mock{
 		Kind:         im.kind,
 		Name:         im.name,
-		ConnectionID: im.connID,
+		ConnectionID: connID,
 		Spec: models.MockSpec{
 			Metadata:         md,
 			ReqTimestampMock: im.reqTime,

@@ -3,7 +3,6 @@ package manager
 import (
 	"container/heap"
 	"context"
-	"maps"
 	"math/rand"
 	"slices"
 	"sort"
@@ -1716,27 +1715,28 @@ func (l *outLane) spillWaitChLocked() <-chan struct{} {
 	return l.spillWait
 }
 
-// acquireSpillMapLocked returns an interned (or unpooled) copy of md under
-// lane.spillMu, charging its bytes to processOutQueued and lane.spillMetaBytes
-// on a pool miss only if they fit within bound. Returns (nil, true) for empty
-// metadata, and (nil, false) if a new map would exceed bound.
-func (l *outLane) acquireSpillMapLocked(md map[string]string, bound int64) (*spillInternedMap, bool) {
-	if len(md) == 0 {
+// acquireSpillMapLocked returns an interned (or unpooled) copy of md (without
+// per-connection connID, which lives on spillItemMeta) under lane.spillMu,
+// charging its bytes to processOutQueued and lane.spillMetaBytes on a pool
+// miss only if they fit within bound. Returns (nil, true) when no internable
+// keys remain, and (nil, false) if a new map would exceed bound.
+func (l *outLane) acquireSpillMapLocked(md map[string]string, omitConnID bool, bound int64) (*spillInternedMap, bool) {
+	if spillMetadataInternedCount(md, omitConnID) == 0 {
 		return nil, true
 	}
-	key := spillMetadataKey(md)
+	key := spillMetadataKey(md, omitConnID)
 	if existing, ok := l.metaPool[key]; ok {
 		existing.refs++
 		return existing, true
 	}
-	mapBytes := spillMetadataMapBytes(md)
+	mapBytes := spillMetadataMapBytesOpt(md, omitConnID)
 	if processOutQueued.Load()+mapBytes > bound {
 		return nil, false
 	}
 	processOutQueued.Add(mapBytes)
 	l.spillMetaBytes += mapBytes
 	entry := &spillInternedMap{
-		m:     maps.Clone(md),
+		m:     cloneSpillMetadata(md, omitConnID),
 		bytes: mapBytes,
 		refs:  1,
 	}
@@ -1902,7 +1902,11 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 	spillFactory := m.activeOutSpill()
 	ramCap := bound
 	if spillFactory != nil {
-		ramCap = spillRAMCap(bound, spillFactory.RAMLimit())
+		// Derive the RAM head cap from the smaller per-test bound for EVERY
+		// mock so a shared/startup RAM head can never consume the owned mocks'
+		// metadata reserve while keeping metadata checked against each mock's
+		// own queueBound.
+		ramCap = spillRAMCap(outQueueMaxBytes-outQueueSharedRoom, spillFactory.RAMLimit())
 	}
 	dropFullLocked := func() MockDrop {
 		epoch := lane.epoch
@@ -1954,7 +1958,7 @@ func (m *SyncMockManager) sendFor(mock *models.Mock, owner string, done func(del
 
 				lane.spillMu.Lock()
 				spilled := false
-				if im, ok := lane.acquireSpillMapLocked(mock.Spec.Metadata, bound); ok {
+				if im, ok := lane.acquireSpillMapLocked(mock.Spec.Metadata, spillOmitMetaConnID(mock), bound); ok {
 					meta := buildSpillItemMeta(mock, owner, done, im, itemBytes)
 					if lane.spill == nil {
 						lane.spill = spillFactory.NewLane()
@@ -2130,6 +2134,10 @@ func (m *SyncMockManager) drainOutQueue(lane *outLane, closing <-chan struct{}) 
 				lane.spill = nil
 				lane.spillMeta = nil
 				lane.metaPool = nil
+				if lane.spillMetaBytes > 0 {
+					processOutQueued.Add(-lane.spillMetaBytes)
+					lane.spillMetaBytes = 0
+				}
 			}
 			lane.spillMu.Unlock()
 
