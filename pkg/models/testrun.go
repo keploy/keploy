@@ -1473,7 +1473,7 @@ type Result struct {
 	HeadersResult  []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
 	BodyResult     []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
 	BodySizeResult IntResult      `json:"body_size_result,omitempty" bson:"body_size_result,omitempty" yaml:"body_size_result,omitempty"` // used when body was skipped (>1MB)
-	// GrpcDecode says how a failed gRPC test's bodies are shown: which schema
+	// GrpcDecode says how a gRPC test's bodies are shown: which schema
 	// decoded each side, or why a side is shown as recorded. Display only:
 	// the verdict is always the field-number comparison. Nil for HTTP and for
 	// a run given no protos at all.
@@ -1579,6 +1579,11 @@ type IntResult struct {
 	Normal   bool `json:"normal" bson:"normal" yaml:"normal"`
 	Expected int  `json:"expected" bson:"expected" yaml:"expected"`
 	Actual   int  `json:"actual" bson:"actual" yaml:"actual"`
+	// ExpectedText is what the test's failed status assertions asked for
+	// ("201", "one of 200, 201", "4xx", an unreadable value; several joined by
+	// "; "): a report shows it as the expected status. Expected is always the
+	// recorded status, which readers take it for.
+	ExpectedText string `json:"expected_text,omitempty" bson:"expected_text,omitempty" yaml:"expected_text,omitempty"`
 }
 
 type HeaderResult struct {
@@ -1597,6 +1602,11 @@ type BodyResult struct {
 	Type     BodyType `json:"type" bson:"type" yaml:"type"`
 	Expected string   `json:"expected" bson:"expected" yaml:"expected"`
 	Actual   string   `json:"actual" bson:"actual" yaml:"actual"`
+	// NotCompared marks a row that is not a comparison of the bodies: a
+	// gRPC test case's assertions replaced the comparison, and this row is
+	// their verdict. A learner of noise learns nothing from it. In-process
+	// only.
+	NotCompared bool `json:"-" bson:"-" yaml:"-"`
 }
 
 type TestStatus string
@@ -1627,15 +1637,17 @@ type TeachingWindow struct {
 	At   time.Time `json:"at" yaml:"at"`
 }
 
-// GrpcDecodeInfo describes the decoded view of a failed gRPC test.
+// GrpcDecodeInfo describes the decoded view of a gRPC test's bodies.
 type GrpcDecodeInfo struct {
 	// Expected and Actual name the schema each side was decoded with:
 	// "release:<image ref>" (uploaded for that release), "local" (the run's
 	// --proto-dir), or "" when that side is shown as recorded.
 	Expected string `json:"expected,omitempty" bson:"expected,omitempty" yaml:"expected,omitempty"`
 	Actual   string `json:"actual,omitempty" bson:"actual,omitempty" yaml:"actual,omitempty"`
-	// ExpectedJSON and ActualJSON are the first differing message of each
-	// side with field names (MessageIndex says which message of a stream).
+	// ExpectedJSON and ActualJSON are one message of each side with field
+	// names: the first differing one, else (a passed test, one that failed on
+	// its status, headers or message count, or one whose assertions replaced
+	// the comparison) the first. MessageIndex says which message of a stream.
 	// Display only; BodyResult keeps the recorded protoscope the verdict read.
 	ExpectedJSON string `json:"expected_json,omitempty" bson:"expected_json,omitempty" yaml:"expected_json,omitempty"`
 	ActualJSON   string `json:"actual_json,omitempty" bson:"actual_json,omitempty" yaml:"actual_json,omitempty"`

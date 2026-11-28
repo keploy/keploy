@@ -767,6 +767,12 @@ var strconvAtoi234 = strconv.Atoi
 
 func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
 	pass := true
+	// statusFailed: a status assertion failed. Only then is the status a
+	// difference: a test case that failed on a header alone did not judge it.
+	statusFailed := false
+	// asked is what each failed status assertion asked for (IntResult.
+	// ExpectedText); Expected stays the recorded status.
+	var asked []string
 	res := &models.Result{
 		StatusCode: models.IntResult{
 			Normal:   false,
@@ -786,10 +792,13 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 		case models.StatusCode:
 			expected, err := toInt(value)
 			if err != nil || expected != actualResponse.StatusCode {
-				pass = false
+				pass, statusFailed = false, true
+				if err == nil {
+					asked = append(asked, fmtSprintf234("%d", expected))
+				} else {
+					asked = append(asked, "an unreadable status_code assertion")
+				}
 				logger.Error("status_code assertion failed", zap.Int("expected", expected), zap.Int("actual", actualResponse.StatusCode))
-			} else {
-				res.StatusCode.Normal = true
 			}
 
 		case models.StatusCodeClass:
@@ -807,7 +816,12 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 			actualClass := fmtSprintf234("%dxx", actualResponse.StatusCode/100)
 			if classStr != actualClass {
-				pass = false
+				pass, statusFailed = false, true
+				if classStr == "" {
+					asked = append(asked, "an empty status_code_class assertion")
+				} else {
+					asked = append(asked, classStr)
+				}
 				logger.Error("status_code_class assertion failed", zap.String("expected", class), zap.String("actual", actualClass))
 			}
 
@@ -820,7 +834,8 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				}
 			}
 			if len(ints) == 0 {
-				pass = false
+				pass, statusFailed = false, true
+				asked = append(asked, "an unreadable status_code_in assertion")
 				logUnreadableAssertion(logger, assertionName, value, "a list of status codes")
 				continue
 			}
@@ -832,7 +847,12 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				}
 			}
 			if !found {
-				pass = false
+				pass, statusFailed = false, true
+				parts := make([]string, len(ints))
+				for i, c := range ints {
+					parts[i] = fmtSprintf234("%d", c)
+				}
+				asked = append(asked, "one of "+strings.Join(parts, ", "))
 				logger.Error("status_code_in assertion failed", zap.Ints("expectedCodes", ints), zap.Int("actual", actualResponse.StatusCode))
 			}
 
@@ -992,7 +1012,13 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 	if pass {
 		res.StatusCode.Normal = true
 		res.BodyResult[0].Normal = true
+	} else {
+		// Exactly when a status assertion failed, whatever order the
+		// assertions ran in (a map's).
+		res.StatusCode.Normal = !statusFailed
 	}
+	sort.Strings(asked)
+	res.StatusCode.ExpectedText = strings.Join(asked, "; ")
 
 	return pass, res
 }

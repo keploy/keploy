@@ -519,9 +519,13 @@ func buildFailure(t models.TestResult) *junitFailure {
 func failureOf(t models.TestResult, proven bool) *junitFailure {
 	var parts []string
 
-	if t.Kind == models.HTTP && !t.Result.StatusCode.Normal {
-		parts = append(parts, fmt.Sprintf("status: expected %d, got %d",
-			t.Result.StatusCode.Expected, t.Result.StatusCode.Actual))
+	if statusChangeShown(t) && (t.Kind == models.HTTP || t.Kind == models.GRPC_EXPORT) {
+		name := "status"
+		if t.Kind == models.GRPC_EXPORT {
+			name = "grpc-status"
+		}
+		expected, actual := statusTexts(t)
+		parts = append(parts, fmt.Sprintf("%s: expected %s, got %s", name, expected, actual))
 	}
 
 	for _, h := range t.Result.HeadersResult {

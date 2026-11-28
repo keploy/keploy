@@ -1587,11 +1587,10 @@ func notJudgedLines(test models.TestResult) string {
 
 // addStatusCodeDiffs adds status code differences to the diff printer
 func (r *Report) addStatusCodeDiffs(test models.TestResult, logDiffs *matcherUtils.DiffsPrinter) error {
-	if !test.Result.StatusCode.Normal {
-		logDiffs.PushStatusDiff(
-			fmt.Sprint(test.Result.StatusCode.Expected),
-			fmt.Sprint(test.Result.StatusCode.Actual),
-		)
+	if statusChangeShown(test) {
+		// As the compact table and JUnit show it (statusTexts).
+		expected, actual := statusTexts(test)
+		logDiffs.PushStatusDiff(expected, actual)
 	}
 	return nil
 }
