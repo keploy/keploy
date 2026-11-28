@@ -3057,7 +3057,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// A call the agent answered with another call's recording was served:
 	// no miss, counted apart (replayCounts.asAnother).
 	misses, asAnother := splitAnsweredAsAnother(misses)
-	preTestFailed := detail.runnerFailed && len(detail.windows) == 0
+	preTestFailed := isPreTestSetupFailure(detail.runnerFailed, len(detail.windows), len(consumed), misses, os.Getenv("GOPROXY"))
 	misses = rewritePreTestToolchainMisses(misses, preTestFailed, os.Getenv("GOPROXY"))
 	summary := []zap.Field{zap.Int("loaded", loaded)}
 	if consumedErr != nil {

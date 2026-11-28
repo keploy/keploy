@@ -127,3 +127,71 @@ func TestRewritePreTestToolchainMisses(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPreTestSetupFailureRequiresPositiveEvidence(t *testing.T) {
+	registryMiss := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A proxy.golang.org."}
+	appMiss := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A api.example.com."}
+	customProxyMiss := models.UnmatchedCall{Protocol: "DNS", ActualSummary: "A goproxy.internal.corp."}
+
+	cases := []struct {
+		name         string
+		runnerFailed bool
+		windows      int
+		consumed     int
+		misses       []models.UnmatchedCall
+		goproxy      string
+		want         bool
+	}{
+		{
+			name:         "no windows, no consumed, toolchain registry miss is setup failure",
+			runnerFailed: true,
+			misses:       []models.UnmatchedCall{registryMiss},
+			want:         true,
+		},
+		{
+			name:         "no windows, no consumed, custom GOPROXY miss is setup failure",
+			runnerFailed: true,
+			misses:       []models.UnmatchedCall{customProxyMiss},
+			goproxy:      "https://goproxy.internal.corp|direct",
+			want:         true,
+		},
+		{
+			name:         "windows > 0 with toolchain registry miss is a test failure, not setup failure",
+			runnerFailed: true,
+			windows:      1,
+			misses:       []models.UnmatchedCall{registryMiss},
+			want:         false,
+		},
+		{
+			name:         "no windows but consumed > 0 means tests ran and failed",
+			runnerFailed: true,
+			consumed:     1,
+			misses:       []models.UnmatchedCall{registryMiss},
+			want:         false,
+		},
+		{
+			name:         "no windows, no consumed, non-registry app DNS miss stays a user test failure",
+			runnerFailed: true,
+			misses:       []models.UnmatchedCall{appMiss},
+			want:         false,
+		},
+		{
+			name:         "no windows, no misses (ordinary assertion failure) is not setup failure",
+			runnerFailed: true,
+			want:         false,
+		},
+		{
+			name:         "runner succeeded is never setup failure",
+			runnerFailed: false,
+			misses:       []models.UnmatchedCall{registryMiss},
+			want:         false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPreTestSetupFailure(tc.runnerFailed, tc.windows, tc.consumed, tc.misses, tc.goproxy); got != tc.want {
+				t.Fatalf("isPreTestSetupFailure() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

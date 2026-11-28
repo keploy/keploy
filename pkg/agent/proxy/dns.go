@@ -828,7 +828,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				zap.String("protocol", "DNS"),
 				zap.String("query", p.dnsName(question.Name)),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
-				zap.String("hint", "DNS mocks may be missing. Re-record to capture DNS queries."),
+				zap.String("hint", "Replay isolation refused this unrecorded DNS lookup. If the test needs it, re-record with 'keploy mock record' to capture the DNS query."),
 			)
 			missed := time.Now()
 			report := &models.MockMismatchReport{
@@ -838,7 +838,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				// The query's type names the call; its name is the
 				// value it asked for.
 				Command:   dns.TypeToString[question.Qtype],
-				NextSteps: "DNS mocks may be missing. Re-record to capture DNS queries.",
+				NextSteps: "Replay isolation refused this unrecorded DNS lookup. If the test needs it, re-record with 'keploy mock record' to capture the DNS query.",
 				// The tag the lines above name the question's name by,
 				// for the console and the report to print beside the
 				// question whole.

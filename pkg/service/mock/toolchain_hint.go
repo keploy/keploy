@@ -49,6 +49,35 @@ var toolchainRegistries = []toolchainRegistry{
 
 const genericPreTestDNSHint = "A DNS lookup failed before any test began (likely a build or dependency fetch under replay isolation; re-recording will not fix a build-time fetch). Pre-fetch dependencies outside replay before running 'keploy mock replay', then replay again."
 
+// isPreTestSetupFailure reports positive evidence that a failing replay exited
+// during pre-test build/dependency setup rather than inside a user's own test.
+// Requiring zero observed test windows, zero consumed mocks, AND a missed call
+// targeting a build/package-manager registry ensures failing default-mode tests
+// (which have no SDK windows) are still metered as user faults and keep their
+// normal miss advice.
+func isPreTestSetupFailure(runnerFailed bool, windowsCount, consumedCount int, misses []models.UnmatchedCall, goproxy string) bool {
+	if !runnerFailed || windowsCount > 0 || consumedCount > 0 || len(misses) == 0 {
+		return false
+	}
+	customGoProxies := parseCustomGoProxies(goproxy)
+	for _, miss := range misses {
+		if toolchainRegistryHint(miss, customGoProxies) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCustomGoProxies(goproxy string) []string {
+	var customGoProxies []string
+	for _, p := range strings.FieldsFunc(goproxy, func(r rune) bool { return r == ',' || r == '|' }) {
+		if u, err := url.Parse(strings.TrimSpace(p)); err == nil && u.Hostname() != "" {
+			customGoProxies = append(customGoProxies, strings.ToLower(u.Hostname()))
+		}
+	}
+	return customGoProxies
+}
+
 // rewritePreTestToolchainMisses replaces misleading "Re-record to capture DNS
 // queries" or HTTP "re-record the mock set" advice when the test command failed
 // before any test began and missed a build/registry lookup.
@@ -56,12 +85,7 @@ func rewritePreTestToolchainMisses(misses []models.UnmatchedCall, preTestFailed 
 	if !preTestFailed || len(misses) == 0 {
 		return misses
 	}
-	var customGoProxies []string
-	for _, p := range strings.FieldsFunc(goproxy, func(r rune) bool { return r == ',' || r == '|' }) {
-		if u, err := url.Parse(strings.TrimSpace(p)); err == nil && u.Hostname() != "" {
-			customGoProxies = append(customGoProxies, strings.ToLower(u.Hostname()))
-		}
-	}
+	customGoProxies := parseCustomGoProxies(goproxy)
 	out := make([]models.UnmatchedCall, len(misses))
 	for i, miss := range misses {
 		hint := preTestMissHint(miss, customGoProxies)
@@ -78,7 +102,7 @@ func rewritePreTestToolchainMisses(misses []models.UnmatchedCall, preTestFailed 
 	return out
 }
 
-func preTestMissHint(miss models.UnmatchedCall, customGoProxies []string) string {
+func toolchainRegistryHint(miss models.UnmatchedCall, customGoProxies []string) string {
 	var parts []string
 	parts = append(parts, miss.ActualSummary, miss.Destination, miss.Operation)
 	if miss.Whole != nil {
@@ -96,6 +120,13 @@ func preTestMissHint(miss models.UnmatchedCall, customGoProxies []string) string
 				return reg.hint
 			}
 		}
+	}
+	return ""
+}
+
+func preTestMissHint(miss models.UnmatchedCall, customGoProxies []string) string {
+	if hint := toolchainRegistryHint(miss, customGoProxies); hint != "" {
+		return hint
 	}
 	if strings.EqualFold(miss.Protocol, "DNS") {
 		return genericPreTestDNSHint
