@@ -134,3 +134,67 @@ func TestExportAllUnconvertibleFolderSerializesEmptyArray(t *testing.T) {
 		t.Fatalf("want 0 items, got %v", itemNames(t, items))
 	}
 }
+
+func TestExportDeduplicatesIdenticalRequestsWithHeaders(t *testing.T) {
+	ctx := context.Background()
+	reqHeaders := map[string]string{
+		"X-Request-Id":  "req-1",
+		"Authorization": "Bearer token",
+		"Accept":        "application/json",
+		"Content-Type":  "application/json",
+	}
+	respHeaders := map[string]string{
+		"X-Trace":       "trace-1",
+		"Cache-Control": "no-store",
+		"Content-Type":  "application/json",
+		"Vary":          "Origin",
+	}
+
+	for run := 0; run < 5; run++ {
+		base := t.TempDir()
+		t.Chdir(base)
+		db := testdb.New(zap.NewNop(), filepath.Join(base, "keploy"))
+		for i := 1; i <= 2; i++ {
+			tc := &models.TestCase{
+				Version: models.GetVersion(),
+				Kind:    models.HTTP,
+				Name:    fmt.Sprintf("test-%02d", i),
+				HTTPReq: models.HTTPReq{
+					Method: "GET",
+					URL:    "http://127.0.0.1:9/alpha",
+					Header: reqHeaders,
+				},
+				HTTPResp: models.HTTPResp{
+					StatusCode: 200,
+					Header:     respHeaders,
+					Body:       "ok",
+				},
+			}
+			if err := db.InsertTestCase(ctx, tc, "set", false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := Export(ctx, zap.NewNop()); err != nil {
+			t.Fatal(err)
+		}
+		out, err := os.ReadFile(filepath.Join(base, "output.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var coll struct {
+			Item []struct {
+				Name string        `json:"name"`
+				Item []interface{} `json:"item"`
+			} `json:"item"`
+		}
+		if err := json.Unmarshal(out, &coll); err != nil {
+			t.Fatalf("output.json is not JSON: %v", err)
+		}
+		if len(coll.Item) != 1 {
+			t.Fatalf("run %d: want one folder, got %d", run, len(coll.Item))
+		}
+		if len(coll.Item[0].Item) != 1 {
+			t.Fatalf("run %d: identical requests with headers were not deduplicated: got %d items, want 1", run, len(coll.Item[0].Item))
+		}
+	}
+}

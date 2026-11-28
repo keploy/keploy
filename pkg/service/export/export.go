@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -46,10 +48,10 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 	}
 	request.Method = string(http.Request.Method)
 
-	for key, header := range http.Request.Header {
+	for _, key := range slices.Sorted(maps.Keys(http.Request.Header)) {
 		request.Header = append(request.Header, map[string]interface{}{
 			"key":   key,
-			"value": header,
+			"value": http.Request.Header[key],
 		})
 	}
 
@@ -78,10 +80,10 @@ func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPS
 	}
 
 	// Extract Response Headers
-	for key, header := range http.Response.Header {
+	for _, key := range slices.Sorted(maps.Keys(http.Response.Header)) {
 		response.Header = append(response.Header, map[string]string{
 			"key":   key,
-			"value": header,
+			"value": http.Response.Header[key],
 		})
 	}
 
