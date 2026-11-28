@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -28,9 +29,9 @@ import (
 // test that reaches a cold worker process is answered whichever test
 // recorded the call.
 //
-// Kind is the mock's kind (Http, Http2, MySQL, PostgresV3, Redis, or any other
-// kind for a destination-only rule), and Match its keys, all of which must
-// hold:
+// Kind is the mock's kind (Http, Http2, MySQL, PostgresV3, Redis, Mongo, or
+// any other kind for a destination-only rule), and Match its keys, all of which
+// must hold:
 //
 //   - every kind: "destination", a glob (path.Match) on the host:port the
 //     call's connection reached (the mock's destAddr).
@@ -42,12 +43,22 @@ import (
 //   - PostgresV3: "query", a regex on the mock's normalized statement.
 //   - Redis: "command" (case-insensitive) and "key", a regex on its first
 //     argument; every command the mock records must match.
-//   - Http, Http2, MySQL, Redis: "response", an optional regex on what the
-//     call answered (the HTTP body; the MySQL result packets as JSON, column
-//     names and values included, so a quote or backslash in a value reads
-//     escaped, \" and \\, and bytes that are not UTF-8 read as U+FFFD; the
-//     Redis reply), to name one of a call's copies (the one carrying a new
-//     key, say). Only a user's rule holds it: a rule derived from a mock
+//   - Mongo: "db" (exact database name), "command" (case-insensitive command
+//     name, e.g. findAndModify, update, find; explicitly naming "aggregate"
+//     also matches $out/$merge/$changeStream pipelines), and "collection"
+//     (exact collection name); every request the mock records must match. A
+//     rule with any of these keys or "response" but no "command" marks reads
+//     only
+//     (find, count, distinct, getMore, an aggregate with no $out, $merge or
+//     $changeStream stage): a write, DDL or admin command is marked only by a
+//     rule whose "command" names it.
+//   - Http, Http2, MySQL, Redis, Mongo: "response", an optional regex on what
+//     the call answered (the HTTP body; the MySQL result packets as JSON,
+//     column names and values included, so a quote or backslash in a value
+//     reads escaped, \" and \\, and bytes that are not UTF-8 read as U+FFFD;
+//     the Redis reply; the Mongo OP_MSG sections / OP_REPLY documents), to name
+//     one of a call's copies (the one carrying a new key, or a no-op poll
+//     reply, say). Only a user's rule holds it: a rule derived from a mock
 //     (SuggestWorkerMockRule) never does.
 //
 // Regexes are RE2 (linear time) and unanchored: a rule anchors with ^ and $.
@@ -57,6 +68,13 @@ type WorkerMockRule struct {
 	ID    string            `json:"id,omitempty" yaml:"id,omitempty" mapstructure:"id"`
 	Kind  string            `json:"kind" yaml:"kind" mapstructure:"kind"`
 	Match map[string]string `json:"match" yaml:"match" mapstructure:"match"`
+	// TimeFields optionally declares Mongo document field names (or dot paths
+	// such as "meta.cutoff") whose values are timestamps or clock cutoffs.
+	// Declared fields are normalized in the call key even when a cutoff sits
+	// further from the call's request time than mongoClockSlack (for example a
+	// multi-year retention sweep), while undeclared integer fields are only
+	// treated as clock reads near the call's own request time.
+	TimeFields []string `json:"timeFields,omitempty" yaml:"timeFields,omitempty" mapstructure:"timeFields"`
 	// Note says why the rule exists, for whoever reads it next.
 	Note string `json:"note,omitempty" yaml:"note,omitempty" mapstructure:"note"`
 	// Source, CreatedBy and CreatedAt say who added the rule and how (ui, cli,
@@ -68,10 +86,12 @@ type WorkerMockRule struct {
 
 // Limits on a rule set: rules per application, and a regex's length.
 const (
-	MaxWorkerMockRules     = 50
-	maxWorkerRuleRegex     = 512
-	workerRuleIDPattern    = `^[a-z0-9][a-z0-9-]{0,63}$`
-	workerRuleDerivedIDLen = 12
+	MaxWorkerMockRules        = 50
+	maxWorkerRuleRegex        = 512
+	maxWorkerRuleTimeFields   = 32
+	maxWorkerRuleTimeFieldLen = 128
+	workerRuleIDPattern       = `^[a-z0-9][a-z0-9-]{0,63}$`
+	workerRuleDerivedIDLen    = 12
 )
 
 var workerRuleID = regexp.MustCompile(workerRuleIDPattern)
@@ -84,6 +104,7 @@ var workerRuleKeys = map[Kind][]string{
 	MySQL:      {"query", "response"},
 	PostgresV3: {"query"},
 	REDIS:      {"command", "key", "response"},
+	Mongo:      {"db", "command", "collection", "response"},
 }
 
 // workerRuleRegexKeys are the keys whose values are regexes.
@@ -209,7 +230,44 @@ func (r WorkerMockRule) Validate() []string {
 			problems = append(problems, "every match key of it matches everything")
 		}
 	}
+	if len(r.TimeFields) > 0 {
+		if Kind(r.Kind) != Mongo {
+			problems = append(problems, fmt.Sprintf("timeFields is only supported for Mongo rules, not %s", r.Kind))
+		}
+		if len(r.TimeFields) > maxWorkerRuleTimeFields {
+			problems = append(problems, fmt.Sprintf("timeFields has %d entries; at most %d are allowed", len(r.TimeFields), maxWorkerRuleTimeFields))
+		}
+		for _, tf := range r.TimeFields {
+			if msg := validateWorkerTimeField(tf); msg != "" {
+				problems = append(problems, msg)
+			}
+		}
+	}
 	return problems
+}
+
+func validateWorkerTimeField(tf string) string {
+	if tf == "" || strings.TrimSpace(tf) != tf {
+		return fmt.Sprintf("timeField %q must be non-empty without surrounding whitespace", tf)
+	}
+	if len(tf) > maxWorkerRuleTimeFieldLen {
+		return fmt.Sprintf("timeField %q is longer than %d characters", tf, maxWorkerRuleTimeFieldLen)
+	}
+	for _, r := range tf {
+		if r < 0x20 || r == 0x7f || r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return fmt.Sprintf("timeField %q contains whitespace or control characters", tf)
+		}
+	}
+	parts := strings.Split(tf, ".")
+	for _, seg := range parts {
+		if seg == "" {
+			return fmt.Sprintf("timeField %q has an empty path segment", tf)
+		}
+		if strings.HasPrefix(seg, "$") {
+			return fmt.Sprintf("timeField %q names an operator segment %q; name the document field instead", tf, seg)
+		}
+	}
+	return ""
 }
 
 // ValidateWorkerMockRules is what is wrong with rules as a set: each rule's
@@ -273,15 +331,22 @@ func globMatchesEverything(key, g string) bool {
 // (ValidateWorkerMockRules); one that reads a key its kind does not, or whose
 // regex does not compile, matches nothing here.
 func MatchWorkerMockRules(rules []WorkerMockRule, m *Mock) (string, bool) {
+	_, id, ok := MatchWorkerMockRule(rules, m)
+	return id, ok
+}
+
+// MatchWorkerMockRule returns the first rule in rules that matches m, its
+// EffectiveID, and whether one matched.
+func MatchWorkerMockRule(rules []WorkerMockRule, m *Mock) (WorkerMockRule, string, bool) {
 	if m == nil {
-		return "", false
+		return WorkerMockRule{}, "", false
 	}
 	for _, r := range rules {
 		if r.Matches(m) {
-			return r.EffectiveID(), true
+			return r, r.EffectiveID(), true
 		}
 	}
-	return "", false
+	return WorkerMockRule{}, "", false
 }
 
 // WorkerMockCallKey is the call m records: an HTTP request's method, host,
@@ -292,9 +357,20 @@ func MatchWorkerMockRules(rules []WorkerMockRule, m *Mock) (string, bool) {
 // for all. A mock whose call keploy cannot name (another kind, or one that
 // records no statement or command it reads) is a call of its own: its key
 // names the mock, so it is never taken for another's copy.
-func WorkerMockCallKey(m *Mock) string {
+// WorkerMockCallKeyDetails returns m's deduplication key together with
+// hasTime, which reports whether the key normalized a time-typed value by type
+// and format (so a recorder may retain up to learn.MinEpochReads distinct-second
+// samples for clock-offset learning while bounding long-running polls far below
+// maxWorkerMarkCalls).
+func WorkerMockCallKeyDetails(m *Mock) (key string, hasTime bool) {
+	return WorkerMockCallKeyForRule(m, WorkerMockRule{})
+}
+
+// WorkerMockCallKeyForRule is WorkerMockCallKeyDetails, applying any declared
+// TimeFields on rule when normalizing Mongo call keys.
+func WorkerMockCallKeyForRule(m *Mock, rule WorkerMockRule) (key string, hasTime bool) {
 	if m == nil {
-		return ""
+		return "", false
 	}
 	kind := string(m.Kind)
 	dest := strings.TrimSpace(m.Spec.Metadata["destAddr"])
@@ -303,7 +379,7 @@ func WorkerMockCallKey(m *Mock) string {
 	case HTTP, HTTP2:
 		method, host, p, ok := httpCallOf(m)
 		if !ok {
-			return own
+			return own, false
 		}
 		query, body := httpQueryAndBodyOf(m)
 		parts := []string{kind, strings.ToUpper(method), strings.ToLower(host), p, query}
@@ -311,10 +387,10 @@ func WorkerMockCallKey(m *Mock) string {
 			sum := sha256.Sum256([]byte(body))
 			parts = append(parts, hex.EncodeToString(sum[:]))
 		}
-		return strings.Join(parts, "\x00")
+		return strings.Join(parts, "\x00"), false
 	case MySQL:
 		if st := mysqlStatements(m); len(st) > 0 {
-			return strings.Join(append([]string{kind, dest}, st...), "\x00")
+			return strings.Join(append([]string{kind, dest}, st...), "\x00"), false
 		}
 	case PostgresV3:
 		if st := postgresV3Statements(m); len(st) > 0 {
@@ -325,12 +401,12 @@ func WorkerMockCallKey(m *Mock) string {
 			if q := m.Spec.PostgresV3.Query; len(q.BindValues) > 0 || len(q.Literals) > 0 {
 				raw, err := json.Marshal(struct{ B, L PostgresV3Cells }{q.BindValues, q.Literals})
 				if err != nil {
-					return own
+					return own, false
 				}
 				sum := sha256.Sum256(raw)
 				parts = append(parts, hex.EncodeToString(sum[:]))
 			}
-			return strings.Join(parts, "\x00")
+			return strings.Join(parts, "\x00"), false
 		}
 	case REDIS:
 		if cmds := redisCommands(m); len(cmds) > 0 {
@@ -338,10 +414,35 @@ func WorkerMockCallKey(m *Mock) string {
 			for _, c := range cmds {
 				parts = append(parts, strings.Join(c, " "))
 			}
-			return strings.Join(parts, "\x00")
+			return strings.Join(parts, "\x00"), false
+		}
+	case Mongo:
+		if k, ht, ok := mongoCallKey(m, kind, dest, declaredTimeFieldsSet(rule.TimeFields)); ok {
+			return k, ht
 		}
 	}
-	return own
+	return own, false
+}
+
+func declaredTimeFieldsSet(fields []string) map[string]struct{} {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(fields))
+	for _, tf := range fields {
+		if validateWorkerTimeField(tf) == "" {
+			out[tf] = struct{}{}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func WorkerMockCallKey(m *Mock) string {
+	k, _ := WorkerMockCallKeyDetails(m)
+	return k
 }
 
 // httpQueryAndBodyOf is the query string and body of m's HTTP request.
@@ -382,6 +483,8 @@ func (r WorkerMockRule) Matches(m *Mock) bool {
 		request = r.matchesStatements(postgresV3Statements(m))
 	case REDIS:
 		request = r.matchesRedis(m)
+	case Mongo:
+		request = r.matchesMongo(m)
 	}
 	if !request {
 		return false
@@ -428,6 +531,37 @@ func workerMockResponseText(m *Mock) string {
 					}
 				}
 				b.WriteString(data)
+			}
+		}
+		return b.String()
+	case Mongo:
+		var b strings.Builder
+		for _, resp := range m.Spec.MongoResponses {
+			switch v := resp.Message.(type) {
+			case *MongoOpMessage:
+				if v != nil {
+					for _, sec := range v.Sections {
+						b.WriteString(sec)
+						b.WriteByte('\n')
+					}
+				}
+			case MongoOpMessage:
+				for _, sec := range v.Sections {
+					b.WriteString(sec)
+					b.WriteByte('\n')
+				}
+			case *MongoOpReply:
+				if v != nil {
+					for _, doc := range v.Documents {
+						b.WriteString(doc)
+						b.WriteByte('\n')
+					}
+				}
+			case MongoOpReply:
+				for _, doc := range v.Documents {
+					b.WriteString(doc)
+					b.WriteByte('\n')
+				}
 			}
 		}
 		return b.String()
@@ -587,6 +721,737 @@ func (r WorkerMockRule) matchesRedis(m *Mock) bool {
 		}
 	}
 	return true
+}
+
+type mongoOp struct {
+	db         string
+	command    string
+	collection string
+	// read is set for a command that reads and changes nothing
+	// (mongoReadCommand): the only kind a rule that names no command marks.
+	read bool
+}
+
+// matchesMongo checks a Mongo rule's db, command and collection keys against
+// every request the mock records. A destination-only rule (no Mongo key and
+// no response) reads no request, as before Mongo had keys. Any other rule
+// needs every request read; one that names no command matches reads only, so
+// a write is marked only by a rule that names its command.
+func (r WorkerMockRule) matchesMongo(m *Mock) bool {
+	mt := r.match()
+	db, dbSet := mt["db"]
+	cmd, cmdSet := mt["command"]
+	coll, collSet := mt["collection"]
+	_, respSet := mt["response"]
+	if !dbSet && !cmdSet && !collSet && !respSet {
+		return true
+	}
+	ops := mongoOps(m)
+	if len(ops) == 0 {
+		return false
+	}
+	for _, op := range ops {
+		if dbSet && op.db != db {
+			return false
+		}
+		if cmdSet && !strings.EqualFold(op.command, cmd) {
+			return false
+		}
+		if !cmdSet && !op.read {
+			return false
+		}
+		if collSet && op.collection != coll {
+			return false
+		}
+	}
+	return true
+}
+
+// mongoOps extracts (db, command, collection) from each Mongo request of m.
+// It fails closed (returns nil) if any request cannot be parsed so a mock that
+// bundles a matching poll with an unreadable or unsupported request never
+// matches a narrow Mongo rule.
+func mongoOps(m *Mock) []mongoOp {
+	if m == nil || len(m.Spec.MongoRequests) == 0 {
+		return nil
+	}
+	out := make([]mongoOp, 0, len(m.Spec.MongoRequests))
+	for _, req := range m.Spec.MongoRequests {
+		op, ok := mongoOpOfMessage(req.Message)
+		if !ok {
+			return nil
+		}
+		out = append(out, op)
+	}
+	return out
+}
+
+func mongoOpOfMessage(msg interface{}) (mongoOp, bool) {
+	switch v := msg.(type) {
+	case *MongoOpMessage:
+		if v == nil {
+			return mongoOp{}, false
+		}
+		return parseMongoOpMsgSections(v.Sections)
+	case MongoOpMessage:
+		return parseMongoOpMsgSections(v.Sections)
+	case *MongoOpQuery:
+		if v == nil {
+			return mongoOp{}, false
+		}
+		return parseMongoOpQuery(v.FullCollectionName, v.Query)
+	case MongoOpQuery:
+		return parseMongoOpQuery(v.FullCollectionName, v.Query)
+	case *MongoOpUpdate:
+		if v == nil {
+			return mongoOp{}, false
+		}
+		return legacyMongoOp(v.FullCollectionName, "update")
+	case MongoOpUpdate:
+		return legacyMongoOp(v.FullCollectionName, "update")
+	case *MongoOpInsert:
+		if v == nil {
+			return mongoOp{}, false
+		}
+		return legacyMongoOp(v.FullCollectionName, "insert")
+	case MongoOpInsert:
+		return legacyMongoOp(v.FullCollectionName, "insert")
+	case *MongoOpDelete:
+		if v == nil {
+			return mongoOp{}, false
+		}
+		return legacyMongoOp(v.FullCollectionName, "delete")
+	case MongoOpDelete:
+		return legacyMongoOp(v.FullCollectionName, "delete")
+	case *MongoOpGetMore:
+		if v == nil {
+			return mongoOp{}, false
+		}
+		return legacyMongoOp(v.FullCollectionName, "getMore")
+	case MongoOpGetMore:
+		return legacyMongoOp(v.FullCollectionName, "getMore")
+	default:
+		return mongoOp{}, false
+	}
+}
+
+func legacyMongoOp(fullColl, cmd string) (mongoOp, bool) {
+	db, coll := splitMongoNamespace(fullColl)
+	if coll == "" {
+		return mongoOp{}, false
+	}
+	return mongoOp{db: db, command: cmd, collection: coll, read: cmd == "getMore"}, true
+}
+
+func splitMongoNamespace(full string) (db, coll string) {
+	full = strings.TrimSpace(full)
+	if idx := strings.IndexByte(full, '.'); idx > 0 {
+		return full[:idx], full[idx+1:]
+	}
+	return "", full
+}
+
+func parseMongoOpQuery(fullColl, query string) (mongoOp, bool) {
+	db, coll := splitMongoNamespace(fullColl)
+	if coll == "$cmd" {
+		if op, ok := parseMongoCommandJSON(query); ok {
+			if op.db == "" {
+				op.db = db
+			}
+			return op, true
+		}
+		return mongoOp{}, false
+	}
+	if coll == "" {
+		return mongoOp{}, false
+	}
+	return mongoOp{db: db, command: "query", collection: coll, read: true}, true
+}
+
+const (
+	mongoSectionMsgPrefix        = "{ SectionSingle msg:"
+	mongoSectionIdentifierPrefix = "{ SectionSingle identifier:"
+)
+
+// parseMongoOpMsgSections finds the OP_MSG kind-0 body section across all
+// recorded sections (skipping kind-1 document-sequence sections) and extracts
+// its command, collection, $db, and read-only classification using
+// read_through.go's extractMongoOpMsgSingleJSON and parseOrderedJSONObject.
+func parseMongoOpMsgSections(sections []string) (mongoOp, bool) {
+	for _, sec := range sections {
+		trimmed := strings.TrimSpace(sec)
+		if strings.HasPrefix(trimmed, mongoSectionIdentifierPrefix) {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, mongoSectionMsgPrefix) {
+			continue
+		}
+		rawDoc, ok := extractMongoOpMsgSingleJSON(trimmed)
+		if !ok {
+			return mongoOp{}, false
+		}
+		return parseMongoCommandJSON(rawDoc)
+	}
+	return mongoOp{}, false
+}
+
+// parseMongoCommandJSON extracts the first key (command name), target
+// collection (either the first key's string value or top-level "collection"
+// for getMore), top-level "$db", and read-only classification from a Mongo
+// command JSON object. Fails closed on any syntax error or empty command key.
+func parseMongoCommandJSON(raw string) (mongoOp, bool) {
+	obj, ok := parseOrderedJSONObject(strings.TrimSpace(raw))
+	if !ok || obj == nil || len(obj.fields) == 0 {
+		return mongoOp{}, false
+	}
+	cmd := obj.fields[0].key
+	if cmd == "" {
+		return mongoOp{}, false
+	}
+	op := mongoOp{command: cmd}
+	if val, ok := obj.fields[0].val.(string); ok {
+		op.collection = val
+	}
+	for _, f := range obj.fields[1:] {
+		switch f.key {
+		case "$db":
+			if val, ok := f.val.(string); ok {
+				op.db = val
+			}
+		case "collection":
+			if strings.EqualFold(cmd, "getMore") && op.collection == "" {
+				if val, ok := f.val.(string); ok {
+					op.collection = val
+				}
+			}
+		}
+	}
+	op.read = mongoReadCommandObj(op.command, obj)
+	return op, true
+}
+
+// mongoReadCommandObj reports whether the command cmd, whose ordered JSON
+// document is obj, reads and changes nothing: find, count, distinct, getMore,
+// and an aggregate with no stage that writes or streams ($out, $merge,
+// $changeStream). Any other command (insert, update, delete, findAndModify,
+// bulkWrite, DDL, admin) is not one.
+func mongoReadCommandObj(cmd string, obj *orderedJSONObj) bool {
+	switch strings.ToLower(cmd) {
+	case "find", "count", "distinct", "getmore":
+		return true
+	case "aggregate":
+		return obj != nil && !mongoAggregateHasDisallowedStage(obj)
+	}
+	return false
+}
+
+// mongoSessionStateKeys are the top-level fields a call key drops beside
+// mongoVolatileMetaKeys: the driver's session state, which integrations'
+// mongo/v2 noise engine drops too (dropSessionState). A retryable write
+// (findAndModify, a single update, insert or delete, on a replica set or a
+// sharded cluster) carries txnNumber, the pooled session's count of writes:
+// kept, no two claims of one poll would share a key. read_through.go keeps
+// refusing a command that carries it; this set is for the call key only.
+var mongoSessionStateKeys = map[string]struct{}{
+	"txnNumber": {},
+}
+
+var (
+	mongoClockFrom = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	mongoClockTo   = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+func mongoInClockRange(t time.Time) bool {
+	return !t.Before(mongoClockFrom) && t.Before(mongoClockTo)
+}
+
+// mongoClockSlack is how far from its call's own request time an integer may
+// be and still be read as that call's clock: a poll's now, now less a lease,
+// or now less a stale threshold. An integer carries no time type, so its digit
+// count alone cannot say it is one: an id or a counter (a snowflake, an order
+// number, a phone number) has an epoch's digits too, but sits years from the
+// call that sends it, so it keeps calls apart.
+const mongoClockSlack = 400 * 24 * time.Hour
+
+// mongoNearCall reports whether t is within mongoClockSlack of ref, the
+// call's request time; a call with no request time reads no integer as one.
+func mongoNearCall(t, ref time.Time) bool {
+	if ref.IsZero() {
+		return false
+	}
+	d := t.Sub(ref)
+	return d <= mongoClockSlack && d >= -mongoClockSlack
+}
+
+// mongoEpochFormat classifies a bare or ExtJSON numeric epoch string within
+// mongoClockSlack of ref, the call's request time, by exact resolution/format,
+// so a clock read is normalized by its unit while small integers and ids that
+// only have an epoch's digits stay untouched.
+func mongoEpochFormat(s string, ref time.Time) (string, bool) {
+	if s == "" || s[0] == '-' {
+		return "", false
+	}
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		secStr, frac := s[:i], s[i+1:]
+		if len(secStr) != 10 || frac == "" || strings.Trim(frac, "0123456789") != "" {
+			return "", false
+		}
+		n, err := strconv.ParseInt(secStr, 10, 64)
+		if err != nil || !mongoNearCall(time.Unix(n, 0).UTC(), ref) {
+			return "", false
+		}
+		return "epoch_s_f" + strconv.Itoa(len(frac)), true
+	}
+	if strings.Trim(s, "0123456789") != "" {
+		return "", false
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return "", false
+	}
+	var t time.Time
+	var tag string
+	switch len(s) {
+	case 10:
+		t, tag = time.Unix(n, 0).UTC(), "epoch_s"
+	case 13:
+		t, tag = time.UnixMilli(n).UTC(), "epoch_ms"
+	case 16:
+		t, tag = time.UnixMicro(n).UTC(), "epoch_us"
+	case 19:
+		t, tag = time.Unix(0, n).UTC(), "epoch_ns"
+	default:
+		return "", false
+	}
+	if !mongoNearCall(t, ref) {
+		return "", false
+	}
+	return tag, true
+}
+
+// mongoTimeStringFormat classifies an RFC3339 / RFC3339Nano timestamp string
+// within [2000-01-01, 2100-01-01) by exact format (UTC Z vs offset, with or
+// without fractional digits).
+func mongoTimeStringFormat(s string) (string, bool) {
+	if len(s) < 20 || len(s) > 40 || s[4] != '-' || s[7] != '-' || (s[10] != 'T' && s[10] != 't') {
+		return "", false
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil || !mongoInClockRange(t.UTC()) {
+		return "", false
+	}
+	hasFrac := strings.ContainsRune(s, '.')
+	isZ := strings.HasSuffix(s, "Z") || strings.HasSuffix(s, "z")
+	switch {
+	case hasFrac && isZ:
+		return "rfc3339nano_z", true
+	case hasFrac:
+		return "rfc3339nano_off", true
+	case isZ:
+		return "rfc3339_z", true
+	default:
+		return "rfc3339_off", true
+	}
+}
+
+// mongoDeclaredEpochFormat classifies a numeric value inside a rule-declared
+// time field by resolution/format without requiring proximity to ref, so
+// declared cutoffs far from now (such as multi-year retention sweeps) normalize
+// cleanly by declaration.
+func mongoDeclaredEpochFormat(s string) (string, bool) {
+	if s == "" {
+		return "", false
+	}
+	raw := s
+	if raw[0] == '-' {
+		raw = raw[1:]
+	}
+	if raw == "" {
+		return "", false
+	}
+	if i := strings.IndexByte(raw, '.'); i >= 0 {
+		secStr, frac := raw[:i], raw[i+1:]
+		if secStr == "" || frac == "" || strings.Trim(secStr, "0123456789") != "" || strings.Trim(frac, "0123456789") != "" {
+			return "", false
+		}
+		if _, err := strconv.ParseInt(secStr, 10, 64); err != nil {
+			return "", false
+		}
+		return "declared_dec_f" + strconv.Itoa(len(frac)), true
+	}
+	if strings.Trim(raw, "0123456789") != "" {
+		return "", false
+	}
+	if _, err := strconv.ParseInt(s, 10, 64); err != nil {
+		return "", false
+	}
+	switch len(raw) {
+	case 10:
+		return "declared_epoch_s", true
+	case 13:
+		return "declared_epoch_ms", true
+	case 16:
+		return "declared_epoch_us", true
+	case 19:
+		return "declared_epoch_ns", true
+	default:
+		return "declared_int", true
+	}
+}
+
+// stripMongoPositionalSegments removes MongoDB array index ("0", "1", ...)
+// and positional operator ("$", "$[]", "$[...]") segments from a dot path so
+// a declared "items.at" matches "items.$.at" and "items.0.at" alike.
+func stripMongoPositionalSegments(dotPath string) string {
+	if !strings.ContainsRune(dotPath, '.') {
+		return dotPath
+	}
+	segs := strings.Split(dotPath, ".")
+	out := make([]string, 0, len(segs))
+	for _, seg := range segs {
+		if seg == "$" || seg == "$[]" || (strings.HasPrefix(seg, "$[") && strings.HasSuffix(seg, "]")) {
+			continue
+		}
+		if seg != "" && strings.Trim(seg, "0123456789") == "" {
+			continue
+		}
+		out = append(out, seg)
+	}
+	return strings.Join(out, ".")
+}
+
+// isDeclaredTimeField reports whether the field at dotPath (its key under its
+// parents, joined by dots) is one of declared: a declared name or dot path
+// matches the whole path or its last segments, so "cutoff" names the cutoff of
+// {"run":{"cutoff":...}} and of Mongo's dotted form {"run.cutoff":...} alike,
+// "meta.cutoff" matches both forms of meta's cutoff, and "items.at" also
+// matches positional and indexed paths such as "items.$.at" and "items.0.at".
+func isDeclaredTimeField(declared map[string]struct{}, key, dotPath string) bool {
+	if len(declared) == 0 {
+		return false
+	}
+	if dotPath == "" {
+		dotPath = key
+	}
+	matchPath := func(p string) bool {
+		if _, ok := declared[p]; ok {
+			return true
+		}
+		for d := range declared {
+			if strings.HasSuffix(p, "."+d) {
+				return true
+			}
+		}
+		return false
+	}
+	if matchPath(dotPath) {
+		return true
+	}
+	if stripped := stripMongoPositionalSegments(dotPath); stripped != "" && stripped != dotPath {
+		return matchPath(stripped)
+	}
+	return false
+}
+
+// normalizeMongoTimeValue recursively normalizes time-typed values (and values
+// inside rule-declared timeFields) in an ordered JSON AST by type and format,
+// preserving key order at every level and leaving non-time values untouched.
+func normalizeMongoTimeValue(v any, ref time.Time, inDeclared bool, dotPath string, declared map[string]struct{}) (any, bool) {
+	switch x := v.(type) {
+	case *orderedJSONObj:
+		if x == nil {
+			return nil, false
+		}
+		if len(x.fields) == 1 {
+			f := x.fields[0]
+			switch f.key {
+			case "$date":
+				switch dv := f.val.(type) {
+				case string:
+					return &orderedJSONObj{fields: []orderedJSONField{{key: "$date", val: "<time:bson_date_iso>"}}}, true
+				case *orderedJSONObj:
+					if len(dv.fields) == 1 && dv.fields[0].key == "$numberLong" {
+						return &orderedJSONObj{fields: []orderedJSONField{{key: "$date", val: "<time:bson_date_ms>"}}}, true
+					}
+					return &orderedJSONObj{fields: []orderedJSONField{{key: "$date", val: "<time:bson_date_obj>"}}}, true
+				default:
+					return &orderedJSONObj{fields: []orderedJSONField{{key: "$date", val: "<time:bson_date>"}}}, true
+				}
+			case "$timestamp":
+				return &orderedJSONObj{fields: []orderedJSONField{{key: "$timestamp", val: "<time:bson_timestamp>"}}}, true
+			case "$numberLong", "$numberInt":
+				if s, ok := f.val.(string); ok {
+					if inDeclared {
+						if tag, ok := mongoDeclaredEpochFormat(s); ok {
+							return &orderedJSONObj{fields: []orderedJSONField{{key: f.key, val: "<time:" + tag + ">"}}}, true
+						}
+					} else if tag, ok := mongoEpochFormat(s, ref); ok {
+						return &orderedJSONObj{fields: []orderedJSONField{{key: f.key, val: "<time:" + tag + ">"}}}, true
+					}
+				}
+			}
+		}
+		out := make([]orderedJSONField, len(x.fields))
+		saw := false
+		for i, f := range x.fields {
+			nextPath := dotPath
+			nextDeclared := inDeclared
+			if !strings.HasPrefix(f.key, "$") {
+				if nextPath == "" {
+					nextPath = f.key
+				} else {
+					nextPath = nextPath + "." + f.key
+				}
+				nextDeclared = isDeclaredTimeField(declared, f.key, nextPath)
+			}
+			nv, st := normalizeMongoTimeValue(f.val, ref, nextDeclared, nextPath, declared)
+			out[i] = orderedJSONField{key: f.key, val: nv}
+			if st {
+				saw = true
+			}
+		}
+		return &orderedJSONObj{fields: out}, saw
+	case []any:
+		out := make([]any, len(x))
+		saw := false
+		for i, elem := range x {
+			nv, st := normalizeMongoTimeValue(elem, ref, inDeclared, dotPath, declared)
+			out[i] = nv
+			if st {
+				saw = true
+			}
+		}
+		return out, saw
+	case json.Number:
+		if inDeclared {
+			if tag, ok := mongoDeclaredEpochFormat(string(x)); ok {
+				return "<time:num_" + tag + ">", true
+			}
+		} else if tag, ok := mongoEpochFormat(string(x), ref); ok {
+			return "<time:num_" + tag + ">", true
+		}
+		return x, false
+	case string:
+		if tag, ok := mongoTimeStringFormat(x); ok {
+			return "<time:" + tag + ">", true
+		}
+		if inDeclared && strings.TrimSpace(x) != "" {
+			return "<time:declared_str>", true
+		}
+		return x, false
+	default:
+		return v, false
+	}
+}
+
+// normalizeMongoCommandJSON strips volatile MongoDB wire metadata (lsid,
+// $clusterTime, $readPreference, $client, maxTimeMS, and
+// readConcern.afterClusterTime) and the session's txnNumber, and normalizes
+// time-typed values (and rule-declared timeFields) by type and format so
+// repeated polls share one WorkerMockCallKey while non-time filter/update
+// differences stay distinct.
+func normalizeMongoCommandJSON(raw string, ref time.Time, declared map[string]struct{}) (norm string, hasTime bool, ok bool) {
+	obj, parsed := parseOrderedJSONObject(strings.TrimSpace(raw))
+	if !parsed || obj == nil || len(obj.fields) == 0 {
+		return "", false, false
+	}
+	filtered := make([]orderedJSONField, 0, len(obj.fields))
+	for _, f := range obj.fields {
+		if _, volatile := mongoVolatileMetaKeys[f.key]; volatile {
+			continue
+		}
+		if _, session := mongoSessionStateKeys[f.key]; session {
+			continue
+		}
+		if f.key == "readConcern" {
+			cleaned, keep := stripReadConcernAfterClusterTime(f.val)
+			if !keep {
+				continue
+			}
+			f.val = cleaned
+		}
+		inDeclared := isDeclaredTimeField(declared, f.key, f.key)
+		nv, st := normalizeMongoTimeValue(f.val, ref, inDeclared, "", declared)
+		if st {
+			hasTime = true
+		}
+		f.val = nv
+		filtered = append(filtered, f)
+	}
+	if len(filtered) == 0 {
+		return "", false, false
+	}
+	return encodeOrderedJSONObj(&orderedJSONObj{fields: filtered}, true), hasTime, true
+}
+
+func normalizeMongoSectionForKey(sec string, ref time.Time, declared map[string]struct{}) (string, bool) {
+	trimmed := strings.TrimSpace(sec)
+	if strings.HasPrefix(trimmed, mongoSectionMsgPrefix) {
+		if rawDoc, ok := extractMongoOpMsgSingleJSON(trimmed); ok {
+			if norm, ht, ok := normalizeMongoCommandJSON(rawDoc, ref, declared); ok {
+				return mongoSectionMsgPrefix + " " + norm + " }", ht
+			}
+		}
+	}
+	// Kind-1 document-sequence section (serialized as "{ SectionSingle identifier: ... , msgs: [ ... ] }"
+	// or "{ SectionSequence identifier: ... , objs: [ ... ] }"): normalize
+	// time-typed values inside each embedded JSON object while keeping the
+	// section identifier and all non-time fields verbatim.
+	if strings.HasPrefix(trimmed, "{ SectionSingle identifier:") || strings.HasPrefix(trimmed, "{ SectionSequence identifier:") {
+		for _, marker := range []string{"msgs:", "objs:"} {
+			if idx := strings.Index(trimmed, marker); idx >= 0 {
+				prefix := trimmed[:idx+len(marker)]
+				rest := strings.TrimSpace(trimmed[idx+len(marker):])
+				if strings.HasPrefix(rest, "[") {
+					if end := strings.LastIndexByte(rest, ']'); end > 0 {
+						inner := rest[:end+1]
+						dec := json.NewDecoder(strings.NewReader(inner))
+						dec.UseNumber()
+						if val, err := decodeOrderedJSON(dec); err == nil {
+							if arr, ok := val.([]any); ok {
+								nv, ht := normalizeMongoTimeValue(arr, ref, false, "", declared)
+								return prefix + " " + encodeOrderedJSONValue(nv, true) + " }", ht
+							}
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+	return sec, false
+}
+
+// mongoCallKey hashes m's recorded Mongo requests together with its destination
+// (normalizing volatile wire metadata, session txnNumber, and time-typed values
+// by type and format) so identical and clock-varying polls share one key while
+// structurally or non-time-differing calls keep distinct keys. Fails closed
+// (returns false) if any request is unhandled.
+func mongoCallKey(m *Mock, kind, dest string, declared map[string]struct{}) (string, bool, bool) {
+	if m == nil || len(m.Spec.MongoRequests) == 0 {
+		return "", false, false
+	}
+	h := sha256.New()
+	hasTime := false
+	ref := m.Spec.ReqTimestampMock
+	for _, req := range m.Spec.MongoRequests {
+		switch v := req.Message.(type) {
+		case *MongoOpMessage:
+			if v == nil || len(v.Sections) == 0 {
+				return "", false, false
+			}
+			for _, sec := range v.Sections {
+				norm, ht := normalizeMongoSectionForKey(sec, ref, declared)
+				if ht {
+					hasTime = true
+				}
+				_, _ = fmt.Fprintf(h, "msg:%d:%s\n", len(norm), norm)
+			}
+		case MongoOpMessage:
+			if len(v.Sections) == 0 {
+				return "", false, false
+			}
+			for _, sec := range v.Sections {
+				norm, ht := normalizeMongoSectionForKey(sec, ref, declared)
+				if ht {
+					hasTime = true
+				}
+				_, _ = fmt.Fprintf(h, "msg:%d:%s\n", len(norm), norm)
+			}
+		case *MongoOpQuery:
+			if v == nil {
+				return "", false, false
+			}
+			q := v.Query
+			if norm, ht, ok := normalizeMongoCommandJSON(q, ref, declared); ok {
+				q = norm
+				if ht {
+					hasTime = true
+				}
+			}
+			_, _ = fmt.Fprintf(h, "qry:%s:%s\n", v.FullCollectionName, q)
+		case MongoOpQuery:
+			q := v.Query
+			if norm, ht, ok := normalizeMongoCommandJSON(q, ref, declared); ok {
+				q = norm
+				if ht {
+					hasTime = true
+				}
+			}
+			_, _ = fmt.Fprintf(h, "qry:%s:%s\n", v.FullCollectionName, q)
+		case *MongoOpUpdate:
+			if v == nil {
+				return "", false, false
+			}
+			_, _ = fmt.Fprintf(h, "upd:%s:%s:%s\n", v.FullCollectionName, v.Selector, v.Update)
+		case MongoOpUpdate:
+			_, _ = fmt.Fprintf(h, "upd:%s:%s:%s\n", v.FullCollectionName, v.Selector, v.Update)
+		case *MongoOpInsert:
+			if v == nil {
+				return "", false, false
+			}
+			_, _ = fmt.Fprintf(h, "ins:%s:%v\n", v.FullCollectionName, v.Documents)
+		case MongoOpInsert:
+			_, _ = fmt.Fprintf(h, "ins:%s:%v\n", v.FullCollectionName, v.Documents)
+		case *MongoOpDelete:
+			if v == nil {
+				return "", false, false
+			}
+			_, _ = fmt.Fprintf(h, "del:%s:%s\n", v.FullCollectionName, v.Selector)
+		case MongoOpDelete:
+			_, _ = fmt.Fprintf(h, "del:%s:%s\n", v.FullCollectionName, v.Selector)
+		case *MongoOpGetMore:
+			if v == nil {
+				return "", false, false
+			}
+			_, _ = fmt.Fprintf(h, "gm:%s:%d\n", v.FullCollectionName, v.CursorID)
+		case MongoOpGetMore:
+			_, _ = fmt.Fprintf(h, "gm:%s:%d\n", v.FullCollectionName, v.CursorID)
+		default:
+			return "", false, false
+		}
+	}
+	return strings.Join([]string{kind, dest, hex.EncodeToString(h.Sum(nil))}, "\x00"), hasTime, true
+}
+
+// isMongoCollectionlessHandshake reports whether cmd is a well-known
+// collectionless MongoDB handshake/health command whose narrow rule names
+// command (and db when present) without a collection, analogous to Redis AUTH
+// and HELLO.
+func isMongoCollectionlessHandshake(cmd string) bool {
+	switch strings.ToLower(cmd) {
+	case "ping", "hello", "ismaster", "saslstart", "saslcontinue", "buildinfo":
+		return true
+	}
+	return false
+}
+
+func mongoRule(name string, ops []mongoOp) (map[string]string, error) {
+	if len(ops) == 0 {
+		return nil, fmt.Errorf("mock %s records no Mongo command keploy can name", name)
+	}
+	first := ops[0]
+	if first.command == "" {
+		return nil, fmt.Errorf("mock %s records no Mongo command keploy can name", name)
+	}
+	if first.collection == "" && !isMongoCollectionlessHandshake(first.command) {
+		return nil, fmt.Errorf("mock %s records a Mongo command without a collection name; mark it with a rule of your own instead", name)
+	}
+	for _, op := range ops[1:] {
+		if op.db != first.db || !strings.EqualFold(op.command, first.command) || op.collection != first.collection {
+			return nil, fmt.Errorf("mock %s records more than one Mongo operation; mark it with a rule of your own instead", name)
+		}
+	}
+	out := map[string]string{
+		"command": first.command,
+	}
+	if first.collection != "" {
+		out["collection"] = first.collection
+	}
+	if first.db != "" {
+		out["db"] = first.db
+	}
+	return out, nil
 }
 
 // mysqlStatements is the statement text of each of m's MySQL requests that
@@ -888,6 +1753,16 @@ func SuggestWorkerMockRule(m *Mock) (WorkerMockRule, error) {
 		rule.Match, err = statementRule(m.Name, postgresV3Statements(m))
 	case REDIS:
 		rule.Match, err = redisRule(m.Name, redisCommands(m))
+	case Mongo:
+		if len(m.Spec.MongoRequests) > 0 {
+			rule.Match, err = mongoRule(m.Name, mongoOps(m))
+		} else {
+			dest := strings.TrimSpace(m.Spec.Metadata["destAddr"])
+			if dest == "" {
+				return WorkerMockRule{}, fmt.Errorf("mock %s records no call keploy can name, and no destination", m.Name)
+			}
+			rule.Match = map[string]string{"destination": globLiteral(dest)}
+		}
 	default:
 		// A kind whose call keploy does not read: its destination is all
 		// a rule can name.
