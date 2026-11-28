@@ -4,10 +4,14 @@ package user
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 
 	"github.com/denisbrodbeck/machineid"
 	"go.keploy.io/server/v3/config"
@@ -98,29 +102,97 @@ const installationAppID = "keploy"
 
 // GetInstallationID returns this machine's installation id: a keyed hash of
 // the OS machine id, never the id itself, which systemd says must not leave
-// the machine (machine-id(5)); "" when the machine has none. In a container
-// keploy started (KEPLOY_INDOCKER), it is the INSTALLATION_ID the host keploy
-// passed, already hashed there.
+// the machine (machine-id(5)). In a container keploy started (KEPLOY_INDOCKER),
+// it uses the INSTALLATION_ID the host keploy passed when non-empty. When the
+// environment has no readable OS machine id (e.g. minimal containers or CI
+// runners without /etc/machine-id), it falls back to a cryptographically random
+// 64-hex installation id persisted under HomeDir()/installation_id (or
+// process-scoped when HomeDir() is unwritable) so OSS installs are never
+// dropped as unattributed.
 func (db *Db) GetInstallationID(_ context.Context) (string, error) {
 	var id string
 	inDocker := os.Getenv("KEPLOY_INDOCKER")
 	if inDocker == "true" {
-		id = os.Getenv("INSTALLATION_ID")
+		id = strings.TrimSpace(os.Getenv("INSTALLATION_ID"))
 	} else {
 		raw, err := machineID()
 		if err != nil {
-			db.logger.Debug("failed to get machine id", zap.Error(err))
-			return "", nil
-		}
-		if raw != "" {
+			db.logger.Debug("failed to get machine id, falling back to persisted installation id", zap.Error(err))
+		} else if raw != "" {
 			id = installationID(raw)
 		}
 	}
 	if id == "" {
-		db.logger.Debug("got empty machine id")
-		return "", nil
+		id = persistedFallbackInstallationID(db.logger)
 	}
 	return id, nil
+}
+
+const fallbackInstallationIDFile = "installation_id"
+
+var (
+	fallbackIDMu sync.Mutex
+	ephemeralID  string
+)
+
+// persistedFallbackInstallationID loads or creates a random 64-hex installation
+// id in HomeDir()/installation_id so container/CI environments without an OS
+// machine-id remain stable and valid across runs. If HomeDir() is unavailable
+// or read-only, a process-scoped random 64-hex id is returned.
+func persistedFallbackInstallationID(logger *zap.Logger) string {
+	fallbackIDMu.Lock()
+	defer fallbackIDMu.Unlock()
+
+	dir := HomeDir()
+	// HomeDir() returns "/.keploy" when HOME/USERPROFILE is unset; avoid writing
+	// to root "/.keploy".
+	if dir != "" && dir != "/.keploy" {
+		p := filepath.Join(dir, fallbackInstallationIDFile)
+		if b, err := os.ReadFile(p); err == nil {
+			if existing := strings.TrimSpace(string(b)); isValidFallbackID(existing) {
+				return existing
+			}
+		}
+		generated := newRandomHexID()
+		if err := os.MkdirAll(dir, 0o755); err == nil {
+			tmp := p + "." + generated[:8] + ".tmp"
+			if err := os.WriteFile(tmp, []byte(generated+"\n"), 0o600); err == nil {
+				if err := os.Rename(tmp, p); err == nil {
+					return generated
+				}
+				_ = os.Remove(tmp)
+			}
+		} else if logger != nil {
+			logger.Debug("failed to persist fallback installation id", zap.Error(err))
+		}
+		if ephemeralID == "" {
+			ephemeralID = generated
+		}
+		return ephemeralID
+	}
+	if ephemeralID == "" {
+		ephemeralID = newRandomHexID()
+	}
+	return ephemeralID
+}
+
+func isValidFallbackID(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func newRandomHexID() string {
+	var b [32]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // installationID is the id keploy sends for the machine whose OS id is raw:

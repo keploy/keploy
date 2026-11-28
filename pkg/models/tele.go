@@ -18,6 +18,7 @@ type TeleEvent struct {
 	EventType      string                 `json:"eventType"`
 	Meta           map[string]interface{} `json:"meta"`
 	CreatedAt      int64                  `json:"createdAt"`
+	SentAt         string                 `json:"sent_at,omitempty"`
 	TeleCheck      bool                   `json:"tele_check"`
 	OS             string                 `json:"os"`
 	KeployVersion  string                 `json:"keploy_version"`

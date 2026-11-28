@@ -31,10 +31,7 @@ func TestGetInstallationIDSendsAKeyedHashOfTheMachineID(t *testing.T) {
 		want     string
 	}{
 		{name: "a machine id is sent hashed", raw: raw, want: want},
-		{name: "a machine with an empty id sends none, not the hash of nothing", raw: "", want: ""},
-		{name: "a machine whose id cannot be read sends none", raw: raw, err: errors.New("no machine id"), want: ""},
 		{name: "a container keploy started sends the host's id as given", inDocker: "true", raw: "container-id", envID: want, want: want},
-		{name: "a container given no id sends none", inDocker: "true", raw: "container-id", want: ""},
 		{name: "KEPLOY_INDOCKER other than true reads the machine", inDocker: "1", raw: raw, envID: "host-id", want: want},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,6 +44,68 @@ func TestGetInstallationIDSendsAKeyedHashOfTheMachineID(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("GetInstallationID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// When an environment has no OS machine id (containers, CI) or runs in Docker
+// without INSTALLATION_ID, GetInstallationID falls back to a persisted random
+// 64-hex installation id instead of returning "" (which becomes unattributed)
+// and never sends the hash of an empty string.
+func TestGetInstallationIDPersistedFallback(t *testing.T) {
+	emptyHash := installationID("")
+	for _, tc := range []struct {
+		name     string
+		inDocker string
+		raw      string
+		err      error
+	}{
+		{name: "empty machine id falls back to persisted id", raw: ""},
+		{name: "unreadable machine id falls back to persisted id", raw: "ignored", err: errors.New("no machine id")},
+		{name: "container with no INSTALLATION_ID falls back to persisted id", inDocker: "true", raw: "container-id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("HOMEDRIVE", "")
+			t.Setenv("HOMEPATH", "")
+			t.Setenv("KEPLOY_INDOCKER", tc.inDocker)
+			t.Setenv("INSTALLATION_ID", "")
+			withMachineID(t, tc.raw, tc.err)
+
+			db := New(zap.NewNop(), nil)
+			first, err := db.GetInstallationID(context.Background())
+			if err != nil {
+				t.Fatalf("first GetInstallationID: %v", err)
+			}
+			if !isValidFallbackID(first) {
+				t.Fatalf("fallback installation id %q is not 64 lowercase hex chars", first)
+			}
+			if first == emptyHash {
+				t.Fatalf("fallback installation id must not be the hash of empty string")
+			}
+
+			// A second call in the same HOME returns the same persisted id.
+			second, err := db.GetInstallationID(context.Background())
+			if err != nil {
+				t.Fatalf("second GetInstallationID: %v", err)
+			}
+			if second != first {
+				t.Fatalf("persisted fallback id changed across calls: %q vs %q", first, second)
+			}
+
+			// A distinct HOME generates a distinct id.
+			otherHome := t.TempDir()
+			t.Setenv("HOME", otherHome)
+			t.Setenv("USERPROFILE", otherHome)
+			other, err := db.GetInstallationID(context.Background())
+			if err != nil {
+				t.Fatalf("other HOME GetInstallationID: %v", err)
+			}
+			if !isValidFallbackID(other) || other == first {
+				t.Fatalf("distinct HOME got %q (first=%q), want distinct 64-hex id", other, first)
 			}
 		})
 	}

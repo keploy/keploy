@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,12 +78,53 @@ func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
 	}
 }
 
+// pingInterval bounds how frequently a host emits Ping heartbeats across both
+// long-lived processes and repeated short CLI invocations. Rate-limiting Ping
+// prevents short commands from flooding telemetry (Ping previously accounted
+// for ~40% of all CLI events at 1 per invocation + every 5 minutes).
+var (
+	pingInterval  = time.Hour
+	pingStatePath = defaultPingStatePath
+	pingMu        sync.Mutex
+)
+
+func defaultPingStatePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".keploy", ".last_ping")
+}
+
+// shouldSendPing reports whether at least pingInterval has elapsed since the
+// last Ping sent from this host, and records now when returning true.
+func shouldSendPing(now time.Time) bool {
+	pingMu.Lock()
+	defer pingMu.Unlock()
+	p := pingStatePath()
+	if p == "" {
+		return true
+	}
+	if b, err := os.ReadFile(p); err == nil {
+		if ts, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil {
+			last := time.Unix(ts, 0)
+			if now.Sub(last) >= 0 && now.Sub(last) < pingInterval {
+				return false
+			}
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err == nil {
+		_ = os.WriteFile(p, []byte(strconv.FormatInt(now.Unix(), 10)+"\n"), 0o600)
+	}
+	return true
+}
+
 func (tel *Telemetry) Ping(ctx context.Context) {
 	if !tel.Enabled {
 		return
 	}
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(pingInterval)
 		defer ticker.Stop()
 		select {
 		case <-ctx.Done():
@@ -89,7 +133,9 @@ func (tel *Telemetry) Ping(ctx context.Context) {
 			if tel.closed.Load() {
 				return
 			}
-			tel.SendTelemetry("Ping")
+			if shouldSendPing(time.Now().UTC()) {
+				tel.SendTelemetry("Ping")
+			}
 		}
 		for {
 			if tel.closed.Load() {
@@ -99,7 +145,9 @@ func (tel *Telemetry) Ping(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				tel.SendTelemetry("Ping")
+				if shouldSendPing(time.Now().UTC()) {
+					tel.SendTelemetry("Ping")
+				}
 			}
 		}
 	}()
@@ -278,7 +326,7 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 
 	event := models.TeleEvent{
 		EventType: eventType,
-		CreatedAt: time.Now().Unix(),
+		CreatedAt: time.Now().UTC().Unix(),
 	}
 	if len(output) > 0 && output[0] != nil {
 		event.Meta = output[0]
@@ -325,6 +373,11 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 			event.IsCI, event.CIProvider = detectCIOrInvoker()
 			event.GitRepo = detectGitRepo()
 		}()
+
+		// Stamp transmission time in UTC RFC3339 ("Z") right before sending so
+		// telemetry ingest can correct client clock skew while preserving event
+		// creation time.
+		event.SentAt = time.Now().UTC().Format(time.RFC3339)
 
 		bin, err := marshalEvent(event)
 		if err != nil {
