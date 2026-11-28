@@ -1403,9 +1403,10 @@ const (
 type RejectionReason string
 
 const (
-	RejectionObsolete       RejectionReason = "OBSOLETE"          // mock mapping mismatch — mocks changed between recordings
-	RejectionHighRisk       RejectionReason = "HIGH_RISK_FAILURE" // response structure changed (status code, schema, headers)
-	RejectionLowRiskNoNoise RejectionReason = "LOW_RISK_NO_NOISE" // minor diffs that can't be auto-suppressed as noise
+	RejectionObsolete              RejectionReason = "OBSOLETE"                // mock mapping mismatch — mocks changed between recordings
+	RejectionHighRisk              RejectionReason = "HIGH_RISK_FAILURE"       // response structure changed (status code, schema, headers)
+	RejectionLowRiskNoNoise        RejectionReason = "LOW_RISK_NO_NOISE"       // minor diffs that can't be auto-suppressed as noise
+	RejectionWarmRecordingUnmocked RejectionReason = "WARM_RECORDING_UNMOCKED" // read-only first-use call unrecorded because recording pod started before recording began
 )
 
 // ReasonLoopbackOutsideRun is the reason the agent logs when keploy passes a
