@@ -1722,11 +1722,21 @@ const (
 	skipBoth = skipSource | skipOffset
 )
 
+// earlierSortAt is the recorded timestamp used to order e among earlier
+// places: a client test's incoming HTTP request (e.incoming) leaves e.At
+// zero (GivenRequest) and records its arrival in e.arrivedRec.
+func earlierSortAt(e Earlier) time.Time {
+	if e.incoming {
+		return e.arrivedRec
+	}
+	return e.At
+}
+
 // classifyRead is classifyGiven of raw as handed: each Raw read as the one
 // place it is.
 func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool, sources func(path string) (Source, bool), timeForm bool) []Learned {
 	placed := append([]Earlier(nil), earlier...)
-	sort.SliceStable(placed, func(i, j int) bool { return placed[i].At.Before(placed[j].At) })
+	sort.SliceStable(placed, func(i, j int) bool { return earlierSortAt(placed[i]).Before(earlierSortAt(placed[j])) })
 	// A value the test gave keploy (Earlier.Gave) is read by the rule that
 	// finds a value whole or as a part (appearedIn, instantServedFrom) and
 	// by no other: no moment, instant, offset, echo or order rule reads it,
