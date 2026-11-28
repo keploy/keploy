@@ -6,12 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // Keploy instances (agent.InstanceStamper): a test worker's processes,
@@ -32,6 +37,66 @@ type instanceLost struct {
 }
 
 var _ agent.InstanceStamper = (*Hooks)(nil)
+var _ agent.PIDScoper = (*Hooks)(nil)
+
+// ScopedPidsActive reports whether these hooks were loaded with
+// structs.FlagScopedPids armed (a non-zero scoped cgroup ID) in native mode.
+func (h *Hooks) ScopedPidsActive() bool {
+	h.agentInfoMu.Lock()
+	defer h.agentInfoMu.Unlock()
+	return h.agentInfoSent && h.agentInfo.IsDocker == 0 && (h.agentInfo.Flags&structs.FlagScopedPids) != 0 && h.agentInfo.ScopedCgroupID != 0
+}
+
+// ScopedStatus reports whether cgroup-based Go toolchain scoping was requested,
+// whether the run's scoped cgroup was armed, and why it fell back if not.
+func (h *Hooks) ScopedStatus() models.ScopeStatus {
+	h.scopedMu.Lock()
+	defer h.scopedMu.Unlock()
+	st := models.ScopeStatus{
+		Requested: h.scopedRequested,
+		Ready:     h.scopedReady,
+		Reason:    h.scopedReason,
+		Remedy:    h.scopedRemedy,
+	}
+	if st.Requested && !st.Ready && st.Remedy == "" {
+		st.Remedy = scopedCgroupRemedyDefault
+	}
+	return st
+}
+
+// AddScopedPID migrates the process nsTgid (in the agent's PID namespace,
+// verified against startTicks from /proc/<pid>/stat field 22) into the run's
+// scoped cgroup v2 directory via cgroup.procs. Because Linux writes to
+// cgroup.procs atomically migrate the entire thread group and kernel
+// cgroup_fork() inherits membership across every subsequent fork/exec/setsid,
+// all descendants stay isolated without any tracing recursion guard.
+func (h *Hooks) AddScopedPID(nsTgid uint32, startTicks uint64) error {
+	if nsTgid == 0 || nsTgid > math.MaxInt32 {
+		return fmt.Errorf("%d is not a process's TGID", nsTgid)
+	}
+	if startTicks == 0 {
+		return fmt.Errorf("missing start time for process %d", nsTgid)
+	}
+	h.scopedMu.Lock()
+	cgDir := h.scopedCgroupDir
+	h.scopedMu.Unlock()
+	if cgDir == "" {
+		return errors.New("the hooks are not loaded: scoped cgroup is not armed")
+	}
+	curStart, err := scopedProcStartTicks(nsTgid)
+	if scopedProcessGone(nsTgid) || err != nil || curStart != startTicks {
+		return fmt.Errorf("process %d exited before it could be migrated to scoped cgroup", nsTgid)
+	}
+	procs := filepath.Join(cgDir, "cgroup.procs")
+	if err := os.WriteFile(procs, []byte(strconv.FormatUint(uint64(nsTgid), 10)+"\n"), 0o644); err != nil {
+		return fmt.Errorf("migrate process %d into scoped cgroup %s: %w", nsTgid, cgDir, err)
+	}
+	afterStart, err := scopedProcStartTicks(nsTgid)
+	if scopedProcessGone(nsTgid) || err != nil || afterStart != startTicks {
+		return fmt.Errorf("process %d exited while migrating to scoped cgroup", nsTgid)
+	}
+	return nil
+}
 
 // SetInstance puts the process tgid (a kernel TGID) in the instance of value
 // v (agent.InstanceValue), and every process it forks from then on
@@ -209,9 +274,13 @@ func hostPIDs() error {
 	return nil
 }
 
-// gone says the process tgid (initial PID namespace) has exited: reaped
-// (kill says ESRCH), or a zombie with no thread left, whose exit the kernel
-// has already run.
+// gone says the process tgid (in the caller's PID namespace — the initial PID
+// namespace for SetInstance, or the agent's own namespace for AddScopedPID)
+// has exited: reaped (kill says ESRCH), or a zombie with no thread left, whose
+// exit the kernel has already run.
 func gone(tgid uint32) bool {
+	if tgid == 0 || tgid > math.MaxInt32 {
+		return true
+	}
 	return errors.Is(unix.Kill(int(tgid), 0), unix.ESRCH) || zombieProcess(tgid)
 }

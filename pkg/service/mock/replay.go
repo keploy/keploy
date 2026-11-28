@@ -411,6 +411,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     (PIDMapReader). Read here, with the compose app still parked.
 	pidBase := m.pidMapBaseline(ctx, "replay")
 	lossesBase := m.captureLossBaseline(ctx)
+	scopeStatus := m.checkScopeStatus(ctx)
 
 	// 7. Release the compose app now that the mock pool is armed. This is the
 	//    post-arm half of step 2 — see releaseComposeApp.
@@ -633,8 +634,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
 
-		actualShort: requestsShort,
-		faults:      faultMocks(filtered, unfiltered),
+		actualShort:  requestsShort,
+		faults:       faultMocks(filtered, unfiltered),
+		runnerFailed: appErr.AppErrorType == models.ErrUnExpected || appErr.AppErrorType == models.ErrCommandError,
 	}
 	counts := m.reportOutcome(ctx, loaded, detail, func() bool { return parent.Err() != nil })
 	missesKnown := counts.missed >= 0
@@ -1081,6 +1083,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		AnsweredAsAnother: answeredAsAnotherReceipt(counts.asAnother),
 
 		CaptureIncomplete: incompleteLosses,
+		ScopedReady:       scopedReadyPtr(scopeStatus),
+		ScopedReadyReason: scopeStatus.Reason,
+		ScopedReadyRemedy: scopeStatus.Remedy,
 
 		ProcessTrackingUnread: trackingUnread,
 		CallCaptureUnread:     captureUnread,
@@ -2815,6 +2820,10 @@ type ReplayOutcome struct {
 	Mocks  []FlowMocks
 	Starts map[string]int
 	Sets   []string
+	// TestsRan is the number of test windows observed during the replay.
+	TestsRan int
+	// SetupFailed is true when the test command failed before any test window began.
+	SetupFailed bool
 }
 
 // replayOutcomeReporter is installed by a wrapping build (enterprise) from
@@ -3048,6 +3057,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// A call the agent answered with another call's recording was served:
 	// no miss, counted apart (replayCounts.asAnother).
 	misses, asAnother := splitAnsweredAsAnother(misses)
+	preTestFailed := isPreTestSetupFailure(detail.runnerFailed, len(detail.windows), len(consumed), misses, os.Getenv("GOPROXY"))
+	misses = rewritePreTestToolchainMisses(misses, preTestFailed, os.Getenv("GOPROXY"))
 	summary := []zap.Field{zap.Int("loaded", loaded)}
 	if consumedErr != nil {
 		summary = append(summary, zap.String("consumed", "unknown"))
@@ -3124,14 +3135,16 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			m.logger.Info("not metering this replay: " + detail.actualShort + ", and a request it lost would be reported as one the app did not make")
 		} else {
 			replayOutcomeReporter(ctx, ReplayOutcome{
-				SetName:  m.setName(),
-				Loaded:   loaded,
-				Consumed: len(consumed),
-				Missed:   len(misses),
-				Cases:    pairCases(detail.windows, detail.recorded, detail.actual, m.compareCase),
-				Mocks:    flows,
-				Starts:   startsByTest(detail.windows, detail.starts),
-				Sets:     ranSets(detail.windows),
+				SetName:     m.setName(),
+				Loaded:      loaded,
+				Consumed:    len(consumed),
+				Missed:      len(misses),
+				Cases:       pairCases(detail.windows, detail.recorded, detail.actual, m.compareCase),
+				Mocks:       flows,
+				Starts:      startsByTest(detail.windows, detail.starts),
+				Sets:        ranSets(detail.windows),
+				TestsRan:    len(detail.windows),
+				SetupFailed: preTestFailed,
 			})
 		}
 	}

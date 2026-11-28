@@ -431,6 +431,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//     (PIDMapReader). Read here, with the compose app still parked.
 	pidBase := m.pidMapBaseline(ctx, "record")
 	lossesBase := m.captureLossBaseline(ctx)
+	_ = m.checkScopeStatus(ctx)
 
 	// 5. Release the compose app now that the capture is armed and draining.
 	//    This is the post-arm half of step 2 — see releaseComposeApp.
@@ -705,7 +706,11 @@ func (m *mockService) Record(ctx context.Context) error {
 	//      recording lacks those calls, and a replay of it would make them
 	//      for real. Kept, not vouched for in silence.
 	if t := lostNotJudged.NotJudgedLogText(); t != "" {
-		m.logger.Warn("the recording is kept, but the test command called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, or the Docker daemon did not answer keploy's read of a container a call reached: such calls are not in it, or not as that container's ("+provenswitch.Env+"=1)",
+		prefix := "the recording is kept, but "
+		if provenswitch.On() && replaysJudged.Load() {
+			prefix = "this record pass is staged for judging (not yet committed): "
+		}
+		m.logger.Warn(prefix+"the test command called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, or the Docker daemon did not answer keploy's read of a container a call reached: such calls are not in it, or not as that container's ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.String("reason", t),
 			zap.String("next_step", lostNotJudged.NotJudgedRemedy()+", then record again"))
 		utils.SayWhole(m.console, "mock set "+name+", calls the recording does not hold", t, lostNotJudged.NotJudgedText())
@@ -719,7 +724,11 @@ func (m *mockService) Record(ctx context.Context) error {
 		if lossesUnread {
 			unread, reason = "captured every call the test command made", models.CaptureLossesUnverified(pidCheck.unreadable)
 		}
-		m.logger.Warn("the recording is kept, but keploy could not verify it is complete: it could not read whether the agent "+unread,
+		prefix := "the recording is kept, but "
+		if provenswitch.On() && replaysJudged.Load() {
+			prefix = "this record pass is staged for judging (not yet committed): "
+		}
+		m.logger.Warn(prefix+"keploy could not verify it is complete: it could not read whether the agent "+unread,
 			zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("reason", reason),
 			zap.String("next_step", "record again once the agent answers, or replay the set: under --on-miss fail (the default) a call it is missing fails the replay"))
 	}

@@ -200,6 +200,13 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// Every method is routed to it, so with the switch off the path is
 		// the plain 404 it was before the wire existed.
 		r.HandleFunc("/instance", a.HandleInstance)
+		// Opt-in process subtree scoping (scope_proven.go): a test binary
+		// launcher registers its PID before exec'ing the compiled binary so
+		// FlagScopedPids intercepts the test binary and its descendants while
+		// leaving the outer build toolchain outside interception. Available
+		// regardless of KEPLOY_PROVEN.
+		r.Post("/scope-pid", a.HandleScopePID)
+		r.Get("/scope-status", a.HandleScopeStatus)
 		// What an integration refused, for the run's verdict to name
 		// (scope_proven.go). The plain 404 with the switch off.
 		r.HandleFunc("/refusal", a.HandleRefusal)

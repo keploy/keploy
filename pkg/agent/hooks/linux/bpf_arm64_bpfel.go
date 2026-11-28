@@ -34,6 +34,7 @@ const (
 	bpfMapKeployAgentRegistrationMap  = "keploy_agent_registration_map"
 	bpfMapKeployClientKernelPidMap    = "keploy_client_kernel_pid_map"
 	bpfMapKeployClientRegistrationMap = "keploy_client_registration_map"
+	bpfMapKeployScopedCgroupLevelMap  = "keploy_scoped_cgroup_level_map"
 	bpfMapOrigDstByCookie             = "orig_dst_by_cookie"
 	bpfMapPendingBinds                = "pending_binds"
 	bpfMapPendingHolds                = "pending_holds"
@@ -194,6 +195,7 @@ type bpfMapSpecs struct {
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
+	KeployScopedCgroupLevelMap  *ebpf.MapSpec `ebpf:"keploy_scoped_cgroup_level_map"`
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.MapSpec `ebpf:"pending_binds"`
 	PendingHolds                *ebpf.MapSpec `ebpf:"pending_holds"`
@@ -270,6 +272,7 @@ type bpfMaps struct {
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
+	KeployScopedCgroupLevelMap  *ebpf.Map `ebpf:"keploy_scoped_cgroup_level_map"`
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.Map `ebpf:"pending_binds"`
 	PendingHolds                *ebpf.Map `ebpf:"pending_holds"`
@@ -322,6 +325,7 @@ func (m *bpfMaps) Close() error {
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
+		m.KeployScopedCgroupLevelMap,
 		m.OrigDstByCookie,
 		m.PendingBinds,
 		m.PendingHolds,

@@ -96,6 +96,19 @@ type ScopeGateResp struct {
 // ScopeActionFail is the ScopeEndResp.Action telling a harness to fail the test.
 const ScopeActionFail = "fail"
 
+// ScopeStatus reports whether native Linux cgroup-based Go toolchain scoping
+// was requested at agent load and whether the run's scoped cgroup was armed.
+// When Requested is true and Ready is false (e.g. read-only /sys/fs/cgroup or
+// a non-delegated session without CAP_SYS_ADMIN), the agent fell back
+// fail-closed to full-tree interception; Reason names the cause and Remedy
+// tells the user how to enable toolchain exemption.
+type ScopeStatus struct {
+	Requested bool   `json:"requested"`
+	Ready     bool   `json:"ready"`
+	Reason    string `json:"reason,omitempty"`
+	Remedy    string `json:"remedy,omitempty"`
+}
+
 // ScopeError is the body of every non-2xx answer of the wire. Code is one of
 // the ScopeErr* constants; Message says what happened and Remedy what to do.
 type ScopeError struct {
