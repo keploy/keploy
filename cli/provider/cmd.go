@@ -564,6 +564,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	switch cmd.Name() {
 	case "record":
 		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
+		cmd.Flags().Bool("watch", c.cfg.Record.Watch, "Keep recording after the application exits on its own: keploy restarts the command and appends to the same test set")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
 		cmd.Flags().Bool("ignore-static-assets", c.cfg.Record.IgnoreStaticAssets, "Skip recording successful GET/HEAD web static asset responses (CSS, JS, fonts, images, audio, video) as test cases")
 		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
@@ -2078,6 +2079,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			c.cfg.Record.Metadata = metadata
+
+			watch, err := cmd.Flags().GetBool("watch")
+			if err != nil {
+				errMsg := "failed to get the watch flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Record.Watch = watch
 
 			if cmd.Flags().Changed("memory-limit") {
 				memoryLimit, err := cmd.Flags().GetUint64("memory-limit")
