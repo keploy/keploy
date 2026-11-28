@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"sync"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -30,17 +31,25 @@ import (
 // first batch is written. Writing as the recording goes, not only at its end,
 // matters for a Kubernetes recording, which runs for hours and is
 // auto-replayed set by set before it ends.
+type markedCallState struct {
+	count int
+	secs  map[int64]struct{}
+}
+
 type workerMarks struct {
 	rules   []models.WorkerMockRule
 	logger  *zap.Logger
 	mu      sync.Mutex
 	pending []models.MockEntry
 	written int
-	// marked is the calls a rule marked a mock of already, as a digest of
-	// the rule id and call key (a key can hold a whole Redis value, or an
-	// AUTH password): pending holds at most a mark per call.
-	marked map[[sha256.Size]byte]struct{}
-	// overflowed is set once marked reached maxWorkerMarkCalls and a call
+	// marked tracks the calls a rule marked already, keyed by digest of
+	// (rule id, normalized call key). Static calls mark once; calls whose
+	// key normalized time-typed values retain up to learn.MinEpochReads
+	// distinct-second samples so EpochTrack can learn clock offsets while
+	// staying strictly bounded across multi-hour recordings.
+	marked     map[[sha256.Size]byte]*markedCallState
+	totalMarks int
+	// overflowed is set once totalMarks reached maxWorkerMarkCalls and a call
 	// went unmarked: said once.
 	overflowed bool
 }
@@ -78,7 +87,7 @@ func (w *workerMarks) add(m *models.Mock) *markedCall {
 	if w == nil || m == nil || m.Name == "" {
 		return nil
 	}
-	id, ok := models.MatchWorkerMockRules(w.rules, m)
+	rule, id, ok := models.MatchWorkerMockRule(w.rules, m)
 	if !ok {
 		return nil
 	}
@@ -90,34 +99,61 @@ func (w *workerMarks) add(m *models.Mock) *markedCall {
 		ResTimestampMock: models.FormatMockTimestamp(m.Spec.ResTimestampMock),
 		Reason:           models.WorkerRuleReason(id),
 	}
-	call := sha256.Sum256([]byte(id + "\x00" + models.WorkerMockCallKey(m)))
+	callKey, hasTime := models.WorkerMockCallKeyForRule(m, rule)
+	call := sha256.Sum256([]byte(id + "\x00" + callKey))
+	limit := 1
+	if hasTime {
+		limit = learn.MinEpochReads
+	}
+	sec := m.Spec.ReqTimestampMock.Unix()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if _, done := w.marked[call]; done {
-		return nil
+	if st, exists := w.marked[call]; exists {
+		if st.count >= limit {
+			return nil
+		}
+		if hasTime {
+			if _, sameSec := st.secs[sec]; sameSec {
+				return nil
+			}
+		}
 	}
-	if len(w.marked) >= maxWorkerMarkCalls {
+	if w.totalMarks >= maxWorkerMarkCalls {
 		if !w.overflowed {
 			w.overflowed = true
 			w.logger.Warn("worker-mock rules matched more distinct calls than a recording marks; later calls are not marked",
-				zap.Int("calls", len(w.marked)),
-				zap.String("next_step", "a worker-mock rule names a call each worker makes once: narrow a rule that matches a call per request"))
+				zap.Int("calls", w.totalMarks),
+				zap.String("next_step", "a worker-mock rule names a call each worker makes once: narrow a rule that matches a call per request; a Mongo poll whose clock keploy does not read as one (a cutoff over 400 days from the call, a double, a string that is not RFC 3339) is a new call each time: list that field in the rule's timeFields"))
 		}
 		return nil
 	}
 	w.pending = append(w.pending, e)
 	if w.marked == nil {
-		w.marked = map[[sha256.Size]byte]struct{}{}
+		w.marked = map[[sha256.Size]byte]*markedCallState{}
 	}
-	w.marked[call] = struct{}{}
-	return &markedCall{entry: e, call: call}
+	st, exists := w.marked[call]
+	if !exists {
+		st = &markedCallState{}
+		w.marked[call] = st
+	}
+	st.count++
+	if hasTime {
+		if st.secs == nil {
+			st.secs = map[int64]struct{}{}
+		}
+		st.secs[sec] = struct{}{}
+	}
+	w.totalMarks++
+	return &markedCall{entry: e, call: call, hasTime: hasTime, sec: sec}
 }
 
 // markedCall is a call a worker-mock rule marked: its worker-scope entry, and
 // the call it stands for.
 type markedCall struct {
-	entry models.MockEntry
-	call  [sha256.Size]byte
+	entry   models.MockEntry
+	call    [sha256.Size]byte
+	hasTime bool
+	sec     int64
 }
 
 // adopt marks calls in w as add marked them in another set's marks: a test set
@@ -131,13 +167,35 @@ func (w *workerMarks) adopt(calls []markedCall) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.marked == nil {
-		w.marked = map[[sha256.Size]byte]struct{}{}
+		w.marked = map[[sha256.Size]byte]*markedCallState{}
 	}
 	for _, c := range calls {
-		if _, done := w.marked[c.call]; done {
-			continue
+		limit := 1
+		if c.hasTime {
+			limit = learn.MinEpochReads
 		}
-		w.marked[c.call] = struct{}{}
+		st, exists := w.marked[c.call]
+		if exists {
+			if st.count >= limit {
+				continue
+			}
+			if c.hasTime {
+				if _, sameSec := st.secs[c.sec]; sameSec {
+					continue
+				}
+			}
+		} else {
+			st = &markedCallState{}
+			w.marked[c.call] = st
+		}
+		st.count++
+		if c.hasTime {
+			if st.secs == nil {
+				st.secs = map[int64]struct{}{}
+			}
+			st.secs[c.sec] = struct{}{}
+		}
+		w.totalMarks++
 		w.pending = append(w.pending, c.entry)
 	}
 }

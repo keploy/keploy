@@ -2,7 +2,9 @@ package record
 
 import (
 	"context"
+	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -218,5 +220,8 @@ func TestWorkerMarksStopAtTheirCap(t *testing.T) {
 	}
 	if n := logs.FilterMessageSnippet("later calls are not marked").Len(); n != 1 {
 		t.Fatalf("the cap was said %d times; want once", n)
+	}
+	if hint := logs.FilterMessageSnippet("later calls are not marked").All()[0].ContextMap()["next_step"]; !strings.Contains(fmt.Sprint(hint), "timeFields") {
+		t.Fatalf("the cap's next step names no timeFields: %v", hint)
 	}
 }
