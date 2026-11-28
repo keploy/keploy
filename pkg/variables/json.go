@@ -11,12 +11,27 @@ import (
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
+	"unsafe"
 
 	"go.keploy.io/server/v3/pkg/templates"
 )
 
-// IsJSONDoc reports whether s is one JSON document.
-func IsJSONDoc(s string) bool { return json.Valid([]byte(s)) }
+// IsJSONDoc reports whether s is one JSON document without copying s.
+func IsJSONDoc(s string) bool {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') {
+		i++
+	}
+	if i == len(s) {
+		return false
+	}
+	switch s[i] {
+	case '{', '[', '"', 't', 'f', 'n', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		tail := s[i:]
+		return json.Valid(unsafe.Slice(unsafe.StringData(tail), len(tail)))
+	}
+	return false
+}
 
 // JSONLeafAt returns the scalar of doc at path: doc must be one JSON document,
 // and the scalar the one a reader sees there (a repeated key's last value).

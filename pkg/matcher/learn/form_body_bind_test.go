@@ -311,47 +311,174 @@ func TestFormURLEncodedClientRequestBindsInDecideAndClassify(t *testing.T) {
 }
 
 func TestPairCaseLegacyDecodedFormMatchesRawLiveOutOfOrder(t *testing.T) {
-	for _, ct := range []string{
-		"application/x-www-form-urlencoded",
-		"application/x-www-form-urlencoded; charset=utf-8",
-	} {
-		t.Run(ct, func(t *testing.T) {
-			req := func(body string) *models.HTTPReq {
-				return &models.HTTPReq{
-					Method: "POST",
-					URL:    "http://api/signup",
-					Header: map[string]string{"Content-Type": ct},
-					Body:   body,
-				}
-			}
-			cases := []ClientCase{
-				{Name: "post-signup-1", Req: req("email=ann@example.com&plan=pro")},
-				{Name: "post-signup-2", Req: req("email=bob@example.com&plan=pro")},
-			}
-			// Live requests arrive raw (percent-encoded); test both targets
-			// against a full two-candidate list so PairCase cannot win by
-			// elimination.
-			i, ok := PairCase(cases, make([]bool, len(cases)), req("email=bob%40example.com&plan=pro"), true)
-			if !ok || cases[i].Name != "post-signup-2" {
-				t.Fatalf("bob paired with (%d, %v); want post-signup-2", i, ok)
-			}
-			j, ok := PairCase(cases, make([]bool, len(cases)), req("email=ann%40example.com&plan=pro"), true)
-			if !ok || cases[j].Name != "post-signup-1" {
-				t.Fatalf("ann paired with (%d, %v); want post-signup-1", j, ok)
-			}
+	const exactCT = "application/x-www-form-urlencoded"
+	const charsetCT = "application/x-www-form-urlencoded; charset=utf-8"
 
-			// Legacy pre-decoded recordings with literal '+' (originally %2B)
-			// must beat a space-bearing candidate listed first when paired
-			// against a raw live request carrying %2B.
-			plusCases := []ClientCase{
-				{Name: "post-space", Req: req("email=ann x@example.com&plan=pro")},
-				{Name: "post-plus", Req: req("email=ann+x@example.com&plan=pro")},
+	type livePair struct{ body, want string }
+	type pairRow struct {
+		name         string
+		cts          []string
+		recs         [][2]string
+		lives        []livePair
+		seqOnlyExact bool // true when exact-CT live[1] is ambiguous against unused live[0] (same as legacy exact-CT decoded body)
+	}
+
+	rows := []pairRow{
+		// Exact-CT legacy decoded recordings (older builds only decoded exact CT,
+		// never charset-parameterized CT) paired against raw live requests.
+		{
+			name: "exact-CT legacy @ reversed",
+			cts:  []string{exactCT},
+			recs: [][2]string{{"ann", "email=ann@example.com&plan=pro"}, {"bob", "email=bob@example.com&plan=pro"}},
+			lives: []livePair{
+				{"email=bob%40example.com&plan=pro", "bob"},
+				{"email=ann%40example.com&plan=pro", "ann"},
+			},
+		},
+		{
+			name: "exact-CT legacy plus/space (plus-rec first, live space first)",
+			cts:  []string{exactCT},
+			recs: [][2]string{{"plus", "q=a+b&k=1"}, {"space", "q=a b&k=1"}},
+			lives: []livePair{
+				{"q=a+b&k=1", "space"},
+				{"q=a%2Bb&k=1", "plus"},
+			},
+		},
+		{
+			name: "exact-CT legacy plus/space (space-rec first, live plus first)",
+			cts:  []string{exactCT},
+			recs: [][2]string{{"space", "q=a b&k=1"}, {"plus", "q=a+b&k=1"}},
+			lives: []livePair{
+				{"q=a%2Bb&k=1", "plus"},
+				{"q=a+b&k=1", "space"},
+			},
+		},
+		{
+			name: "exact-CT legacy email plus/space (plus-rec first)",
+			cts:  []string{exactCT},
+			recs: [][2]string{{"post-plus", "email=ann+x@example.com&plan=pro"}, {"post-space", "email=ann x@example.com&plan=pro"}},
+			lives: []livePair{
+				{"email=ann+x%40example.com&plan=pro", "post-space"},
+				{"email=ann%2Bx%40example.com&plan=pro", "post-plus"},
+			},
+		},
+		{
+			name: "exact-CT legacy literal %20 vs space",
+			cts:  []string{exactCT},
+			recs: [][2]string{{"lit", "q=a%20b&k=1"}, {"space", "q=a b&k=1"}},
+			lives: []livePair{
+				{"q=a+b&k=1", "space"},
+				{"q=a%2520b&k=1", "lit"},
+			},
+		},
+		{
+			name: "exact-CT mixed legacy + raw set",
+			cts:  []string{exactCT},
+			recs: [][2]string{{"ann-legacy", "email=ann@example.com&plan=pro"}, {"bob-raw", "email=bob%40example.com&plan=pro"}},
+			lives: []livePair{
+				{"email=bob%40example.com&plan=pro", "bob-raw"},
+				{"email=ann%40example.com&plan=pro", "ann-legacy"},
+			},
+		},
+		// Raw recordings with encoded delimiters: restoring dual emission on the
+		// stored side causes tie swaps on both exact-CT and charset-CT rows.
+		{
+			name: "raw encoded delimiter a=1%262 vs a=1&2 (enc first)",
+			cts:  []string{exactCT, charsetCT},
+			recs: [][2]string{{"enc", "a=1%262"}, {"amp", "a=1&2"}},
+			lives: []livePair{
+				{"a=1&2", "amp"},
+				{"a=1%262", "enc"},
+			},
+			seqOnlyExact: true,
+		},
+		{
+			name: "charset-CT raw encoded delimiter a=1%262 vs a=1&2 (amp first)",
+			cts:  []string{charsetCT},
+			recs: [][2]string{{"amp", "a=1&2"}, {"enc", "a=1%262"}},
+			lives: []livePair{
+				{"a=1%262", "enc"},
+				{"a=1&2", "amp"},
+			},
+		},
+		{
+			name: "raw encoded delimiter q=a%26b%3Dc vs q=a&b=c",
+			cts:  []string{exactCT, charsetCT},
+			recs: [][2]string{{"enc", "q=a%26b%3Dc"}, {"split", "q=a&b=c"}},
+			lives: []livePair{
+				{"q=a&b=c", "split"},
+				{"q=a%26b%3Dc", "enc"},
+			},
+			seqOnlyExact: true,
+		},
+		{
+			name: "raw encoded slash x=a%2Fb vs x=a&y=b",
+			cts:  []string{exactCT, charsetCT},
+			recs: [][2]string{{"enc", "x=a%2Fb"}, {"split", "x=a&y=b"}},
+			lives: []livePair{
+				{"x=a&y=b", "split"},
+				{"x=a%2Fb", "enc"},
+			},
+			seqOnlyExact: true,
+		},
+		{
+			name: "raw %20 vs + distinct cases",
+			cts:  []string{exactCT, charsetCT},
+			recs: [][2]string{{"one", "q=a%20b&id=1"}, {"two", "q=a+b&id=2"}},
+			lives: []livePair{
+				{"q=a+b&id=2", "two"},
+				{"q=a%20b&id=1", "one"},
+			},
+		},
+		// JSON body sent under form Content-Type carrying %26 / %3D must not be
+		// QueryUnescape'd into a false tie against a split-delimiter body.
+		{
+			name: "JSON under form CT with percent escapes",
+			cts:  []string{exactCT, charsetCT},
+			recs: [][2]string{
+				{"lit", `{"q":"a&b=c","k":"1"}`},
+				{"enc", `{"q":"a%26b%3Dc","k":"1"}`},
+			},
+			lives: []livePair{
+				{`{"q":"a%26b%3Dc","k":"1"}`, "enc"},
+				{`{"q":"a&b=c","k":"1"}`, "lit"},
+			},
+		},
+	}
+
+	for _, hdrKey := range []string{"Content-Type", "content-type"} {
+		for _, row := range rows {
+			for _, ct := range row.cts {
+				t.Run(hdrKey+"/"+ct+"/"+row.name, func(t *testing.T) {
+					req := func(body string) *models.HTTPReq {
+						return &models.HTTPReq{
+							Method: "POST",
+							URL:    "http://api/signup",
+							Header: map[string]string{hdrKey: ct},
+							Body:   body,
+						}
+					}
+					cases := make([]ClientCase, 0, len(row.recs))
+					for _, rc := range row.recs {
+						cases = append(cases, ClientCase{Name: rc[0], Req: req(rc[1])})
+					}
+					used := make([]bool, len(cases))
+					for _, lv := range row.lives {
+						if !(row.seqOnlyExact && ct == exactCT) {
+							freshIdx, ok := PairCase(cases, make([]bool, len(cases)), req(lv.body), true)
+							if !ok || cases[freshIdx].Name != lv.want {
+								t.Fatalf("fresh PairCase(%q) = (%d %q, %v); want %q", lv.body, freshIdx, cases[freshIdx].Name, ok, lv.want)
+							}
+						}
+						seqIdx, ok := PairCase(cases, used, req(lv.body), true)
+						if !ok || cases[seqIdx].Name != lv.want {
+							t.Fatalf("seq PairCase(%q) = (%d %q, %v); want %q", lv.body, seqIdx, cases[seqIdx].Name, ok, lv.want)
+						}
+						used[seqIdx] = true
+					}
+				})
 			}
-			k, ok := PairCase(plusCases, make([]bool, len(plusCases)), req("email=ann%2Bx%40example.com&plan=pro"), true)
-			if !ok || plusCases[k].Name != "post-plus" {
-				t.Fatalf("ann+x paired with (%d, %v); want post-plus", k, ok)
-			}
-		})
+		}
 	}
 }
 
@@ -501,6 +628,11 @@ func TestDecideNamesUnbindableFormKeyAndParseReasons(t *testing.T) {
 			d := oWord(t, Decide(in), ns(rNanos), ns(fNanos))
 			if d.FromAt.Place.Part != 0 {
 				t.Fatalf("FromAt = %q; want empty (unbindable)", d.FromAt.String())
+			}
+			if !strings.Contains(d.Line, "observed a value keploy cannot bind at its source: test case post-oauth-par-2 body") ||
+				!strings.Contains(d.Line, " holds it, but keploy cannot bind it there (") ||
+				strings.Contains(d.Line, "bound at its source") || strings.Contains(d.Line, "bound to ") {
+				t.Fatalf("line=%q; want 'observed a value keploy cannot bind at its source: <place> holds it, but keploy cannot bind it there (<reason>)' without contradictory bound wording", d.Line)
 			}
 			if !strings.Contains(d.Line, tc.wantWhy) || !strings.Contains(d.From.UnbindableWhy, tc.wantWhy) {
 				t.Fatalf("line=%q unbindableWhy=%q; want substring %q", d.Line, d.From.UnbindableWhy, tc.wantWhy)

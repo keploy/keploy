@@ -336,9 +336,10 @@ wait_for_tests 5 || fail "keploy record wrote $(test_files) test cases, want 5"
 stop_pid "$REC_PID"; REC_PID=""; own
 kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null
 [ "$(test_files)" -eq 5 ] || { fail "recorded $(test_files) test cases, want 5"; tail -30 record.log; exit 1; }
+FORM_TC="$(grep -l 'url: .*/form-submit$' keploy/test-set-0/tests/*.yaml | head -n1)"
+[ -n "$FORM_TC" ] || fail "no recorded form-submit test case found"
 if [ "$RECORD_BIN" = "$REPLAY_BIN" ]; then
-  FORM_TC="$(grep -l 'url: .*/form-submit$' keploy/test-set-0/tests/*.yaml | head -n1)"
-  [ -n "$FORM_TC" ] && grep -q 'note=x%26y%3Dz+50%25+off&tag=a%2Bb' "$FORM_TC" ||
+  grep -q 'note=x%26y%3Dz+50%25+off&tag=a%2Bb' "$FORM_TC" ||
     fail "recorded form test case did not preserve raw percent-encoded body: $(grep -m1 'body:' "$FORM_TC" 2>/dev/null)"
 fi
 MOCKS=keploy/test-set-0/mocks.yaml
@@ -411,6 +412,73 @@ replay off ""
 OFF="$(case_statuses)"
 [ "$(echo "$OFF" | grep -c .)" -eq 5 ] || fail "switch off: the report holds $(echo "$OFF" | grep -c .) test cases, want 5"
 grep -q 'variable_mismatch\|kind: variable\|^ *variables:$' "$(REPORT)" && fail "switch off: a report mentions a variable"
+FTN="$(basename "$FORM_TC" .yaml)"
+python3 - "$(REPORT)" "$FTN" <<'PY' || fail "switch off: $FTN body diff was not limited to code_matched (form bytes corrupted?)"
+import json, re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+tc_id = sys.argv[2]
+# Split report entries at each test entry ("- kind: ...") using stdlib only.
+blocks = re.split(r"(?m)^(?=[ \t]*- kind:)", text)
+tc_block = next((b for b in blocks if re.search(rf"(?m)^\s*test_case_id:\s*['\"]?{re.escape(tc_id)}['\"]?\s*$", b)), None)
+assert tc_block is not None, f"missing {tc_id} in report"
+
+def yaml_section(block, key):
+    lines = block.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(rf"^([ \t]*){re.escape(key)}:[ \t]*$", line)
+        if not m:
+            continue
+        base = len(m.group(1))
+        out = []
+        for sub in lines[i + 1 :]:
+            if not sub.strip():
+                out.append(sub)
+                continue
+            if len(sub) - len(sub.lstrip(" \t")) <= base:
+                break
+            out.append(sub)
+        return "\n".join(out)
+    return None
+
+sc_sec = yaml_section(tc_block, "status_code")
+if sc_sec is not None:
+    assert "normal: false" not in sc_sec, f"status_code diff in {tc_id}: {sc_sec}"
+body_sec = yaml_section(tc_block, "body_result")
+assert body_sec is not None, f"missing body_result in {tc_id}"
+assert "normal: false" in body_sec, "expected code_matched body diff with KEPLOY_PROVEN unset"
+
+def extract_json_field(sec, key):
+    # YAML may serialize the JSON string as single-quoted, double-quoted, bare, or block scalar (| / |-).
+    lines = sec.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(rf"^([ \t]*)(?:-\s+)?{re.escape(key)}:[ \t]*(.*)$", line)
+        if not m:
+            continue
+        base = len(m.group(1))
+        raw = m.group(2).strip()
+        if raw in ("|", "|-", "|+", ">", ">-", ">+"):
+            chunk = []
+            for sub in lines[i + 1 :]:
+                if not sub.strip():
+                    continue
+                if len(sub) - len(sub.lstrip(" \t")) <= base:
+                    break
+                chunk.append(sub.strip())
+            raw = "".join(chunk)
+        elif raw.startswith("'") and raw.endswith("'"):
+            raw = raw[1:-1].replace("''", "'")
+        elif raw.startswith('"') and raw.endswith('"'):
+            raw = json.loads(raw)
+        return json.loads(raw)
+    raise AssertionError(f"missing {key} in body_result: {sec}")
+
+exp = extract_json_field(body_sec, "expected")
+act = extract_json_field(body_sec, "actual")
+assert exp["note"] == act["note"], f"note drifted: {exp} vs {act}"
+assert exp["tag"] == act["tag"], f"tag drifted: {exp} vs {act}"
+assert exp["code_matched"] is True and act["code_matched"] is False, f"unexpected code_matched: {exp} vs {act}"
+PY
 cp keploy.plain/test-set-0/mocks.yaml "$MOCKS"
 replay offplain ""
 OFFPLAIN="$(case_statuses)"

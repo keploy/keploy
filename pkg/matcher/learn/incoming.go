@@ -84,6 +84,11 @@ type caseCursor struct {
 // pairs with the one whose recording holds the most of live's words
 // (pairWords: of its URL, and of its body where body says keploy read it),
 // each counted once, and with the first of those in the recording's order.
+// For exact "application/x-www-form-urlencoded" non-JSON live requests (never
+// charset-parameterized CTs, which older builds already stored raw), each
+// candidate is also scored against url.QueryUnescape(live.Body) so legacy
+// pre-decoded recordings still pair, taking max(raw, decoded) with ties
+// preferring raw then recording order.
 // A word every request left holds tells none from another, and one none
 // holds (a value this run made: a name from its clock, an id) is no nearer
 // one than another. So requests that send the same words but for the values
@@ -112,21 +117,51 @@ func PairCase(cases []ClientCase, used []bool, live *models.HTTPReq, body bool) 
 	case 1:
 		return left[0], true
 	}
+	// Score each recorded case against two views of the live request: its
+	// raw wire words, and (for an exact-CT, non-JSON form body) the legacy
+	// whole-body QueryUnescape view that older keploy recordings stored.
+	// Taking max(raw, decoded) per case—with ties preferring the raw view,
+	// then recording order—pairs legacy pre-decoded recordings while keeping
+	// stored-side pairWords plain and leaving charset-parameterized forms
+	// raw-only. Note that on exact CT, when QueryUnescape splits a raw token
+	// (such as %26 or +) into more words, a candidate holding those split
+	// words can outscore raw without a persisted format marker.
 	sent := map[string]bool{}
 	pairWords(live, body, func(w string) { sent[w] = true })
-	best, most := left[0], 0
+	var dec map[string]bool
+	if body && isExactFormCT(live.Header) && !variables.IsJSONDoc(live.Body) {
+		if d, err := url.QueryUnescape(live.Body); err == nil && d != live.Body {
+			dl := *live
+			dl.Body = d
+			dec = map[string]bool{}
+			pairWords(&dl, body, func(w string) { dec[w] = true })
+		}
+	}
+	best, most, mostRaw := left[0], 0, 0
 	for _, i := range left {
-		held := map[string]bool{}
+		held, heldDec := map[string]bool{}, map[string]bool{}
 		pairWords(cases[i].Req, body, func(w string) {
 			if sent[w] {
 				held[w] = true
 			}
+			if dec[w] {
+				heldDec[w] = true
+			}
 		})
-		if len(held) > most {
-			best, most = i, len(held)
+		score := max(len(held), len(heldDec))
+		if score > most || score == most && len(held) > mostRaw {
+			best, most, mostRaw = i, score, len(held)
 		}
 	}
 	return best, true
+}
+
+// isExactFormCT reports whether header carries the bare exact form media type
+// that older keploy builds decoded on ingress (never parameterized CTs such
+// as "; charset=utf-8", which older builds already stored raw).
+func isExactFormCT(h map[string]string) bool {
+	return h["Content-Type"] == "application/x-www-form-urlencoded" ||
+		h["content-type"] == "application/x-www-form-urlencoded"
 }
 
 // pairWordsBytes is the most of a request's body PairCase reads the words
@@ -145,10 +180,7 @@ const pairWordsBytes = 64 << 10
 // run made is one word, which no other run's holds: a word of letters and
 // digits (eachWord) would cut it into pieces (a second, a hex group) that
 // another run's value holds by chance, pairing the request with a
-// recording that is not its own. For non-JSON application/x-www-form-urlencoded
-// bodies, each '&'-separated pair emits both its raw words and its per-pair
-// QueryUnescape'd key/value words so raw live bodies match both raw and legacy
-// pre-decoded recordings (including '+' and '%'-bearing values).
+// recording that is not its own.
 func pairWords(req *models.HTTPReq, body bool, each func(string)) {
 	words := func(s string) {
 		for _, w := range strings.FieldsFunc(s, func(r rune) bool { return r <= ' ' || strings.ContainsRune(pairWordEnds, r) }) {
@@ -163,34 +195,7 @@ func pairWords(req *models.HTTPReq, body bool, each func(string)) {
 	if len(text) > pairWordsBytes {
 		text = text[:pairWordsBytes]
 	}
-	var ct string
-	for k, v := range req.Header {
-		if strings.EqualFold(k, "Content-Type") {
-			ct = v
-			break
-		}
-	}
-	if text != "" && variables.IsFormMediaType(ct) && !variables.IsJSONDoc(req.Body) {
-		for _, pair := range strings.Split(text, "&") {
-			if pair == "" {
-				continue
-			}
-			words(pair)
-			k, v, hasEq := strings.Cut(pair, "=")
-			dk, kerr := url.QueryUnescape(k)
-			dv, verr := url.QueryUnescape(v)
-			if kerr == nil && (!hasEq || verr == nil) {
-				if dk != k {
-					words(dk)
-				}
-				if hasEq && dv != v {
-					words(dv)
-				}
-			}
-		}
-	} else {
-		words(text)
-	}
+	words(text)
 	for _, f := range req.Form {
 		for _, v := range f.Values {
 			words(v)

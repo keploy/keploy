@@ -150,21 +150,40 @@ func TestWireFormURLEncodedRoundTripThroughCaptureLearnAndReplay(t *testing.T) {
 				t.Fatalf("RequestPlace on legacy decoded recording = (%q, \"\"); want fail-closed mismatch", val)
 			}
 
-			// 5. Legacy decoded recordings still pair cleanly with out-of-order
-			// raw live requests captured through takeRequest (both CT spellings).
-			legacyCases := []learn.ClientCase{
-				{Name: "post-signup-1", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "email=ann@example.com&plan=pro"}},
-				{Name: "post-signup-2", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "email=bob@example.com&plan=pro"}},
-			}
-			liveBob := capture(ct, "email=bob%40example.com&plan=pro", fReqAt)
-			liveAnn := capture(ct, "email=ann%40example.com&plan=pro", fReqAt.Add(time.Millisecond))
-			idxBob, okBob := learn.PairCase(legacyCases, make([]bool, len(legacyCases)), liveBob, true)
-			if !okBob || legacyCases[idxBob].Name != "post-signup-2" {
-				t.Fatalf("legacy pair bob = (%d,%v); want post-signup-2", idxBob, okBob)
-			}
-			idxAnn, okAnn := learn.PairCase(legacyCases, make([]bool, len(legacyCases)), liveAnn, true)
-			if !okAnn || legacyCases[idxAnn].Name != "post-signup-1" {
-				t.Fatalf("legacy pair ann = (%d,%v); want post-signup-1", idxAnn, okAnn)
+			// 5. Pairing: exact-CT legacy decoded recordings still pair cleanly
+			// with out-of-order raw live requests captured through takeRequest,
+			// while charset-CT raw recordings (which older builds already stored
+			// raw) pair without cross-reading encoded delimiters.
+			if ct == "application/x-www-form-urlencoded" {
+				legacyCases := []learn.ClientCase{
+					{Name: "post-signup-1", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "email=ann@example.com&plan=pro"}},
+					{Name: "post-signup-2", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "email=bob@example.com&plan=pro"}},
+				}
+				liveBob := capture(ct, "email=bob%40example.com&plan=pro", fReqAt)
+				liveAnn := capture(ct, "email=ann%40example.com&plan=pro", fReqAt.Add(time.Millisecond))
+				idxBob, okBob := learn.PairCase(legacyCases, make([]bool, len(legacyCases)), liveBob, true)
+				if !okBob || legacyCases[idxBob].Name != "post-signup-2" {
+					t.Fatalf("legacy pair bob = (%d,%v); want post-signup-2", idxBob, okBob)
+				}
+				idxAnn, okAnn := learn.PairCase(legacyCases, make([]bool, len(legacyCases)), liveAnn, true)
+				if !okAnn || legacyCases[idxAnn].Name != "post-signup-1" {
+					t.Fatalf("legacy pair ann = (%d,%v); want post-signup-1", idxAnn, okAnn)
+				}
+			} else {
+				rawCases := []learn.ClientCase{
+					{Name: "post-enc", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "a=1%262"}},
+					{Name: "post-amp", Req: &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/oauth/par", Header: map[string]string{"Content-Type": ct}, Body: "a=1&2"}},
+				}
+				liveAmp := capture(ct, "a=1&2", fReqAt)
+				liveEnc := capture(ct, "a=1%262", fReqAt.Add(time.Millisecond))
+				idxAmp, okAmp := learn.PairCase(rawCases, make([]bool, len(rawCases)), liveAmp, true)
+				if !okAmp || rawCases[idxAmp].Name != "post-amp" {
+					t.Fatalf("charset raw pair amp = (%d,%v); want post-amp", idxAmp, okAmp)
+				}
+				idxEnc, okEnc := learn.PairCase(rawCases, make([]bool, len(rawCases)), liveEnc, true)
+				if !okEnc || rawCases[idxEnc].Name != "post-enc" {
+					t.Fatalf("charset raw pair enc = (%d,%v); want post-enc", idxEnc, okEnc)
+				}
 			}
 		})
 	}

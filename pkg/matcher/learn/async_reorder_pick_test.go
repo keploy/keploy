@@ -118,6 +118,29 @@ func TestAsyncReorderOfUnixNanoEmailBindsInsteadOfPick(t *testing.T) {
 		checkExcusedLine(t, "Earlier late mock-323", d, "mock-323", "test case post-decision-4 header.Cookie")
 	})
 
+	t.Run("placed Earlier late answer records exact Path in AnsweredAfter", func(t *testing.T) {
+		client := clientPlaced(t, "post-decision-4", clientDecision(rEmail, rBase), clientDecision(fEmail, fBase), fBase)
+		asked, answered := rBase.Add(10*time.Millisecond), rCall.Add(20*time.Millisecond)
+		// Recorded response holds an unrelated value while round F served fEmail
+		// early: answeredAfter does not record it, so excuseLate's aside Place
+		// is the sole writer of {mock-323, Response, body.user.email}.
+		placedLate := Earlier{
+			Mock: "mock-323", At: asked, Own: true,
+			Payload: RawOf(emailMock("mock-323", "other@example.com", "other@example.com", asked, answered), true).
+				ServedAs(1).
+				ServedLive(RawOf(emailMock("mock-323", fEmail, fEmail, asked, answered), true)),
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "body.user.email", Noise: "body.user.email", Type: String, Value: "other@example.com"}, Live: fEmail}},
+		}
+		d := oWord(t, Decide(callWith(append(client, placedLate), nil)), rWord, fWord)
+		if d.Outcome != OutcomeValue || !d.From.Client || d.From.Mock != "test case post-decision-4" {
+			t.Fatalf("placed late mock-323: %s; want OutcomeValue bound at client request", oDescribe([]Decision{d}))
+		}
+		wantPlace := Place{Mock: "mock-323", Side: Response, Path: "body.user.email"}
+		if !slices.Contains(d.AnsweredAfter, wantPlace) {
+			t.Fatalf("AnsweredAfter = %+v; want %+v", d.AnsweredAfter, wantPlace)
+		}
+	})
+
 	t.Run("distinct earlier in-scope send beats async reordered mock-323", func(t *testing.T) {
 		earlierSend := iSent("mock-260", rBase.Add(10*time.Millisecond), "body.email", String, rEmail, fEmail)
 		d := oWord(t, Decide(callWith([]Earlier{earlierSend}, []Raw{lateRaw(rEmail, fEmail)})), rWord, fWord)

@@ -35,6 +35,10 @@ type learnedWord struct {
 	// Noise is the field as keploy.yml's noise names it (noiseName), which
 	// the undo names; Field where it is "".
 	Noise string
+	// Unbindable is true when an earlier place holds the value (OutcomeValue)
+	// but keploy cannot bind it there (UnbindableWhy != ""). The rendered line
+	// must not claim the value was "bound at its source".
+	Unbindable bool
 }
 
 // outcomeSays is what a learned line says of each outcome.
@@ -52,8 +56,12 @@ func learnedLine(l learnedWord) string {
 	if secretAt(l.Field, l.Places) {
 		rec, full, rule = masked, masked, hidden(rule)
 	}
-	b.WriteString(recordedMark + strconv.Quote(rec) + roundFMark + strconv.Quote(full) + ": learned ")
-	b.WriteString(cmp.Or(outcomeSays[l.Outcome], "nothing"))
+	if l.Unbindable {
+		b.WriteString(recordedMark + strconv.Quote(rec) + roundFMark + strconv.Quote(full) + ": observed a value keploy cannot bind at its source")
+	} else {
+		b.WriteString(recordedMark + strconv.Quote(rec) + roundFMark + strconv.Quote(full) + ": learned ")
+		b.WriteString(cmp.Or(outcomeSays[l.Outcome], "nothing"))
+	}
 	if rule != "" {
 		b.WriteString(": " + rule)
 	}

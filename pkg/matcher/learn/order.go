@@ -3502,10 +3502,12 @@ func (dc *decider) bound(path string, at variables.Address, n int, c changedInst
 			}
 		}
 	}
-	if fromAt.Place.Part == 0 && first.leaf.UnnamedWhy != "" {
-		rule += "; cannot bind here (" + first.leaf.UnnamedWhy + ")"
+	how := "bound to " + name + rule + answeredAt(c.valueEcho, c.rec)
+	unbindable := fromAt.Place.Part == 0 && first.leaf.UnnamedWhy != ""
+	if unbindable {
+		how = name + " holds it, but keploy cannot bind it there (" + first.leaf.UnnamedWhy + ")" + rule + answeredAt(c.valueEcho, c.rec)
 	}
-	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+name+rule+answeredAt(c.valueEcho, c.rec), places)
+	d := dc.learnedWord(path, at, n, c.r, c.l, OutcomeValue, how, places, unbindable)
 	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest || first.trailed, InStartUp: first.startUp,
 		Given: first.given, Client: dc.isClient(first.mock), Clock: first.clock, Offset: first.offset, UnbindableWhy: first.leaf.UnnamedWhy}
 	d.FromAt = fromAt
@@ -4538,6 +4540,10 @@ func (p Place) BindAt() (at, live string, ok bool) {
 
 // learned is a decided word and its line.
 func (dc *decider) learned(path string, at variables.Address, n int, r, f string, o WordOutcome, rule string, places []string) Decision {
+	return dc.learnedWord(path, at, n, r, f, o, rule, places, false)
+}
+
+func (dc *decider) learnedWord(path string, at variables.Address, n int, r, f string, o WordOutcome, rule string, places []string, unbindable bool) Decision {
 	at.Word = n
 	from := ""
 	if dc.allScope {
@@ -4546,6 +4552,7 @@ func (dc *decider) learned(path string, at variables.Address, n int, r, f string
 	return Decision{At: at, Recorded: r, Full: f, Outcome: o, Line: learnedLine(learnedWord{
 		Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f,
 		Outcome: o, Rule: rule, Places: places, From: from, Noise: noiseName(dc.in, path),
+		Unbindable: unbindable,
 	})}
 }
 
