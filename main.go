@@ -25,7 +25,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/bpfsafety"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
-	userDb "go.keploy.io/server/v3/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
@@ -291,18 +290,11 @@ func start(ctx context.Context) {
 	conf.APIServerURL = apiServerURI
 	conf.GitHubClientID = gitHubClientID
 
-	// Capture the full command used for test runs (to be stored in report)
+	// Capture the full command used for test runs (to be stored in report).
+	// InstallationID is resolved lazily in provider.GetService once flags
+	// (such as --disable-tele, --version, --help) have been evaluated so
+	// read-only invocations and Docker image builds never persist a shared ID.
 	conf.Test.CmdUsed = utils.GetFullCommandUsed()
-	userDb := userDb.New(logger, conf)
-	conf.InstallationID, err = userDb.GetInstallationID(ctx)
-	if err != nil {
-		errMsg := "failed to get installation id"
-		utils.LogError(logger, err, errMsg)
-		// Returned, not os.Exit(1): the run ends through its deferred calls,
-		// which remove its temp log.
-		utils.ErrCode = utils.ExitKeployError
-		return
-	}
 
 	svcProvider := provider.NewServiceProvider(logger, conf)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
