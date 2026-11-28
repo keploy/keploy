@@ -145,3 +145,54 @@ func TestInstallationIDNamesEachMachineApart(t *testing.T) {
 		t.Fatalf("installation id %q is %d characters, want the 64 of a hex SHA-256", a, len(a))
 	}
 }
+
+// LookupInstallationID gives the id GetInstallationID gives wherever that
+// needs no new one, and writes nothing: where GetInstallationID would mint
+// and persist a fallback id, it gives "" and leaves no keploy.yaml; once a
+// fallback id is persisted, it gives that one.
+func TestLookupInstallationIDNeverMintsOrWrites(t *testing.T) {
+	const raw = "3f2c9a1b7d4e4c0f9a6b2d8e1c5f7a90"
+	for _, tc := range []struct {
+		name          string
+		inDocker      string
+		raw           string
+		err           error
+		envID         string
+		needsFallback bool
+	}{
+		{name: "a machine id", raw: raw},
+		{name: "a container keploy started, with the host's id", inDocker: "true", raw: "container-id", envID: "host-id"},
+		{name: "empty machine id", raw: "", needsFallback: true},
+		{name: "machine id error", err: errors.New("no machine id"), needsFallback: true},
+		{name: "a container with no INSTALLATION_ID", inDocker: "true", raw: "container-id", needsFallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := withTempHome(t)
+			t.Setenv("KEPLOY_INDOCKER", tc.inDocker)
+			t.Setenv("INSTALLATION_ID", tc.envID)
+			withMachineID(t, tc.raw, tc.err)
+			db := New(zap.NewNop(), nil)
+			keployYAML := filepath.Join(home, ".keploy", "keploy.yaml")
+
+			looked := db.LookupInstallationID(context.Background())
+			if _, err := os.Stat(keployYAML); !os.IsNotExist(err) {
+				t.Fatalf("LookupInstallationID wrote %s (stat err=%v)", keployYAML, err)
+			}
+			if tc.needsFallback {
+				if looked != "" {
+					t.Fatalf("LookupInstallationID = %q with no id to find, want \"\"", looked)
+				}
+			}
+			got, err := db.GetInstallationID(context.Background())
+			if err != nil {
+				t.Fatalf("GetInstallationID: %v", err)
+			}
+			if !tc.needsFallback && looked != got {
+				t.Fatalf("LookupInstallationID = %q, GetInstallationID = %q: want the same id", looked, got)
+			}
+			if again := db.LookupInstallationID(context.Background()); again != got {
+				t.Fatalf("after GetInstallationID gave %q, LookupInstallationID = %q", got, again)
+			}
+		})
+	}
+}

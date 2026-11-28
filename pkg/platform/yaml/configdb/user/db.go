@@ -122,21 +122,49 @@ var (
 // randomly generated 64-hex fallback ID in ~/.keploy/keploy.yaml (or caches
 // one in memory if the home directory is read-only) so OSS events still carry
 // a stable, unique installation id instead of falling back to "unattributed".
-func (db *Db) GetInstallationID(_ context.Context) (string, error) {
+func (db *Db) GetInstallationID(ctx context.Context) (string, error) {
+	if id := db.LookupInstallationID(ctx); id != "" {
+		return id, nil
+	}
+	return db.fallbackInstallationID(), nil
+}
+
+// LookupInstallationID is the id GetInstallationID returns wherever that
+// needs no new id: the host keploy's (KEPLOY_INDOCKER), the machine's, or a
+// fallback id this home or this process already holds. It never creates or
+// writes one: it returns "" where GetInstallationID would mint a fallback id.
+// For a caller that labels an event of a command that may not have run (its
+// --help, a flag cobra refused), where GetInstallationID would persist a
+// fallback id in an image built with that command.
+func (db *Db) LookupInstallationID(_ context.Context) string {
 	if os.Getenv("KEPLOY_INDOCKER") == "true" {
 		if id := strings.TrimSpace(os.Getenv("INSTALLATION_ID")); id != "" {
-			return id, nil
+			return id
 		}
-		return db.fallbackInstallationID(), nil
+		return db.heldFallbackInstallationID()
 	}
 	raw, err := machineID()
 	if err == nil && strings.TrimSpace(raw) != "" {
-		return installationID(raw), nil
+		return installationID(raw)
 	}
 	if err != nil && db.logger != nil {
 		db.logger.Debug("failed to get machine id; using persisted fallback installation id", zap.Error(err))
 	}
-	return db.fallbackInstallationID(), nil
+	return db.heldFallbackInstallationID()
+}
+
+// heldFallbackInstallationID is the fallback id ~/.keploy/keploy.yaml holds,
+// else the one this process holds where it could not persist its own; "" when
+// there is neither.
+func (db *Db) heldFallbackInstallationID() string {
+	if cfg, err := db.ReadKeployConfig(); err == nil && cfg != nil {
+		if id := strings.TrimSpace(cfg.InstallationID); id != "" {
+			return id
+		}
+	}
+	processFallbackIDMu.Lock()
+	defer processFallbackIDMu.Unlock()
+	return processFallbackID
 }
 
 // fallbackInstallationID returns a persisted random 64-hex installation ID from
@@ -144,10 +172,8 @@ func (db *Db) GetInstallationID(_ context.Context) (string, error) {
 // writing keploy.yaml both fail (for example in a read-only container), it
 // falls back to a process-scoped random 64-hex ID.
 func (db *Db) fallbackInstallationID() string {
-	if cfg, err := db.ReadKeployConfig(); err == nil && cfg != nil {
-		if id := strings.TrimSpace(cfg.InstallationID); id != "" {
-			return id
-		}
+	if id := db.heldFallbackInstallationID(); id != "" {
+		return id
 	}
 	id := randomInstallationID()
 	cfg, err := db.ReadKeployConfig()

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
 	"go.uber.org/zap"
 )
@@ -86,5 +87,40 @@ func TestGetService_ResolvesInstallationIDLazilyAndHonorsDisableTele(t *testing.
 	}
 	if _, err := os.Stat(keployYAML); err != nil {
 		t.Fatalf("expected GetService to persist %s: %v", keployYAML, err)
+	}
+}
+
+func TestHonorTelemetryOptOut_FlagValueRespected(t *testing.T) {
+	newCmd := func(args ...string) *cobra.Command {
+		cmd := &cobra.Command{Use: "config"}
+		cmd.Flags().Bool("disable-tele", false, "")
+		if err := cmd.ParseFlags(args); err != nil {
+			t.Fatalf("ParseFlags(%v): %v", args, err)
+		}
+		return cmd
+	}
+
+	// Explicit --disable-tele=false must keep telemetry enabled even when the env var is set.
+	t.Setenv("KEPLOY_DISABLETELE", "true")
+	cfgFalse := config.New()
+	NewCmdConfigurator(zap.NewNop(), cfgFalse).HonorTelemetryOptOut(newCmd("--disable-tele=false"))
+	if cfgFalse.DisableTele {
+		t.Fatal("explicit --disable-tele=false must not disable telemetry")
+	}
+
+	// Explicit --disable-tele=true disables telemetry.
+	t.Setenv("KEPLOY_DISABLETELE", "")
+	cfgTrue := config.New()
+	NewCmdConfigurator(zap.NewNop(), cfgTrue).HonorTelemetryOptOut(newCmd("--disable-tele=true"))
+	if !cfgTrue.DisableTele {
+		t.Fatal("explicit --disable-tele=true must disable telemetry")
+	}
+
+	// Unchanged flag falls back to KEPLOY_DISABLETELE=true.
+	t.Setenv("KEPLOY_DISABLETELE", "true")
+	cfgEnv := config.New()
+	NewCmdConfigurator(zap.NewNop(), cfgEnv).HonorTelemetryOptOut(newCmd())
+	if !cfgEnv.DisableTele {
+		t.Fatal("KEPLOY_DISABLETELE=true must disable telemetry when flag is unset")
 	}
 }
