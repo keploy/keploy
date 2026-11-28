@@ -639,9 +639,9 @@ type ItemsContainer struct {
 }
 
 type PostmanItem struct {
-	Name      string              `json:"name"`
-	Variables []map[string]string `json:"variable,omitempty"`
-	Item      []PostmanItemNode   `json:"item"`
+	Name      string                   `json:"name"`
+	Variables []map[string]interface{} `json:"variable,omitempty"`
+	Item      []PostmanItemNode        `json:"item"`
 }
 
 // CollectRequests returns all leaf requests contained in the folder and its
