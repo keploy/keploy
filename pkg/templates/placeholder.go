@@ -243,7 +243,12 @@ func placeholderAt(s string, m []int) Placeholder {
 // whole placeholder.
 func findEncoded(s string) []Placeholder {
 	var out []Placeholder
-	lower := strings.ToLower(s)
+	// lower is searched for the open and close, and what it finds is cut out
+	// of s, so it has to be s's length byte for byte. strings.ToLower is not:
+	// it lowercases any rune, and a few change their width (İ, the Kelvin
+	// sign and Ⱥ among them), as invalid UTF-8 becomes U+FFFD, which moved
+	// every offset after it and cut s in the wrong place, or past its end.
+	lower := asciiLower(s)
 	from := 0
 	for {
 		i := strings.Index(lower[from:], "%7b%7b")
@@ -268,6 +273,19 @@ func findEncoded(s string) []Placeholder {
 		}
 		from = start + len("%7b%7b")
 	}
+}
+
+// asciiLower is s with its ASCII capitals lowercased and every other byte left
+// as it is, so that it is as long as s and a byte offset in one is the same
+// offset in the other.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
 
 // hasEncodedOpen reports whether s holds "%7B%7B" in any letter case. It looks
