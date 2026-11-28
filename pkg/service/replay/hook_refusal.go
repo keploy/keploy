@@ -30,6 +30,35 @@ func (r *Replayer) sayBeforeTestCaseRunFailed(err error, tc *models.TestCase) {
 		zap.String("next_step", "check the BeforeTestCaseRun implementation and any external dependencies it uses (e.g. KMS, auth, network)"))
 }
 
+// testCaseRefusal is the refusal err carries when BeforeTestCaseRun refused to
+// run a test case (models.TestCaseRefusal), else nil. It is nil too once ctx
+// is done so cancellation stops the run rather than recording a refusal.
+func testCaseRefusal(ctx context.Context, err error) *models.TestCaseRefusal {
+	var refusal *models.TestCaseRefusal
+	if ctx.Err() != nil || !errors.As(err, &refusal) {
+		return nil
+	}
+	return refusal
+}
+
+// failHookRefusedTest fails a test case that BeforeTestCaseRun refused
+// (models.TestCaseRefusal), without sending it to the application.
+func (r *Replayer) failHookRefusedTest(ctx context.Context, testRunID, testSetID string, tc *models.TestCase, refusal *models.TestCaseRefusal) error {
+	utils.LogError(r.logger, refusal.Err, "BeforeTestCaseRun refused this test case; failing it without sending",
+		zap.String("testcase", tc.Name))
+	failures := []models.TemplateFailure{{
+		Where:   "test case " + tc.Name,
+		Why:     refusal.Error(),
+		Refused: true,
+	}}
+	res := r.refusedResult(testSetID, tc, failures, models.TestCaseRefused)
+	if err := r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, res); err != nil {
+		utils.LogError(r.logger, err, "failed to insert test case result for a test that was not sent")
+		return err
+	}
+	return nil
+}
+
 // mockRefusal is the refusal err carries when a replay hook refused one of a
 // test set's mocks on its way to the agent (models.MockPayloadRefusal), else
 // nil. It is nil too once ctx is done: a hook that failed because the run was

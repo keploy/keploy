@@ -102,6 +102,25 @@ func (e *MockPayloadRefusal) Error() string {
 
 func (e *MockPayloadRefusal) Unwrap() error { return e.Err }
 
+// TestCaseRefusal is the error of a TestCaseMutator's BeforeTestCaseRun that
+// refuses to run a test case (for example, a declarative transform whose
+// precondition failed at runtime). The replay fails the test case unsent with
+// Err instead of sending an untransformed request, and goes on to the next
+// test case.
+//
+// Refusal errors are logged and written verbatim to TemplateFailure.Why, so
+// callers must never format recorded or live secret values into Err.
+type TestCaseRefusal struct {
+	TestCase string
+	Err      error
+}
+
+func (e *TestCaseRefusal) Error() string {
+	return fmt.Sprintf("the BeforeTestCaseRun hook refused test case %q: %v", e.TestCase, e.Err)
+}
+
+func (e *TestCaseRefusal) Unwrap() error { return e.Err }
+
 // payloadOnDisk is where a mock's payload was left, and what the replay asks
 // of the payload, answered before it was.
 type payloadOnDisk struct {

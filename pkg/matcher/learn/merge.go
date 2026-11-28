@@ -84,22 +84,33 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 		return added
 	}
 	if len(st.Variables) > 0 || len(binds) > 0 {
+		// Keep in-memory declared variables already on mock (e.g. when
+		// KeptLearning.Onto overlays learning onto served mocks); disk
+		// encoders strip Source == VariableSourceDeclared on write-back.
 		vars := mock.Spec.Variables.Clone()
 		if vars == nil {
 			vars = models.MockVariables{}
 		}
 		names := make([]string, 0, len(st.Variables)+len(binds))
-		for n := range st.Variables {
-			names = append(names, n)
+		for n, v := range st.Variables {
+			if v.Source != models.VariableSourceDeclared {
+				names = append(names, n)
+			}
 		}
-		for n := range binds {
-			if _, ok := st.Variables[n]; !ok {
+		for n, b := range binds {
+			if b.Source == models.VariableSourceDeclared {
+				continue
+			}
+			if stv, ok := st.Variables[n]; !ok || stv.Source == models.VariableSourceDeclared {
 				names = append(names, n)
 			}
 		}
 		for _, n := range names {
 			v, ok := st.Variables[n]
-			if b, isBind := binds[n]; isBind {
+			if ok && v.Source == models.VariableSourceDeclared {
+				ok = false
+			}
+			if b, isBind := binds[n]; isBind && b.Source != models.VariableSourceDeclared {
 				if ok {
 					v = MergeVariable(v, b)
 				} else {
@@ -122,6 +133,9 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 	}
 	varPlaces := map[string]bool{}
 	for _, v := range mock.Spec.Variables {
+		if v.Source == models.VariableSourceDeclared {
+			continue
+		}
 		for _, place := range append([]string{v.Bind}, v.Use...) {
 			if p, ok := noiseDroppedAt(mock, place); ok {
 				varPlaces[p] = true
@@ -180,8 +194,18 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 // both say so (models.MergeVariables). The why stays: a's, else b's, so a
 // variable bound at another recording keeps the line saying why it is one.
 // A use's check by form holds only where no learning checks it exactly
-// (models.MergeByForm).
+// (models.MergeByForm). Declared-only entries (VariableSourceDeclared) are
+// never merged into learned variables so declared places cannot be promoted to
+// learned and persisted.
 func MergeVariable(a, b models.MockVariable) models.MockVariable {
+	aDecl := a.Source == models.VariableSourceDeclared
+	bDecl := b.Source == models.VariableSourceDeclared
+	if aDecl && !bDecl {
+		return b
+	}
+	if bDecl && !aDecl {
+		return a
+	}
 	if a.Recorded == "" {
 		a.Recorded, a.Echo = b.Recorded, b.Echo
 	} else {
@@ -365,10 +389,13 @@ func FoldLearned(states map[string]models.MockState) (map[string]models.MockStat
 			withLearning[name] = st
 		}
 		for target, vs := range st.Binds {
-			if binds[target] == nil {
-				binds[target] = models.MockVariables{}
-			}
 			for vn, v := range vs {
+				if v.Source == models.VariableSourceDeclared {
+					continue
+				}
+				if binds[target] == nil {
+					binds[target] = models.MockVariables{}
+				}
 				binds[target][vn] = MergeVariable(binds[target][vn], v)
 			}
 		}

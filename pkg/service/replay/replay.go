@@ -1039,6 +1039,22 @@ func (r *Replayer) GetTestHooks() TestHooks {
 	return r.hookImpl
 }
 
+// SetReportDB replaces the report store used by the replayer. Call before
+// Start; it is not goroutine-safe. Note that TestCaseReporter.AfterTestCaseRun
+// receives *models.TestResult before ReportDB.InsertTestCaseResult is called.
+func (r *Replayer) SetReportDB(reportDB ReportDB) {
+	if reportDB == nil {
+		return
+	}
+	r.reportDB = reportDB
+}
+
+// GetReportDB returns the report store currently installed on the replayer.
+// Call before Start; it is not goroutine-safe.
+func (r *Replayer) GetReportDB() ReportDB {
+	return r.reportDB
+}
+
 func (r *Replayer) Start(ctx context.Context) (err error) {
 
 	r.logger.Debug("Starting Keploy replay... Please wait.")
@@ -3870,10 +3886,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 	}
-	r.logger.Debug("consumed mocks during initial setup",
+	logConsumedMocksDebug(r.logger, "consumed mocks during initial setup", consumedMocks,
 		zap.String("testSetID", testSetID),
-		zap.Int("count", len(consumedMocks)),
-		zap.Any("mocks", consumedMocks))
+		zap.Int("count", len(consumedMocks)))
 	// Partition the pre-first-test consumption. Everything drained here was
 	// consumed BEFORE any test fired, but it is not all the same tier:
 	//
@@ -4405,6 +4420,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if replay == 0 {
 				if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 					if err := mutator.BeforeTestCaseRun(runTestSetCtx, testCase, testSetID); err != nil {
+						if refusal := testCaseRefusal(runTestSetCtx, err); refusal != nil {
+							currentFailures++
+							testSetStatus = models.TestSetStatusFailed
+							if loopErr = r.failHookRefusedTest(runTestSetCtx, testRunID, testSetID, testCase, refusal); loopErr != nil {
+								break
+							}
+							continue
+						}
 						r.sayBeforeTestCaseRunFailed(err, testCase)
 					}
 				}
@@ -4463,7 +4486,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// What the filter that opens the test case carries, read before
 			// its capture window opens: the agent's learn step awaits the
 			// request from then on.
-			opening := r.openingOf(tmplRun, testCase)
+			opening := r.openingOf(tmplRun, testSetID, testCase)
 			// Exact serving: a test case begins only over the pool, never
 			// over the last test case's own view (poolBeforeBegin). Its
 			// capture window opens next, where the agent's learn tracker
@@ -4675,11 +4698,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// don't attribute the previous test's data to this one.
 					consumedMocks = nil
 				}
-				r.logger.Debug("consumed mocks after test case simulation",
+				logConsumedMocksDebug(r.logger, "consumed mocks after test case simulation", consumedMocks,
 					zap.String("testSetID", testSetID),
 					zap.String("testCaseID", testCase.Name),
 					zap.Int("count", len(consumedMocks)),
-					zap.Any("mocks", consumedMocks),
 					zap.Bool("fetchOk", instrumentConsumedFetchErr == nil))
 				// totalConsumedMocks aggregation is implicit-gated: on fetch
 				// failure consumedMocks was nil'd above, so this loop is a
@@ -4897,7 +4919,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				templateFailures = reportFailures(resolved.failures)
 				var varFailures []models.TemplateFailure
 				var unjudged string
-				boundVariables, varFailures, unjudged = r.testVariables(runTestSetCtx, tmplRun, testCase, resolved.captures, &variablesWarned)
+				boundVariables, varFailures, unjudged = r.testVariables(runTestSetCtx, tmplRun, testCase, resolved.captures, opening.vars, &variablesWarned)
 				templateFailures = append(templateFailures, varFailures...)
 				if unjudged != "" {
 					variablesUnjudged = appendOnce(variablesUnjudged, testCase.Name)
@@ -4966,11 +4988,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			carryAttr.mapConsumed(actualTestMockMappings, testCase.Name, tcReqTime, tcRespTime, consumedMocks)
 
 			// log the consumed mocks during the test run of the test case for test set
-			r.logger.Debug("consumed mocks for test case",
+			logConsumedMocksDebug(r.logger, "consumed mocks for test case", consumedMocks,
 				zap.String("testSetID", testSetID),
 				zap.String("testCaseID", testCase.Name),
-				zap.Strings("mockNames", mockNames),
-				zap.Any("mocks", consumedMocks))
+				zap.Strings("mockNames", mockNames))
 
 			// THE PER-TEST VERDICT, in one call.
 			//
@@ -5591,6 +5612,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// in Phase 1 is not needed here — each tc is executed exactly once.
 			if mutator, ok := r.hookImpl.(TestCaseMutator); ok {
 				if err := mutator.BeforeTestCaseRun(runTestSetCtx, tc, testSetID); err != nil {
+					if refusal := testCaseRefusal(runTestSetCtx, err); refusal != nil {
+						failure++
+						testSetStatus = models.TestSetStatusFailed
+						if loopErr = r.failHookRefusedTest(runTestSetCtx, testRunID, testSetID, tc, refusal); loopErr != nil {
+							break
+						}
+						continue
+					}
 					r.sayBeforeTestCaseRunFailed(err, tc)
 				}
 			}
@@ -5641,7 +5670,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// What the filter that opens the test case carries, read before
 			// its capture window opens: the agent's learn step awaits the
 			// request from then on.
-			opening := r.openingOf(tmplRun, tc)
+			opening := r.openingOf(tmplRun, testSetID, tc)
 			// Exact serving: a test case begins only over the pool, never
 			// over the last test case's own view (poolBeforeBegin). Its
 			// capture window opens next, where the agent's learn tracker

@@ -767,13 +767,70 @@ type testOpening struct {
 	request *models.TestRequest
 }
 
-// openingOf is tc's opening.
-func (r *Replayer) openingOf(run *templates.Run, tc *models.TestCase) testOpening {
+// openingOf is tc's opening for testSetID. Under the proven switch (outside
+// record's learning round, so declared bindings are never learned onto disk)
+// it carries template request bindings plus any declared bindings from an
+// OpeningVariablesProvider hook, deduplicated by name so template bindings
+// stay intact.
+func (r *Replayer) openingOf(run *templates.Run, testSetID string, tc *models.TestCase) testOpening {
 	o := testOpening{vars: requestVariables(run, tc)}
+	if provenswitch.On() && !r.learning() && tc != nil {
+		if prov, ok := r.hookImpl.(OpeningVariablesProvider); ok {
+			o.vars = mergeOpeningVariables(r.logger, testSetID, tc.Name, o.vars, prov.OpeningVariables(testSetID, tc.Name))
+		}
+	}
 	if r.learning() {
 		o.request = testRequestOf(run, tc, r.config.Path)
 	}
 	return o
+}
+
+// mergeOpeningVariables appends extra onto base, skipping any entry whose
+// non-empty Name is already present so existing template bindings stay intact.
+// When an extra binding collides with a template binding in base, it logs a
+// warning so the shadowed declared binding is visible.
+func mergeOpeningVariables(logger *zap.Logger, testSetID, testCaseName string, base, extra []models.VariableBinding) []models.VariableBinding {
+	if len(extra) == 0 {
+		return base
+	}
+	fromBase := make(map[string]struct{}, len(base))
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	out := make([]models.VariableBinding, 0, len(base)+len(extra))
+	for _, b := range base {
+		if b.Name != "" {
+			fromBase[b.Name] = struct{}{}
+			seen[b.Name] = struct{}{}
+		}
+		out = append(out, b)
+	}
+	for _, b := range extra {
+		// Fail closed: every provider binding is treated as Given and Sensitive
+		// so a provider can never accidentally leak values into capture errors,
+		// logs, or TestResult.Variables.
+		b.Given = true
+		b.Sensitive = true
+		if b.Name != "" {
+			if _, dup := seen[b.Name]; dup {
+				if logger != nil {
+					if _, clash := fromBase[b.Name]; clash {
+						logger.Warn("declared opening variable collides with template variable; keeping template binding",
+							zap.String("testSetID", testSetID),
+							zap.String("testCase", testCaseName),
+							zap.String("variable", b.Name))
+					} else {
+						logger.Warn("duplicate declared opening variable from provider; keeping first binding",
+							zap.String("testSetID", testSetID),
+							zap.String("testCase", testCaseName),
+							zap.String("variable", b.Name))
+					}
+				}
+				continue
+			}
+			seen[b.Name] = struct{}{}
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 // maxTestRequest is the most of a test case's request, in bytes of its
@@ -959,7 +1016,7 @@ type variableReader interface {
 // unjudged says why and the test set is not judged. A read that fails for a
 // test case that captured nothing only loses its report rows, said once per
 // set (warned).
-func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *models.TestCase, caps []templates.Capture, warned *bool) (bound []models.VariableBinding, fails []models.TemplateFailure, unjudged string) {
+func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *models.TestCase, caps []templates.Capture, openingVars []models.VariableBinding, warned *bool) (bound []models.VariableBinding, fails []models.TemplateFailure, unjudged string) {
 	if !provenswitch.On() || !r.instrument || tc == nil || tc.Kind != models.HTTP {
 		return nil, nil, ""
 	}
@@ -1010,7 +1067,50 @@ func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *mo
 			zap.String("next_step", "the application answers another value than the one it stored: fix the application, or re-record the test if that is intended"))
 		fails = append(fails, models.TemplateFailure{Where: c.Where, Placeholder: templates.Format(true, "", c.Key), Why: why})
 	}
-	return bound, fails, unjudged
+	return redactSensitiveVariables(bound, openingVars), fails, unjudged
+}
+
+// redactSensitiveVariables replaces Value and Recorded with "[REDACTED]" on a
+// copy of bound for every binding marked Sensitive (or whose Name was marked
+// Sensitive in openingVars, defending against older agents that drop unknown
+// JSON fields). Returns bound unchanged without allocating when none are
+// sensitive.
+func redactSensitiveVariables(bound, openingVars []models.VariableBinding) []models.VariableBinding {
+	if len(bound) == 0 {
+		return bound
+	}
+	var sensitiveNames map[string]struct{}
+	for _, ob := range openingVars {
+		if ob.Sensitive && ob.Name != "" {
+			if sensitiveNames == nil {
+				sensitiveNames = make(map[string]struct{})
+			}
+			sensitiveNames[ob.Name] = struct{}{}
+		}
+	}
+	var out []models.VariableBinding
+	for i, b := range bound {
+		isSens := b.Sensitive
+		if !isSens && sensitiveNames != nil {
+			_, isSens = sensitiveNames[b.Name]
+		}
+		if !isSens {
+			continue
+		}
+		if out == nil {
+			out = make([]models.VariableBinding, len(bound))
+			copy(out, bound)
+		}
+		out[i].Sensitive = true
+		out[i].Value = "[REDACTED]"
+		out[i].Recorded = "[REDACTED]"
+		out[i].WordRun = ""
+		out[i].WordRunRecorded = ""
+	}
+	if out != nil {
+		return out
+	}
+	return bound
 }
 
 // headerNames are the names of the headers either side of a test case's

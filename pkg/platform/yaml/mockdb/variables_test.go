@@ -2,6 +2,8 @@ package mockdb
 
 import (
 	"bytes"
+	"context"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -166,5 +168,187 @@ func TestEncodeMockInPlaceWritesTheVariables(t *testing.T) {
 		if !bytes.Equal(got.Bytes(), want.Bytes()) || !strings.Contains(got.String(), "variables:") {
 			t.Fatalf("%s: written in place:\n%s\nthrough EncodeMock:\n%s", m.Kind, got.String(), want.String())
 		}
+	}
+}
+
+// Declared-only variables (Source == VariableSourceDeclared) travel in memory
+// and on the wire to the agent, but must be stripped on every mock disk
+// write-back path (YAML, JSON, in-place YAML, and gob persisted()) while
+// learned variables (Source == "") are kept intact.
+func TestDeclaredVariablesStrippedOnDiskWriteBack(t *testing.T) {
+	m := variablesMock()
+	wantLearned := m.Spec.Variables.Clone()
+	m.Spec.Variables["declaredAuth"] = models.MockVariable{
+		Recorded: "Bearer rec.token",
+		Use:      []string{"header.Authorization"},
+		Source:   models.VariableSourceDeclared,
+	}
+
+	// 1. EncodeMock (YAML)
+	doc, err := EncodeMock(m, zap.NewNop())
+	if err != nil {
+		t.Fatalf("EncodeMock: %v", err)
+	}
+	if !reflect.DeepEqual(doc.Variables, wantLearned) {
+		t.Fatalf("EncodeMock kept declared variable: got %+v, want %+v", doc.Variables, wantLearned)
+	}
+
+	// 2. EncodeMockJSON (JSON)
+	jdoc, ok, err := EncodeMockJSON(m, zap.NewNop())
+	if err != nil || !ok {
+		t.Fatalf("EncodeMockJSON: ok=%v err=%v", ok, err)
+	}
+	if !reflect.DeepEqual(jdoc.Variables, wantLearned) {
+		t.Fatalf("EncodeMockJSON kept declared variable: got %+v, want %+v", jdoc.Variables, wantLearned)
+	}
+
+	// 3. encodeMockInPlace (in-place YAML)
+	for _, im := range inPlaceCorpus(t) {
+		im.Name = "mock-inplace"
+		im.Spec.Variables = models.MockVariables{
+			"learned":  {Recorded: "1", Use: []string{"body.a"}},
+			"declared": {Recorded: "2", Use: []string{"header.Authorization"}, Source: models.VariableSourceDeclared},
+		}
+		inPlace, ok := encodeMockInPlace(im)
+		if !ok {
+			continue
+		}
+		var buf bytes.Buffer
+		enc := yamlLib.NewEncoder(&buf)
+		if err := enc.Encode(inPlace); err != nil {
+			t.Fatalf("%s: encodeMockInPlace: %v", im.Kind, err)
+		}
+		_ = enc.Close()
+		if strings.Contains(buf.String(), "declared") {
+			t.Fatalf("%s: encodeMockInPlace wrote declared variable:\n%s", im.Kind, buf.String())
+		}
+		if !strings.Contains(buf.String(), "learned:") {
+			t.Fatalf("%s: encodeMockInPlace dropped learned variable:\n%s", im.Kind, buf.String())
+		}
+	}
+
+	// 4. persisted (gob write-back) does not mutate m and strips declared only.
+	pm := persisted(m)
+	if pm == m {
+		t.Fatal("persisted() returned same pointer for mock with declared variables")
+	}
+	if !reflect.DeepEqual(pm.Spec.Variables, wantLearned) {
+		t.Fatalf("persisted() variables = %+v, want %+v", pm.Spec.Variables, wantLearned)
+	}
+	if m.Spec.Variables["declaredAuth"].Source != models.VariableSourceDeclared {
+		t.Fatalf("disk write-back mutated in-memory mock variables: %+v", m.Spec.Variables)
+	}
+
+	// 5. Mock with ONLY declared variables emits no variables key on disk.
+	onlyDeclared := variablesMock()
+	onlyDeclared.Spec.Variables = models.MockVariables{
+		"declaredAuth": {Recorded: "Bearer rec.token", Use: []string{"header.Authorization"}, Source: models.VariableSourceDeclared},
+	}
+	docOnly, err := EncodeMock(onlyDeclared, zap.NewNop())
+	if err != nil {
+		t.Fatalf("EncodeMock(onlyDeclared): %v", err)
+	}
+	if docOnly.Variables != nil {
+		t.Fatalf("EncodeMock(onlyDeclared) Variables = %+v, want nil", docOnly.Variables)
+	}
+	jdOnly, _, err := EncodeMockJSON(onlyDeclared, zap.NewNop())
+	if err != nil {
+		t.Fatalf("EncodeMockJSON(onlyDeclared): %v", err)
+	}
+	if jdOnly.Variables != nil {
+		t.Fatalf("EncodeMockJSON(onlyDeclared) Variables = %+v, want nil", jdOnly.Variables)
+	}
+}
+
+// End-to-end gob carry-over test: when an existing mocks.gob holds a mock with
+// a declared variable (e.g. from an earlier write) and a new mock is appended
+// via MockYaml, gobCarryOverLocked strips the declared entry while keeping
+// learned variables intact.
+func TestGobCarryOverStripsDeclaredVariables(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	root := t.TempDir()
+	setID := "test-set-carry"
+	gobPath := filepath.Join(root, setID, "mocks.gob")
+
+	existing := variablesMock()
+	existing.Name = "mock-existing"
+	wantLearned := existing.Spec.Variables.Clone()
+	existing.Spec.Variables["declaredAuth"] = models.MockVariable{
+		Recorded: "Bearer carry.token",
+		Use:      []string{"header.Authorization"},
+		Source:   models.VariableSourceDeclared,
+	}
+	// Seed the file directly so declaredAuth is present in the source gob stream.
+	writeGobFile(t, gobPath, existing)
+
+	ys := New(zap.NewNop(), root, "mocks")
+
+	added := variablesMock()
+	added.Name = "mock-added"
+	added.Spec.Variables["declaredAdded"] = models.MockVariable{
+		Recorded: "Bearer added.token",
+		Use:      []string{"header.Authorization"},
+		Source:   models.VariableSourceDeclared,
+	}
+	if err := ys.InsertMock(context.Background(), added, setID); err != nil {
+		t.Fatalf("InsertMock: %v", err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got := decodeGobFileRaw(t, gobPath)
+	if len(got) != 2 {
+		t.Fatalf("gob file has %d mocks, want 2", len(got))
+	}
+	for _, m := range got {
+		if m.Spec.Variables.HasDeclared() {
+			t.Fatalf("mock %s kept declared variable after gob carry-over: %+v", m.Name, m.Spec.Variables)
+		}
+		if !reflect.DeepEqual(m.Spec.Variables, wantLearned) {
+			t.Fatalf("mock %s variables = %+v, want %+v", m.Name, m.Spec.Variables, wantLearned)
+		}
+	}
+}
+
+// End-to-end gob rewriter test: gobFileRewriter.write strips declared-only
+// variables while keeping learned variables intact and leaving the in-memory
+// mock untouched.
+func TestGobFileRewriterStripsDeclaredVariables(t *testing.T) {
+	root := t.TempDir()
+	gobPath := filepath.Join(root, "test-set-rw", "mocks.gob")
+
+	m := variablesMock()
+	wantLearned := m.Spec.Variables.Clone()
+	m.Spec.Variables["declaredAuth"] = models.MockVariable{
+		Recorded: "Bearer rw.token",
+		Use:      []string{"header.Authorization"},
+		Source:   models.VariableSourceDeclared,
+	}
+	writeGobFile(t, gobPath, m)
+
+	rw, err := newGobFileRewriter(root, gobPath)
+	if err != nil {
+		t.Fatalf("newGobFileRewriter: %v", err)
+	}
+	if err := rw.write(m); err != nil {
+		t.Fatalf("rw.write: %v", err)
+	}
+	if err := rw.commit(); err != nil {
+		t.Fatalf("rw.commit: %v", err)
+	}
+
+	got := decodeGobFileRaw(t, gobPath)
+	if len(got) != 1 {
+		t.Fatalf("rewritten gob has %d mocks, want 1", len(got))
+	}
+	if got[0].Spec.Variables.HasDeclared() {
+		t.Fatalf("gobFileRewriter kept declared variable: %+v", got[0].Spec.Variables)
+	}
+	if !reflect.DeepEqual(got[0].Spec.Variables, wantLearned) {
+		t.Fatalf("gobFileRewriter variables = %+v, want %+v", got[0].Spec.Variables, wantLearned)
+	}
+	if !m.Spec.Variables.HasDeclared() {
+		t.Fatalf("gobFileRewriter mutated in-memory mock: %+v", m.Spec.Variables)
 	}
 }

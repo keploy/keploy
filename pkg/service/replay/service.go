@@ -190,6 +190,15 @@ type TestCaseMutator interface {
 	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 
+// OpeningVariablesProvider is an optional extension to TestHooks.
+// RunTestSet detects it via type assertion when building a test case's opening
+// after BeforeTestCaseRun, and merges any returned VariableBindings into the
+// opening's Variables (FilterParams.Variables) under the proven switch,
+// keeping existing template bindings intact.
+type OpeningVariablesProvider interface {
+	OpeningVariables(testSetID, testCaseName string) []models.VariableBinding
+}
+
 // TestCaseReporter is an optional extension to TestHooks.
 // RunTestSet detects it via type assertion once a test case has its FINAL
 // verdict; implementations that do not need per-case reporting can safely omit

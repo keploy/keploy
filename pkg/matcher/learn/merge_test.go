@@ -282,3 +282,142 @@ func TestLearningIsNeverWrittenOntoAnAuthoredMock(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeLearnedSkipsIncomingDeclaredAndPreservesMockDeclared(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+
+	learnedExisting := models.MockVariable{Recorded: "o-1", Bind: "body.id"}
+	declaredExisting := models.MockVariable{
+		Recorded: "Bearer rec-1",
+		Use:      []string{"header.Authorization"},
+		Source:   models.VariableSourceDeclared,
+	}
+	learnedState := models.MockVariable{Recorded: "o-2", Use: []string{"url.path[2]"}}
+	declaredState := models.MockVariable{
+		Recorded: "Bearer rec-2",
+		Use:      []string{"header.X-Declared"},
+		Source:   models.VariableSourceDeclared,
+	}
+	learnedBind := models.MockVariable{Recorded: "o-3", Bind: "body.orderId"}
+	declaredBind := models.MockVariable{
+		Recorded: "Bearer rec-3",
+		Bind:     "header.X-Declared-Bind",
+		Source:   models.VariableSourceDeclared,
+	}
+	// Collision: declared entry in st.Variables shares name "o3" with learnedBind.
+	declaredCollision := models.MockVariable{
+		Recorded: "o-3",
+		Use:      []string{"header.Authorization"},
+		Source:   models.VariableSourceDeclared,
+	}
+
+	mock := &models.Mock{
+		Name: "mock-1",
+		Spec: models.MockSpec{
+			Variables: models.MockVariables{
+				"existing": learnedExisting,
+				"declOnM":  declaredExisting,
+			},
+		},
+	}
+	st := models.MockState{
+		Name: "mock-1",
+		Variables: models.MockVariables{
+			"fromState": learnedState,
+			"declSt":    declaredState,
+			"o3":        declaredCollision,
+		},
+	}
+	binds := models.MockVariables{
+		"o3":       learnedBind,
+		"declBind": declaredBind,
+	}
+
+	_ = MergeLearned(mock, st, binds)
+
+	// In-memory declared variable on mock (declOnM) is preserved so served
+	// overlays (KeptLearning.Onto) keep it; incoming declared entries in st and
+	// binds are ignored so they never merge into learned variables.
+	want := models.MockVariables{
+		"existing":  learnedExisting,
+		"declOnM":   declaredExisting,
+		"fromState": learnedState,
+		"o3":        learnedBind,
+	}
+	if !reflect.DeepEqual(mock.Spec.Variables, want) {
+		t.Fatalf("MergeLearned variables =\n%#v\nwant:\n%#v", mock.Spec.Variables, want)
+	}
+	// Persisted() still strips declOnM before disk write-back.
+	wantPersisted := models.MockVariables{
+		"existing":  learnedExisting,
+		"fromState": learnedState,
+		"o3":        learnedBind,
+	}
+	if got := mock.Spec.Variables.Persisted(); !reflect.DeepEqual(got, wantPersisted) {
+		t.Fatalf("Persisted() after MergeLearned =\n%#v\nwant:\n%#v", got, wantPersisted)
+	}
+}
+
+func TestFoldLearnedSkipsDeclaredBinds(t *testing.T) {
+	learnedBind := models.MockVariable{Recorded: "o-1", Bind: "body.orderId"}
+	declaredBind := models.MockVariable{
+		Recorded: "Bearer rec-1",
+		Use:      []string{"header.Authorization"},
+		Source:   models.VariableSourceDeclared,
+	}
+	states := map[string]models.MockState{
+		"mock-2": {
+			Name: "mock-2",
+			Binds: map[string]models.MockVariables{
+				"mock-1": {
+					"orderId":  learnedBind,
+					"declBind": declaredBind,
+				},
+				"mock-only-decl": {
+					"declOnly": declaredBind,
+				},
+			},
+		},
+	}
+
+	withLearning, binds := FoldLearned(states)
+	if _, ok := binds["mock-only-decl"]; ok {
+		t.Fatalf("FoldLearned created binds entry for declared-only target: %#v", binds)
+	}
+	if _, ok := withLearning["mock-only-decl"]; ok {
+		t.Fatalf("FoldLearned created bare state for declared-only target: %#v", withLearning)
+	}
+	wantBinds := models.MockVariables{"orderId": learnedBind}
+	if !reflect.DeepEqual(binds["mock-1"], wantBinds) {
+		t.Fatalf("FoldLearned binds[mock-1] = %#v, want %#v (no empty {} for declared bind)", binds["mock-1"], wantBinds)
+	}
+}
+
+func TestMergeVariableNeverPromotesDeclared(t *testing.T) {
+	learned := models.MockVariable{
+		Recorded: "v-1",
+		Bind:     "body.id",
+		Use:      []string{"url.path[1]"},
+	}
+	declared := models.MockVariable{
+		Recorded: "v-1",
+		Use:      []string{"header.Authorization"},
+		Answer:   []string{"body.auth"},
+		Source:   models.VariableSourceDeclared,
+	}
+
+	if got := MergeVariable(learned, declared); !reflect.DeepEqual(got, learned) {
+		t.Fatalf("MergeVariable(learned, declared) = %+v, want %+v", got, learned)
+	}
+	if got := MergeVariable(declared, learned); !reflect.DeepEqual(got, learned) {
+		t.Fatalf("MergeVariable(declared, learned) = %+v, want %+v", got, learned)
+	}
+	bothDecl := MergeVariable(declared, models.MockVariable{
+		Recorded: "v-1",
+		Use:      []string{"header.X-Other"},
+		Source:   models.VariableSourceDeclared,
+	})
+	if bothDecl.Source != models.VariableSourceDeclared {
+		t.Fatalf("MergeVariable(declared, declared) lost Source: %+v", bothDecl)
+	}
+}

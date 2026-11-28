@@ -877,3 +877,53 @@ func TestEveryDeleteDoorCarriesTheCopysClockReads(t *testing.T) {
 		}
 	})
 }
+
+// A mock carrying an in-memory declared variable (VariableSourceDeclared) keeps
+// it when kept learning is overlaid onto the served copy (KeptLearning.Onto),
+// alongside any learned variables from the first cycle.
+func TestKeptLearningOntoPreservesDeclaredVariables(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	declAuth := models.MockVariable{
+		Recorded: "Bearer rec.jwt",
+		Use:      []string{"header.Authorization"},
+		Source:   models.VariableSourceDeclared,
+	}
+	learnedOrder := models.MockVariable{
+		Recorded: "o-1",
+		Bind:     "body.orderId",
+	}
+
+	beat := beatMock("beat")
+	beat.Spec.Variables = models.MockVariables{"declAuth": declAuth}
+	mm := stagedManager(t, nil, []*models.Mock{beat})
+	mm.SetLearnEnded(true)
+	mm.SetKeptLearning(learn.NewKeptLearning([]models.MockState{
+		{
+			Name:      "beat",
+			Variables: models.MockVariables{"orderId": learnedOrder},
+		},
+	}))
+	mm.ServeExactPool("-", []string{"beat"})
+
+	got, err := mm.GetUnFilteredMocks()
+	if err != nil {
+		t.Fatalf("GetUnFilteredMocks: %v", err)
+	}
+	var served *models.Mock
+	for _, m := range got {
+		if m.Name == "beat" {
+			served = m
+			break
+		}
+	}
+	if served == nil {
+		t.Fatal("served mocks missing beat")
+	}
+	want := models.MockVariables{
+		"declAuth": declAuth,
+		"orderId":  learnedOrder,
+	}
+	if !reflect.DeepEqual(served.Spec.Variables, want) {
+		t.Fatalf("served beat variables after KeptLearning.Onto =\n%#v\nwant:\n%#v", served.Spec.Variables, want)
+	}
+}

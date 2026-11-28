@@ -562,8 +562,13 @@ func failureOf(t models.TestResult, proven bool) *junitFailure {
 
 	msg := "test assertion failed"
 	if refusedUnsent(t.TemplateFailures) {
-		// Refused when its set loaded: nothing was sent or asserted.
-		msg = "test case refused when its test set loaded, not sent"
+		if hasCategory(t.FailureInfo.Category, models.TestCaseRefused) || allTestCaseRefusals(t.TemplateFailures) {
+			// Refused by a per-test hook before send: nothing was sent or asserted.
+			msg = "test case refused before send, not sent"
+		} else {
+			// Refused when its set loaded: nothing was sent or asserted.
+			msg = "test case refused when its test set loaded, not sent"
+		}
 	}
 	if t.FailureInfo.NotFound != "" {
 		// Selected and not on disk: nothing was sent or asserted.
@@ -621,7 +626,7 @@ func depNonFailureBody(deps []models.DepResult) string {
 func templateFailureLines(fs []models.TemplateFailure) []string {
 	lines := make([]string, 0, len(fs))
 	for _, f := range fs {
-		if wholeSetRefusal(f) {
+		if wholeSetRefusal(f) || testCaseRefusalFailure(f) {
 			lines = append(lines, templateFailureLine(f))
 			continue
 		}
@@ -630,12 +635,40 @@ func templateFailureLines(fs []models.TemplateFailure) []string {
 	return lines
 }
 
+// testCaseRefusalFailure reports whether f is a per-test-case hook refusal
+// emitted before sending (TEST_CASE_REFUSED), which names the test case and
+// no placeholder.
+func testCaseRefusalFailure(f models.TemplateFailure) bool {
+	return f.Refused && f.Placeholder == "" && strings.HasPrefix(f.Where, "test case ")
+}
+
+func allTestCaseRefusals(fs []models.TemplateFailure) bool {
+	if len(fs) == 0 {
+		return false
+	}
+	for _, f := range fs {
+		if !testCaseRefusalFailure(f) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasCategory(cats []models.FailureCategory, want models.FailureCategory) bool {
+	for _, c := range cats {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
 // wholeSetRefusal reports whether f refuses a test case's whole test set (one
-// a killed keploy templatize left half-written; its category is
-// TEST_SET_REFUSED), which names no placeholder, rather than a placeholder of
-// the test case.
+// a killed keploy templatize left half-written or a refused mock; its category
+// is TEST_SET_REFUSED), which names no placeholder and is not a per-test-case
+// hook refusal (TEST_CASE_REFUSED).
 func wholeSetRefusal(f models.TemplateFailure) bool {
-	return f.Refused && f.Placeholder == ""
+	return f.Refused && f.Placeholder == "" && !testCaseRefusalFailure(f)
 }
 
 // templateFailureLine is one template failure as the reports say it: where,

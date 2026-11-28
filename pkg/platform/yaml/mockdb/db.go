@@ -1506,18 +1506,24 @@ func gobKinded(mock *models.Mock) *models.Mock {
 }
 
 // persisted is mock as a mocks.gob holds it: its origin as a file holds one
-// (models.Origin.Persisted, without what only travels), on a copy when that
-// differs; mock itself otherwise. gob writes every field a mock has.
+// (models.Origin.Persisted, without what only travels) and its variables
+// without declared-only entries (models.MockVariables.Persisted), on a copy
+// when either differs; mock itself otherwise. gob writes every field a mock has.
 func persisted(mock *models.Mock) *models.Mock {
 	if mock == nil {
 		return nil
 	}
-	if p := mock.Origin.Persisted(); p != mock.Origin {
-		c := mock.ShallowCopy()
-		c.Origin = p
-		return c
+	p := mock.Origin.Persisted()
+	stripVars := mock.Spec.Variables.HasDeclared()
+	if p == mock.Origin && !stripVars {
+		return mock
 	}
-	return mock
+	c := mock.ShallowCopy()
+	c.Origin = p
+	if stripVars {
+		c.Spec.Variables = mock.Spec.Variables.Persisted()
+	}
+	return c
 }
 
 func (ys *MockYaml) gobWriteOne(job gobWriteJob) error {
@@ -1648,7 +1654,7 @@ func (ys *MockYaml) gobCarryOverLocked(filePath, tmpPath string) error {
 	carried := 0
 	cut, err := forEachGobMockCut(ys.MockPath, filePath, func(m *models.Mock) error {
 		carried++
-		return ys.gobEnc.Encode(gobKinded(m))
+		return ys.gobEnc.Encode(gobKinded(persisted(m)))
 	})
 	if err != nil {
 		return err

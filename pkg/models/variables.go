@@ -52,6 +52,12 @@ import (
 //     cases; a gRPC test case's request binds none.
 type MockVariables map[string]MockVariable
 
+// VariableSourceDeclared marks a MockVariable attached in memory from
+// configuration (such as keploy.yml transforms) rather than learned from
+// recordings. Declared variables travel in memory and on the wire to the agent,
+// and are stripped before any mock is written back to disk.
+const VariableSourceDeclared = "declared"
+
 // MockVariable is where one variable is in one call. A place is written in
 // the grammar of variables.Parse (body.<json path>, url.path[<n>],
 // url.query.<name>, header.<name>), or as a word address of one
@@ -116,6 +122,12 @@ type MockVariable struct {
 	// follows rule, or a client request set aside under a declared clock
 	// rule) carry one. Nothing replays it.
 	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
+	// Source names where this variable came from: "" for a variable learned
+	// from recordings, VariableSourceDeclared ("declared") for one attached
+	// in memory from configuration. Declared variables are preserved in
+	// memory and on the wire, and stripped before any mock is written back
+	// to disk.
+	Source string `json:"source,omitempty" yaml:"source,omitempty" bson:"source,omitempty"`
 }
 
 // MintedShape is what a minted rule decided of a variable's value
@@ -2097,6 +2109,50 @@ func (v MockVariables) Clone() MockVariables {
 	return out
 }
 
+// Persisted returns a clone of v without declared-only entries
+// (Source == VariableSourceDeclared); nil when none remain.
+func (v MockVariables) Persisted() MockVariables {
+	if len(v) == 0 {
+		return nil
+	}
+	if !v.HasDeclared() {
+		return v.Clone()
+	}
+	var filtered MockVariables
+	for name, mv := range v {
+		if mv.Source == VariableSourceDeclared {
+			continue
+		}
+		if filtered == nil {
+			filtered = make(MockVariables, len(v))
+		}
+		filtered[name] = mv
+	}
+	return filtered.Clone()
+}
+
+// HasDeclared reports whether v holds any declared-only entry
+// (Source == VariableSourceDeclared).
+func (v MockVariables) HasDeclared() bool {
+	for _, mv := range v {
+		if mv.Source == VariableSourceDeclared {
+			return true
+		}
+	}
+	return false
+}
+
+// StripDeclaredVariables removes declared-only variables
+// (Source == VariableSourceDeclared) from m.Spec.Variables in place while
+// keeping learned variables (Source == "") intact. Exported for downstream
+// callers that serialize or persist a *Mock outside mockdb's encoders.
+func StripDeclaredVariables(m *Mock) {
+	if m == nil || len(m.Spec.Variables) == 0 {
+		return
+	}
+	m.Spec.Variables = m.Spec.Variables.Persisted()
+}
+
 // MergeByForm is the check by form (MockVariable.ByForm) of a variable
 // whose uses are aUse, with a's checks aBy, and bUse, with bBy, as one: a
 // use only one of them names keeps its check; one both name keeps it only
@@ -2155,9 +2211,14 @@ func byFormMeet(a, b ClockOffset) (ClockOffset, bool) {
 // one taken from b keeps b's, and a variable both bind is a clock read only
 // when both say so. Minted goes with the bind as well: a's bind keeps a's
 // (a variable both bind is checked as a says), one taken from b keeps b's.
+// Declared-only entries (Source == VariableSourceDeclared) are ignored so they
+// can never be merged into or promoted to learned variables.
 func MergeVariables(a, b MockVariables) MockVariables {
-	out := a.Clone()
+	out := a.Persisted()
 	for name, v := range b {
+		if v.Source == VariableSourceDeclared {
+			continue
+		}
 		if out == nil {
 			out = MockVariables{}
 		}
@@ -2249,6 +2310,12 @@ type VariableBinding struct {
 	// value), not one the application made: it binds the variable for the
 	// calls that use it, and is never another variable's value.
 	Given bool `json:"given,omitempty" yaml:"given,omitempty"`
+	// Sensitive marks a binding carrying credentials or secret material (for
+	// example, a re-signed Authorization bearer token). Value and Recorded
+	// travel intact in memory and over the agent wire so mock matching uses
+	// the live value, and are redacted to "[REDACTED]" before TestResult
+	// persistence or upload.
+	Sensitive bool `json:"sensitive,omitempty" yaml:"sensitive,omitempty"`
 	// Clock is, for a binding of a clock variable, its clock reads
 	// (MockVariable.Clock): it may share its live value with another clock
 	// variable's binding whose reads were made in the same second
