@@ -288,10 +288,7 @@ func placesOf(in Input) (ps []evPlace, unread string, byWords []Earlier) {
 		// leaves at e.arrivedRec so earliest(src) orders it after any app call
 		// recorded earlier (e.g. a write that minted an id the client later
 		// echoes), while still ordering it before calls made after it arrived.
-		at := e.At
-		if e.incoming {
-			at = e.arrivedRec
-		}
+		at := earlierSortAt(e)
 		for _, s := range e.Seen {
 			path := cmp.Or(s.Leaf.Path, s.Place)
 			ps = append(ps, evPlace{

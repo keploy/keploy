@@ -1116,3 +1116,181 @@ func TestUnbindableNonClientJWTFallsBackToEarliestBindable(t *testing.T) {
 		}
 	})
 }
+
+// TestClassifyArrivedOrdersIncomingRequestsByArrivalTime verifies that
+// classifyRead sorts incoming client requests by e.arrivedRec rather than
+// e.At (which GivenRequest leaves zero):
+//   - two incoming requests handed in reverse slice order bind to the earlier arrival;
+//   - a non-incoming app answer recorded earlier precedes a later incoming request
+//     of equal placeRank (e.g. a partial match).
+func TestClassifyArrivedOrdersIncomingRequestsByArrivalTime(t *testing.T) {
+	base := time.Date(2026, 11, 24, 6, 45, 0, 0, time.UTC)
+	gap := 65 * time.Second
+	const (
+		recID  = "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
+		liveID = "9f8e7d6c-5b4a-3210-fedc-ba9876543210"
+		field  = "body.appId"
+	)
+	reqWithQuery := func(path, q string, at time.Time) *models.HTTPReq {
+		return &models.HTTPReq{
+			Method:    "GET",
+			URL:       "http://localhost:8083" + path + "?" + q,
+			Timestamp: at,
+			Header:    map[string]string{"Host": "localhost:8083"},
+		}
+	}
+
+	t.Run("reverse_slice_order_incoming_requests", func(t *testing.T) {
+		later := clientPlaced(t, "test-2",
+			reqWithQuery("/v1/items", "appId="+recID, base.Add(20*time.Millisecond)),
+			reqWithQuery("/v1/items", "appId="+liveID, base.Add(gap+20*time.Millisecond)),
+			base.Add(gap+20*time.Millisecond),
+		)
+		earlier := clientPlaced(t, "test-1",
+			reqWithQuery("/v1/apps", "appId="+recID, base.Add(5*time.Millisecond)),
+			reqWithQuery("/v1/apps", "appId="+liveID, base.Add(gap+5*time.Millisecond)),
+			base.Add(gap+5*time.Millisecond),
+		)
+		placed := append(append([]Earlier(nil), later...), earlier...)
+		rec := Shape{Leaves: map[string]Leaf{field: {Path: field, Type: String, Value: recID}}}
+		live := Shape{Leaves: map[string]Leaf{field: {Path: field, Type: String, Value: liveID}}}
+		got := ClassifyArrived(clockedDrifts(), []string{field}, live, rec,
+			base.Add(30*time.Millisecond), base.Add(gap+30*time.Millisecond),
+			placed, nil, nil, nil, nil)
+		if len(got) != 1 || got[0].Kind != KindVariable || got[0].From.Mock != "test case test-1" || !got[0].From.Client {
+			t.Fatalf("got %+v; want KindVariable bound to earlier incoming test case test-1", got)
+		}
+	})
+
+	t.Run("earlier_non_incoming_answer_before_later_incoming_part", func(t *testing.T) {
+		later := clientPlaced(t, "test-2",
+			reqWithQuery("/v1/items", "note=ref-"+recID, base.Add(20*time.Millisecond)),
+			reqWithQuery("/v1/items", "note=ref-"+liveID, base.Add(gap+20*time.Millisecond)),
+			base.Add(gap+20*time.Millisecond),
+		)
+		mAt := base.Add(10 * time.Millisecond)
+		ans := Earlier{
+			Mock:    "mock-1",
+			At:      mAt,
+			Own:     true,
+			Payload: oPayload("mock-1", mAt),
+			Seen: []Seen{{
+				Side:  Response,
+				Leaf:  Leaf{Path: "body.appId", Type: String, Value: recID},
+				Live:  liveID,
+				Place: "body.appId",
+			}},
+		}
+		placed := append(append([]Earlier(nil), later...), ans)
+		rec := Shape{Leaves: map[string]Leaf{field: {Path: field, Type: String, Value: recID}}}
+		live := Shape{Leaves: map[string]Leaf{field: {Path: field, Type: String, Value: liveID}}}
+		got := ClassifyArrived(clockedDrifts(), []string{field}, live, rec,
+			base.Add(30*time.Millisecond), base.Add(gap+30*time.Millisecond),
+			placed, nil, nil, nil, nil)
+		if len(got) != 1 || got[0].Kind != KindVariable || got[0].From.Mock != "mock-1" || got[0].From.Client {
+			t.Fatalf("got %+v; want KindVariable bound to earlier non-incoming mock-1 (not test-2)", got)
+		}
+	})
+}
+
+// TestInstantLearnedPrefersEarlierAppWriteOverLaterClientEcho verifies that
+// instantLearned does not let a later incoming client request echoing an
+// app-minted fine-cut instant preempt an earlier in-scope fine-cut app send,
+// while still binding to a client request that arrived before any app write
+// (or at the same instant).
+func TestInstantLearnedPrefersEarlierAppWriteOverLaterClientEcho(t *testing.T) {
+	base := time.Date(2026, 11, 24, 6, 45, 0, 0, time.UTC)
+	gap := 65 * time.Second
+	recStamp := base.Add(10*time.Millisecond + 123456*time.Nanosecond).Format(time.RFC3339Nano)
+	liveStamp := base.Add(gap + 10*time.Millisecond + 654321*time.Nanosecond).Format(time.RFC3339Nano)
+	const (
+		bgField = "body.docs.msgs.0.createdAt"
+		m1Field = "body.docs.msgs.0.mintedAt"
+	)
+
+	echoReq := func(stamp string, at time.Time) *models.HTTPReq {
+		return &models.HTTPReq{
+			Method:    "POST",
+			URL:       "http://localhost:8083/v1/echo",
+			Timestamp: at,
+			Header:    map[string]string{"Content-Type": "application/json", "Host": "localhost:8083"},
+			Body:      `{"createdAt":"` + stamp + `"}`,
+		}
+	}
+	appWrite := func(name string, at time.Time) Earlier {
+		return Earlier{
+			Mock:    name,
+			At:      at,
+			Own:     true,
+			Payload: oPayload(name, at),
+			Seen: []Seen{{
+				Side:  Request,
+				Leaf:  Leaf{Path: m1Field, Type: String, Value: recStamp},
+				Live:  liveStamp,
+				Place: m1Field,
+			}},
+		}
+	}
+
+	t.Run("app_write_before_later_client_echo", func(t *testing.T) {
+		earlier := append(
+			clientPlaced(t, "test-5",
+				echoReq(recStamp, base.Add(50*time.Millisecond)),
+				echoReq(liveStamp, base.Add(gap+50*time.Millisecond)),
+				base.Add(gap+50*time.Millisecond),
+			),
+			appWrite("mock-1", base.Add(10*time.Millisecond)),
+		)
+		in := iCall(bgField, String, recStamp, liveStamp, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+		in.Drifts = clockedDrifts()
+		ds := Decide(in)
+		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "mock-1" || ds[0].From.Client {
+			t.Fatalf("got %s (from %+v); want Value bound to earlier app write mock-1 (Client=false), not test-5", oDescribe(ds), func() any {
+				if len(ds) > 0 {
+					return ds[0].From
+				}
+				return nil
+			}())
+		}
+	})
+
+	t.Run("client_request_first_before_app_write", func(t *testing.T) {
+		earlier := append(
+			clientPlaced(t, "test-1",
+				echoReq(recStamp, base.Add(5*time.Millisecond)),
+				echoReq(liveStamp, base.Add(gap+5*time.Millisecond)),
+				base.Add(gap+5*time.Millisecond),
+			),
+			appWrite("mock-1", base.Add(10*time.Millisecond)),
+		)
+		in := iCall(bgField, String, recStamp, liveStamp, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+		in.Drifts = clockedDrifts()
+		ds := Decide(in)
+		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "test case test-1" || !ds[0].From.Client {
+			t.Fatalf("got %s (from %+v); want Value bound to earlier client request test case test-1 (Client=true)", oDescribe(ds), func() any {
+				if len(ds) > 0 {
+					return ds[0].From
+				}
+				return nil
+			}())
+		}
+	})
+
+	t.Run("same_instant_tie_client_wins", func(t *testing.T) {
+		same := base.Add(10 * time.Millisecond)
+		earlier := append(
+			clientPlaced(t, "test-1",
+				echoReq(recStamp, same),
+				echoReq(liveStamp, same.Add(gap)),
+				same.Add(gap),
+			),
+			appWrite("mock-1", same),
+		)
+		in := iCall(bgField, String, recStamp, liveStamp, base.Add(60*time.Millisecond), base.Add(gap+60*time.Millisecond), nil, earlier, nil)
+		in.Drifts = clockedDrifts()
+		ds := Decide(in)
+		if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "test case test-1" || !ds[0].From.Client {
+			t.Fatalf("got %s; want client request test case test-1 to win same-instant tie", oDescribe(ds))
+		}
+	})
+}

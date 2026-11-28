@@ -2808,9 +2808,10 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 	// reads it; with no such read it stays a slot, which the adapter that
 	// cannot bind another form refuses.
 	gave := heldWhere(hs, func(h instantHold) bool { return before(h.p) && h.hr && h.hl && h.p.gave })
-	slots, again := oneSource(oneSlotEach(heldWhere(hs, func(h instantHold) bool {
+	rawSlots := oneSlotEach(heldWhere(hs, func(h instantHold) bool {
 		return before(h.p) && h.hr && h.hl && request(h.p) && !h.p.same() && !cutSlot(h.p)
-	})), *c)
+	}))
+	slots, again := oneSource(rawSlots, *c)
 	if len(gave) > 0 {
 		note := ""
 		var aside []Place
@@ -2839,6 +2840,15 @@ func (dc *decider) instantLearned(path string, at variables.Address, n int, c *c
 			}
 		}
 		return withAside(dc.bound(path, at, n, *c, gave, ": a value the test gave keploy, which the call sends as given in both runs"+note), aside)
+	}
+	// When every matching request slot is an incoming client test request and
+	// an earlier in-scope fine-cut send (fineCopies) precedes the earliest
+	// slot's recorded arrival, the client only echoed an app-minted instant:
+	// fall through to steps 3 and 4 so it binds at the earlier app source.
+	if len(slots) > 0 && len(fineCopies) > 0 && !slices.ContainsFunc(rawSlots, func(p evPlace) bool { return !dc.isClient(p.mock) }) {
+		if first := earliest(fineCopies); !first.at.IsZero() && first.at.Before(earliest(rawSlots).at) {
+			slots = nil
+		}
 	}
 	switch len(slots) {
 	case 0:
