@@ -56,9 +56,10 @@ func (h *Hooks) ScopedStatus() models.ScopeStatus {
 		Requested: h.scopedRequested,
 		Ready:     h.scopedReady,
 		Reason:    h.scopedReason,
+		Remedy:    h.scopedRemedy,
 	}
-	if st.Requested && !st.Ready {
-		st.Remedy = scopedCgroupRemedy
+	if st.Requested && !st.Ready && st.Remedy == "" {
+		st.Remedy = scopedCgroupRemedyForReason(st.Reason)
 	}
 	return st
 }

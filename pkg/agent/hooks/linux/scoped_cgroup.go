@@ -14,14 +14,55 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	scopedCgroupPrefix = "keploy-scoped-"
-	scopedCgroupRemedy = "run with sudo (CAP_SYS_ADMIN) or under a delegated systemd user scope"
+	scopedCgroupPrefix        = "keploy-scoped-"
+	scopedCgroupRemedyROFS    = "mount a writable cgroup v2 filesystem (e.g. docker --privileged or --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw), or run 'go mod download' before keploy"
+	scopedCgroupRemedyThread  = "run the test command in a domain (non-threaded) cgroup, or run 'go mod download' before keploy"
+	scopedCgroupRemedyPerm    = "run with CAP_SYS_ADMIN or under a delegated cgroup v2 scope (e.g. systemd-run --user --scope -p Delegate=yes), or run 'go mod download' before keploy"
+	scopedCgroupRemedyDefault = "ensure writable cgroup v2 delegation for the test runner, or run 'go mod download' before keploy"
 )
+
+var (
+	errMalformedProcStat     = errors.New("malformed /proc stat")
+	errScopedCgroupNotDomain = errors.New("scoped cgroup is not a domain cgroup")
+)
+
+// scopedCgroupRemedyFor returns a cause-specific remedy for a scoped cgroup
+// setup error. Every remedy also includes 'go mod download' before keploy.
+func scopedCgroupRemedyFor(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, unix.EROFS) {
+		return scopedCgroupRemedyROFS
+	}
+	if errors.Is(err, errScopedCgroupNotDomain) || errors.Is(err, unix.EOPNOTSUPP) {
+		return scopedCgroupRemedyThread
+	}
+	if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) {
+		return scopedCgroupRemedyPerm
+	}
+	return scopedCgroupRemedyForReason(err.Error())
+}
+
+func scopedCgroupRemedyForReason(reason string) string {
+	low := strings.ToLower(reason)
+	switch {
+	case strings.Contains(low, "read-only file system") || strings.Contains(low, "erofs"):
+		return scopedCgroupRemedyROFS
+	case strings.Contains(low, "domain invalid") || strings.Contains(low, "threaded") || strings.Contains(low, "not a domain cgroup") || strings.Contains(low, "operation not supported"):
+		return scopedCgroupRemedyThread
+	case strings.Contains(low, "not delegated") || strings.Contains(low, "permission denied") || strings.Contains(low, "operation not permitted"):
+		return scopedCgroupRemedyPerm
+	default:
+		return scopedCgroupRemedyDefault
+	}
+}
 
 // Test seams for unit testing without root or real cgroups.
 var (
@@ -39,8 +80,6 @@ var (
 	scopedRemoveWait  = 500 * time.Millisecond
 	scopedRemoveStep  = 25 * time.Millisecond
 )
-
-var errMalformedProcStat = errors.New("malformed /proc stat")
 
 // scopedProcStartTicks reads field 22 (start_boottime in USER_HZ=100 ticks) of
 // /proc/<tgid>/stat in the caller's PID namespace.
@@ -202,6 +241,18 @@ func createScopedCgroup(logger *zap.Logger, parentDir string, agentPID int) (str
 		return "", 0, fmt.Errorf("create scoped cgroup %s: %w", dir, err)
 	}
 
+	// On real cgroup v2, a child created under a "domain threaded" parent starts
+	// as "domain invalid" and rejects every cgroup.procs migration with
+	// EOPNOTSUPP. Verify cgroup.type is "domain" at setup time so we fall back
+	// cleanly with scoped_ready=false rather than failing every test launch.
+	if typeRaw, typeErr := os.ReadFile(filepath.Join(dir, "cgroup.type")); typeErr == nil {
+		typ := strings.TrimSpace(string(typeRaw))
+		if typ != "domain" {
+			_ = os.Remove(dir)
+			return "", 0, fmt.Errorf("%w: %s has cgroup.type=%q (parent cgroup is threaded; cannot migrate processes)", errScopedCgroupNotDomain, dir, typ)
+		}
+	}
+
 	procs := filepath.Join(dir, "cgroup.procs")
 	f, err := os.OpenFile(procs, os.O_WRONLY, 0)
 	if err != nil {
@@ -253,12 +304,130 @@ func removeScopedCgroup(logger *zap.Logger, dir string) {
 	}
 }
 
-func (h *Hooks) setupScopedCgroup(cGroupPath string, clientNSPID uint32) (string, uint64, error) {
+func cgroupPathDepth(rel string) uint32 {
+	rel = strings.Trim(filepath.Clean("/"+rel), "/")
+	if rel == "" || rel == "." {
+		return 0
+	}
+	return uint32(strings.Count(rel, "/") + 1)
+}
+
+// computeScopedCgroupLevel computes the host-kernel cgrp->level of scopedDir
+// from the agent's own kernel cgrp->level (probed via BPF register_agent), the
+// agent's relative /proc/self/cgroup v2 path, and scopedDir's path inside
+// cGroupPath. Works in both root and private cgroup namespaces:
+//
+//	host_root_level = selfLevel - depth(selfRel)
+//	scoped_level    = host_root_level + depth(scopedRel)
+//
+// Returns 0 when the level cannot be derived safely (BPF then falls back to
+// its top-down ancestor_ids[] scan).
+func computeScopedCgroupLevel(cGroupPath, scopedDir string, selfLevel uint32, selfProcCgroup []byte) uint32 {
+	relScoped, err := filepath.Rel(filepath.Clean(cGroupPath), filepath.Clean(scopedDir))
+	if err != nil || relScoped == "." || strings.HasPrefix(relScoped, "..") {
+		return 0
+	}
+	dScoped := cgroupPathDepth(relScoped)
+	selfRel, ok := parseCgroupV2Path(selfProcCgroup)
+	if !ok {
+		// Pure cgroup v1 host where cGroupPath is a fresh cgroup2 mount root.
+		return dScoped
+	}
+	dSelf := cgroupPathDepth(selfRel)
+	if selfLevel < dSelf {
+		return 0
+	}
+	return selfLevel - dSelf + dScoped
+}
+
+// probeSelfCgroupLevel registers the agent's NS PID/inode briefly and triggers
+// a single socket()+close() so sys_enter_socket's register_agent records the
+// agent's exact host-kernel cgrp->level in keploy_agent_cgroup_level_map.
+func (h *Hooks) probeSelfCgroupLevel(base structs.AgentInfo) uint32 {
+	if h.objects.KeployAgentRegistrationMap == nil || h.objects.KeployAgentCgroupLevelMap == nil {
+		return 0
+	}
+	probe := base
+	probe.Flags = 0
+	probe.ScopedCgroupID = 0
+	probe.ScopedCgroupLevel = 0
+	key := uint32(0)
+	if err := h.objects.KeployAgentRegistrationMap.Update(&key, &probe, 0); err != nil {
+		return 0
+	}
+	if fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0); err == nil {
+		_ = unix.Close(fd)
+	}
+	var selfLevel uint32
+	if err := h.objects.KeployAgentCgroupLevelMap.Lookup(&key, &selfLevel); err != nil {
+		return 0
+	}
+	return selfLevel
+}
+
+// applyScopedCgroupSetup runs setup when native scoped mode is requested,
+// updating h's scoped status and info's Flags/ScopedCgroupID/ScopedCgroupLevel.
+// On setup failure it clears FlagScopedPids and zeroes the cgroup ID/level so
+// the run fails closed to full-tree interception with scoped_ready=false.
+func (h *Hooks) applyScopedCgroupSetup(
+	info *structs.AgentInfo,
+	cGroupPath string,
+	clientNSPID uint32,
+	setup func(cGroupPath string, clientNSPID uint32) (string, uint64, uint32, error),
+) {
+	if info == nil || info.IsDocker != 0 || (info.Flags&structs.FlagScopedPids) == 0 {
+		return
+	}
+	cgDir, cgID, cgLevel, scErr := setup(cGroupPath, clientNSPID)
+	remedy := ""
+	h.scopedMu.Lock()
+	h.scopedRequested = true
+	if scErr != nil {
+		remedy = scopedCgroupRemedyFor(scErr)
+		h.scopedReady = false
+		h.scopedReason = scErr.Error()
+		h.scopedRemedy = remedy
+		h.scopedCgroupDir = ""
+		h.scopedCgroupID = 0
+		info.Flags &^= structs.FlagScopedPids
+		info.ScopedCgroupID = 0
+		info.ScopedCgroupLevel = 0
+	} else {
+		h.scopedReady = true
+		h.scopedReason = ""
+		h.scopedRemedy = ""
+		h.scopedCgroupDir = cgDir
+		h.scopedCgroupID = cgID
+		info.ScopedCgroupID = cgID
+		info.ScopedCgroupLevel = cgLevel
+	}
+	h.scopedMu.Unlock()
+	if h.logger != nil {
+		if scErr != nil {
+			h.logger.Warn("go toolchain exemption unavailable (scoped_ready=false): could not create a scoped cgroup, falling back to full-tree interception — Go module downloads may be mocked or blocked",
+				zap.Error(scErr),
+				zap.String("remedy", remedy))
+		} else {
+			h.logger.Info("created scoped cgroup for Go toolchain exemption",
+				zap.String("scoped_cgroup_dir", cgDir),
+				zap.Uint64("scoped_cgroup_id", cgID),
+				zap.Uint32("scoped_cgroup_level", cgLevel))
+		}
+	}
+}
+
+func (h *Hooks) setupScopedCgroup(cGroupPath string, clientNSPID uint32, selfLevel uint32) (string, uint64, uint32, error) {
 	parentDir, err := resolveScopedCgroupParent(cGroupPath, clientNSPID)
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
-	return createScopedCgroup(h.logger, parentDir, os.Getpid())
+	dir, id, err := createScopedCgroup(h.logger, parentDir, os.Getpid())
+	if err != nil {
+		return "", 0, 0, err
+	}
+	selfRaw, _ := scopedReadProcCgroup(0)
+	level := computeScopedCgroupLevel(cGroupPath, dir, selfLevel, selfRaw)
+	return dir, id, level, nil
 }
 
 func (h *Hooks) closeScopedCgroup() {

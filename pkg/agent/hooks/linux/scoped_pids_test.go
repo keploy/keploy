@@ -3,6 +3,8 @@
 package linux
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 func TestScopedCgroupAgentInfoMatchesBPFObjects(t *testing.T) {
@@ -25,12 +28,14 @@ func TestScopedCgroupAgentInfoMatchesBPFObjects(t *testing.T) {
 	require.Nil(t, unixSpec.Maps["scoped_pids"], "unixconn must not carry scoped_pids map")
 	require.Nil(t, mainSpec.Programs["k_scoped_fork"], "k_scoped_fork raw_tracepoint must be removed")
 
+	require.NotNil(t, mainSpec.Maps["keploy_agent_cgroup_level_map"], "agent cgroup level map must exist in main BPF object")
+
 	mainReg := mainSpec.Maps["keploy_agent_registration_map"]
 	unixReg := unixSpec.Maps["keploy_agent_registration_map"]
 	require.NotNil(t, mainReg)
 	require.NotNil(t, unixReg)
 	require.Equal(t, uint32(unsafe.Sizeof(structs.AgentInfo{})), mainReg.ValueSize,
-		"structs.AgentInfo size must match BPF struct agent_info_t (with scoped_cgroup_id)")
+		"structs.AgentInfo size must match BPF struct agent_info_t (with scoped_cgroup_id and scoped_cgroup_level)")
 	require.Equal(t, mainReg.ValueSize, unixReg.ValueSize)
 }
 
@@ -51,17 +56,135 @@ func TestScopedCgroupActiveStatusAndInputValidation(t *testing.T) {
 
 	h.scopedRequested = true
 	h.scopedReady = false
-	h.scopedReason = "read-only file system"
+	h.scopedReason = "create scoped cgroup /sys/fs/cgroup/keploy-scoped-1: read-only file system"
 	st := h.ScopedStatus()
 	require.True(t, st.Requested)
 	require.False(t, st.Ready)
-	require.Equal(t, "read-only file system", st.Reason)
-	require.Contains(t, st.Remedy, "sudo")
-	require.Contains(t, st.Remedy, "systemd")
+	require.Equal(t, h.scopedReason, st.Reason)
+	require.Contains(t, st.Remedy, "writable cgroup v2")
+	require.Contains(t, st.Remedy, "go mod download")
+	require.NotContains(t, st.Remedy, "sudo", "EROFS remedy must not blame sudo")
 
 	require.Error(t, h.AddScopedPID(0, 123))
 	require.Error(t, h.AddScopedPID(100, 0))
 	require.ErrorContains(t, h.AddScopedPID(100, 123), "not armed")
+}
+
+func TestApplyScopedCgroupSetupDecision(t *testing.T) {
+	t.Run("failure clears FlagScopedPids and zeroes ID/level and records scoped_ready=false", func(t *testing.T) {
+		h := &Hooks{logger: zap.NewNop()}
+		info := structs.AgentInfo{
+			IsDocker:          0,
+			Flags:             structs.FlagScopedPids | structs.FlagProvenUDP,
+			ScopedCgroupID:    999,
+			ScopedCgroupLevel: 4,
+		}
+		roErr := fmt.Errorf("create scoped cgroup /sys/fs/cgroup/keploy-scoped-1: %w", unix.EROFS)
+		h.applyScopedCgroupSetup(&info, "/sys/fs/cgroup", 1234, func(string, uint32) (string, uint64, uint32, error) {
+			return "", 0, 0, roErr
+		})
+		// Kills F1: FlagScopedPids must be cleared on fallback while other flags survive.
+		require.Zero(t, info.Flags&structs.FlagScopedPids, "FlagScopedPids must be cleared on setup error")
+		require.NotZero(t, info.Flags&structs.FlagProvenUDP, "unrelated flags must stay set")
+		require.Zero(t, info.ScopedCgroupID)
+		require.Zero(t, info.ScopedCgroupLevel)
+		// Kills F2: ScopedStatus must report Ready=false with cause-specific remedy.
+		st := h.ScopedStatus()
+		require.True(t, st.Requested)
+		require.False(t, st.Ready)
+		require.Contains(t, st.Reason, "read-only file system")
+		require.Contains(t, st.Remedy, "writable cgroup v2")
+		require.Contains(t, st.Remedy, "go mod download")
+	})
+
+	t.Run("success populates ScopedCgroupID, ScopedCgroupLevel, and scoped_ready=true", func(t *testing.T) {
+		h := &Hooks{logger: zap.NewNop()}
+		info := structs.AgentInfo{
+			IsDocker: 0,
+			Flags:    structs.FlagScopedPids,
+		}
+		h.applyScopedCgroupSetup(&info, "/sys/fs/cgroup", 1234, func(string, uint32) (string, uint64, uint32, error) {
+			return "/sys/fs/cgroup/keploy-scoped-1-abcd", 778899, 5, nil
+		})
+		// Kills F3: ScopedCgroupID and ScopedCgroupLevel must be written into info.
+		require.NotZero(t, info.Flags&structs.FlagScopedPids)
+		require.Equal(t, uint64(778899), info.ScopedCgroupID)
+		require.Equal(t, uint32(5), info.ScopedCgroupLevel)
+		st := h.ScopedStatus()
+		require.True(t, st.Requested)
+		require.True(t, st.Ready)
+		require.Empty(t, st.Reason)
+		require.Empty(t, st.Remedy)
+	})
+
+	t.Run("docker mode ignores scoped setup", func(t *testing.T) {
+		h := &Hooks{logger: zap.NewNop()}
+		info := structs.AgentInfo{IsDocker: 1, Flags: structs.FlagScopedPids}
+		called := false
+		h.applyScopedCgroupSetup(&info, "/sys/fs/cgroup", 1234, func(string, uint32) (string, uint64, uint32, error) {
+			called = true
+			return "", 0, 0, errors.New("should not run")
+		})
+		require.False(t, called)
+		require.False(t, h.ScopedStatus().Requested)
+	})
+}
+
+func TestScopedCgroupRemedyFor(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		want    string
+		notWant string
+	}{
+		{"erofs", fmt.Errorf("mkdir: %w", unix.EROFS), "writable cgroup v2", "CAP_SYS_ADMIN"},
+		{"threaded", fmt.Errorf("%w: domain invalid", errScopedCgroupNotDomain), "non-threaded", "CAP_SYS_ADMIN"},
+		{"eopnotsupp", fmt.Errorf("write: %w", unix.EOPNOTSUPP), "non-threaded", "CAP_SYS_ADMIN"},
+		{"eacces", fmt.Errorf("open: %w", unix.EACCES), "CAP_SYS_ADMIN", ""},
+		{"other", errors.New("unexpected cgroupfs error"), "delegation", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := scopedCgroupRemedyFor(tc.err)
+			require.Contains(t, got, tc.want)
+			require.Contains(t, got, "go mod download")
+			if tc.notWant != "" {
+				require.NotContains(t, got, tc.notWant)
+			}
+		})
+	}
+}
+
+func TestComputeScopedCgroupLevel(t *testing.T) {
+	// Root cgroup namespace: self at /user.slice/session (level 2), scoped at /user.slice/session/keploy-scoped-1 -> level 3.
+	require.Equal(t, uint32(3), computeScopedCgroupLevel(
+		"/sys/fs/cgroup",
+		"/sys/fs/cgroup/user.slice/session/keploy-scoped-1",
+		2,
+		[]byte("0::/user.slice/session\n"),
+	))
+	// Private cgroup namespace: host kernel level of self is 5, /proc/self/cgroup is virtualized "0::/" (depth 0),
+	// scoped dir is /sys/fs/cgroup/keploy-scoped-1 (depth 1) -> host level = 5 - 0 + 1 = 6.
+	require.Equal(t, uint32(6), computeScopedCgroupLevel(
+		"/sys/fs/cgroup",
+		"/sys/fs/cgroup/keploy-scoped-1",
+		5,
+		[]byte("0::/\n"),
+	))
+	// Pure cgroup v1 (no 0:: line): scoped level is relative depth inside fresh v2 mount.
+	require.Equal(t, uint32(1), computeScopedCgroupLevel(
+		"/sys/fs/cgroup/keploy-v2",
+		"/sys/fs/cgroup/keploy-v2/keploy-scoped-1",
+		0,
+		[]byte("12:memory:/docker/abc\n"),
+	))
+	// Inconsistent selfLevel < depth(selfRel) returns 0 so BPF falls back to top-down scan.
+	require.Equal(t, uint32(0), computeScopedCgroupLevel(
+		"/sys/fs/cgroup",
+		"/sys/fs/cgroup/a/b/keploy-scoped-1",
+		1,
+		[]byte("0::/a/b\n"),
+	))
 }
 
 func TestResolveScopedCgroupParent(t *testing.T) {

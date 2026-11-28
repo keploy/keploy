@@ -168,6 +168,7 @@ type Receipt struct {
 	// non-delegated session without CAP_SYS_ADMIN). Nil when not requested.
 	ScopedReady       *bool  `yaml:"scoped_ready,omitempty" json:"scoped_ready,omitempty"`
 	ScopedReadyReason string `yaml:"scoped_ready_reason,omitempty" json:"scoped_ready_reason,omitempty"`
+	ScopedReadyRemedy string `yaml:"scoped_ready_remedy,omitempty" json:"scoped_ready_remedy,omitempty"`
 	// UnchargedMisses are, under the proven switch, the misses MissedData
 	// counts that no test was charged with (models.UnmatchedCall.ChargedTo
 	// empty): a call made before the test process claimed the run, or

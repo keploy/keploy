@@ -1084,6 +1084,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		CaptureIncomplete: incompleteLosses,
 		ScopedReady:       scopedReadyPtr(scopeStatus),
 		ScopedReadyReason: scopeStatus.Reason,
+		ScopedReadyRemedy: scopeStatus.Remedy,
 
 		ProcessTrackingUnread: trackingUnread,
 		CallCaptureUnread:     captureUnread,

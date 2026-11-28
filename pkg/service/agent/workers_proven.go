@@ -300,7 +300,7 @@ func (a *Agent) claimWorker(ctx context.Context, req models.InstanceReq, me clai
 		if err := h.AddScopedPID(uint32(me.pid), me.start); err != nil {
 			a.endInstances([]uint32{id})
 			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
-				"keploy could not add the test worker to scoped_pids: "+err.Error(), "check the agent's log")
+				"keploy could not migrate the test worker into the scoped cgroup: "+err.Error(), "check the agent's log")
 		}
 	}
 	es, serr := a.serveWorker(me.pid, id)

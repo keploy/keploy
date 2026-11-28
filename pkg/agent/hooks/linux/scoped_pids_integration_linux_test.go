@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.uber.org/zap"
 )
 
@@ -142,5 +143,59 @@ func TestScopedCgroupIntegrationLimitsConcurrencyAndCleanup(t *testing.T) {
 				_ = limCmd.Wait()
 			}
 		}
+	}
+}
+
+// TestScopedCgroupThreadedClientFallsBackCleanly verifies on real cgroupfs that
+// when the client sits in a threaded sub-cgroup (making its parent "domain
+// threaded" and any new child "domain invalid"), createScopedCgroup rejects the
+// unusable directory, removes it, and applyScopedCgroupSetup falls back cleanly
+// with scoped_ready=false and FlagScopedPids cleared instead of claiming ready
+// and failing every AddScopedPID with EOPNOTSUPP.
+func TestScopedCgroupThreadedClientFallsBackCleanly(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Fatal("this test needs root; run the test binary with sudo")
+	}
+	cgRoot, err := agent.DetectCgroupPath(zap.NewNop())
+	require.NoError(t, err)
+
+	baseParent, err := resolveScopedCgroupParent(cgRoot, uint32(os.Getpid()))
+	require.NoError(t, err)
+	top := filepath.Join(baseParent, fmt.Sprintf("keploy-test-threaded-%d", os.Getpid()))
+	require.NoError(t, os.Mkdir(top, 0o755))
+	thr := filepath.Join(top, "thr")
+	require.NoError(t, os.Mkdir(thr, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(thr, "cgroup.type"), []byte("threaded\n"), 0o644))
+
+	client := exec.Command("sleep", "60")
+	require.NoError(t, client.Start())
+	t.Cleanup(func() {
+		_ = client.Process.Kill()
+		_ = client.Wait()
+		removeScopedCgroup(zap.NewNop(), thr)
+		removeScopedCgroup(zap.NewNop(), top)
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(thr, "cgroup.procs"), []byte(strconv.Itoa(client.Process.Pid)+"\n"), 0o644))
+
+	h := NewHooks(zap.NewNop(), &config.Config{})
+	info := structs.AgentInfo{IsDocker: 0, Flags: structs.FlagScopedPids}
+	h.applyScopedCgroupSetup(&info, cgRoot, uint32(client.Process.Pid), func(cgPath string, clientPID uint32) (string, uint64, uint32, error) {
+		return h.setupScopedCgroup(cgPath, clientPID, 0)
+	})
+
+	require.Zero(t, info.Flags&structs.FlagScopedPids, "threaded cgroup fallback must clear FlagScopedPids")
+	require.Zero(t, info.ScopedCgroupID, "threaded cgroup fallback must clear ScopedCgroupID")
+	st := h.ScopedStatus()
+	require.True(t, st.Requested)
+	require.False(t, st.Ready, "domain invalid child cgroup must not report scoped_ready=true")
+	require.Contains(t, st.Reason, "domain invalid")
+	require.Contains(t, st.Remedy, "non-threaded")
+	require.Contains(t, st.Remedy, "go mod download")
+
+	// Confirm the unusable keploy-scoped-* directory was removed cleanly.
+	entries, err := os.ReadDir(top)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.False(t, strings.HasPrefix(e.Name(), scopedCgroupPrefix), "leftover unusable scoped dir %s", e.Name())
 	}
 }

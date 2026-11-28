@@ -583,7 +583,7 @@ func (a *Agent) ScopePID(_ context.Context, caller int) (bool, *models.ScopeErro
 	}
 	if err := h.AddScopedPID(uint32(caller), start); err != nil {
 		return false, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
-			"keploy could not add the test process to scoped_pids: "+err.Error(), "check the agent's log")
+			"keploy could not migrate the test process into the scoped cgroup: "+err.Error(), "check the agent's log")
 	}
 	return true, nil
 }
@@ -749,7 +749,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		if h, ok := a.Hooks.(coreAgent.PIDScoper); ok && h.ScopedPidsActive() {
 			if err := h.AddScopedPID(uint32(caller), start); err != nil {
 				return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
-					"keploy could not add the test process to scoped_pids: "+err.Error(), "check the agent's log")
+					"keploy could not migrate the test process into the scoped cgroup: "+err.Error(), "check the agent's log")
 			}
 		}
 		// A close of this process's connection is its open test's from

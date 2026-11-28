@@ -111,6 +111,7 @@ type Hooks struct {
 	scopedRequested bool
 	scopedReady     bool
 	scopedReason    string
+	scopedRemedy    string
 	scopedCgroupDir string
 	scopedCgroupID  uint64
 	// instanceLock holds this agent's cross-PID-namespace flock ownership
@@ -839,40 +840,18 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		info.Flags |= readyFlags
 
 		// In native scoped mode, create a dedicated cgroup v2 directory inside
-		// the client's cgroup and pass its inode ID to BPF so kernel fork
-		// inheritance keeps all descendants (including reparented daemons)
-		// isolated without any tracing recursion guard. If no scoped cgroup can
-		// be created (e.g. read-only /sys/fs/cgroup or non-delegated session
-		// without CAP_SYS_ADMIN), fail closed to full-tree interception and
-		// record scoped_ready=false so the CLI and receipt explain the fallback.
+		// the client's cgroup and pass its inode ID and host kernel level to
+		// BPF so kernel fork inheritance keeps all descendants (at any nested
+		// sub-cgroup depth, including reparented daemons) isolated without any
+		// tracing recursion guard. If no scoped cgroup can be created (e.g.
+		// read-only /sys/fs/cgroup, threaded client cgroup, or non-delegated
+		// session), fail closed to full-tree interception and record
+		// scoped_ready=false with a cause-specific remedy.
 		if info.IsDocker == 0 && (info.Flags&structs.FlagScopedPids) != 0 {
-			cgDir, cgID, scErr := h.setupScopedCgroup(cGroupPath, clientInfo.ClientNSPID)
-			h.scopedMu.Lock()
-			h.scopedRequested = true
-			if scErr != nil {
-				h.scopedReady = false
-				h.scopedReason = scErr.Error()
-				h.scopedCgroupDir = ""
-				h.scopedCgroupID = 0
-				info.Flags &^= structs.FlagScopedPids
-				info.ScopedCgroupID = 0
-			} else {
-				h.scopedReady = true
-				h.scopedReason = ""
-				h.scopedCgroupDir = cgDir
-				h.scopedCgroupID = cgID
-				info.ScopedCgroupID = cgID
-			}
-			h.scopedMu.Unlock()
-			if scErr != nil {
-				h.logger.Warn("go toolchain exemption unavailable (scoped_ready=false): could not create a scoped cgroup, falling back to full-tree interception — Go module downloads may be mocked or blocked",
-					zap.Error(scErr),
-					zap.String("remedy", scopedCgroupRemedy))
-			} else {
-				h.logger.Info("created scoped cgroup for Go toolchain exemption",
-					zap.String("scoped_cgroup_dir", cgDir),
-					zap.Uint64("scoped_cgroup_id", cgID))
-			}
+			selfLevel := h.probeSelfCgroupLevel(*info)
+			h.applyScopedCgroupSetup(info, cGroupPath, clientInfo.ClientNSPID, func(cgPath string, clientPID uint32) (string, uint64, uint32, error) {
+				return h.setupScopedCgroup(cgPath, clientPID, selfLevel)
+			})
 		}
 
 		// A client keploy cannot register would have none of its

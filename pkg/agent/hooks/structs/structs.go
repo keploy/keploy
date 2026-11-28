@@ -118,4 +118,6 @@ type AgentInfo struct {
 	Flags              uint32 // extensible flag slot consumed by the BPF cgroup hooks; set via AgentInfoCustomizer and FlagKernelPortAlloc. Matches agent_info_t.flags at offset 44 (ebpf#96).
 	RecordingStartTime uint64 // boot-time NS when recording started; pre-existing processes are auto-excluded by eBPF
 	ScopedCgroupID     uint64 // cgroup2 inode ID of the run's scoped cgroup when FlagScopedPids is active in native mode
+	ScopedCgroupLevel  uint32 // host-kernel cgrp->level of ScopedCgroupID (0 when unset); enables O(1) depth-independent ancestor_ids[] check
+	ScopedPad          uint32 // explicit 8-byte alignment padding matching C agent_info_t._scoped_pad
 }
