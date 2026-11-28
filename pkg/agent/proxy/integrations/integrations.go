@@ -1287,10 +1287,19 @@ type StagedRecordingReader interface {
 //     manager guarded by the held-call mark rather than an immutable exactView
 //     snapshot (v.shownOf), unlike sibling heldScope reads.
 //
-// Callers are responsible for delivery-once semantics and view ownership (for
-// example, deduplicating by mock identity within a single StagingEpoch).
+// Callers are responsible for delivery-once semantics and view ownership.
+// StagedStartupGeneration returns a monotonic counter that advances whenever
+// the retained set is replaced (any BaseTime staging) or cleared
+// (ResetForReplaySession), and stays constant across per-test window refiles
+// and SetScopeMocks(open). Callers tracking their own delivery state may cache
+// GetStagedStartupMocksByKind results keyed on StagedStartupGeneration (rather
+// than StagingEpoch, which advances on SetScopeMocks(open) and does not advance
+// on ResetForReplaySession). Note that scopedMockDb applies worker-scope and
+// consumption filters on top of GetStagedStartupMocksByKind without advancing
+// StagedStartupGeneration.
 type StagedStartupReader interface {
 	GetStagedStartupMocksByKind(kind models.Kind) ([]*models.Mock, error)
+	StagedStartupGeneration() uint64
 }
 
 // BackgroundRecordingReader is an optional MockMemDb capability: the staged

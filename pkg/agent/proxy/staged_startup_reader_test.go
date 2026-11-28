@@ -1,6 +1,10 @@
 package proxy
 
 import (
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -230,4 +234,188 @@ func TestMockManager_StagedStartupReaderScopedMockDbAppliesWorkerFilter(t *testi
 	}
 	assertStagedStartupNames(t, "worker-scoped view hides consumed mock", scoped, testKind, []string{"shared-unmapped"})
 	assertStagedStartupNames(t, "bare manager still retains declared mocks", mm, testKind, []string{"worker-mine", "worker-other", "shared-unmapped"})
+}
+
+func TestMockManager_StagedStartupReaderRetainsExplicitStartupAndUnfiltered(t *testing.T) {
+	t.Run("explicitStartup_only", func(t *testing.T) {
+		const testKind models.Kind = "StagedStartupExplicitKind"
+		mm, _, w1Start, w1End, _, _ := stagedStartupTestFixture(t, testKind)
+
+		onlyStartup := makeStagedStartupMock("explicit-gap", testKind, "consume", w1End.Add(2*time.Second), models.LifetimePerTest)
+		mm.SetMocksWithWindowThreeTier(nil, nil, []*models.Mock{onlyStartup}, models.BaseTime, time.Now())
+		assertStagedStartupNames(t, "after initial three-tier staging", mm, testKind, []string{"explicit-gap"})
+
+		mm.SetMocksWithWindow(nil, nil, w1Start, w1End)
+		assertStagedStartupNames(t, "retained after window refile", mm, testKind, []string{"explicit-gap"})
+	})
+
+	t.Run("unfiltered_only", func(t *testing.T) {
+		const testKind models.Kind = "StagedStartupUnfilteredKind"
+		mm, _, w1Start, w1End, _, _ := stagedStartupTestFixture(t, testKind)
+
+		onlyUnfiltered := makeStagedStartupMock("unfiltered-gap", testKind, "consume", w1End.Add(2*time.Second), models.LifetimePerTest)
+		mm.SetMocksWithWindowThreeTier(nil, []*models.Mock{onlyUnfiltered}, nil, models.BaseTime, time.Now())
+		assertStagedStartupNames(t, "after initial three-tier staging", mm, testKind, []string{"unfiltered-gap"})
+
+		mm.SetMocksWithWindow(nil, nil, w1Start, w1End)
+		assertStagedStartupNames(t, "retained after window refile", mm, testKind, []string{"unfiltered-gap"})
+	})
+}
+
+func TestMockManager_StagedStartupReaderGenerationTracksSetChanges(t *testing.T) {
+	const testKind models.Kind = "StagedStartupGenKind"
+	mm, _, w1Start, w1End, w2Start, w2End := stagedStartupTestFixture(t, testKind)
+
+	g0 := mm.StagedStartupGeneration()
+	in1 := makeStagedStartupMock("gen-in1", testKind, "consume", w1Start.Add(100*time.Millisecond), models.LifetimePerTest)
+	gap := makeStagedStartupMock("gen-gap", testKind, "consume", w1End.Add(2*time.Second), models.LifetimePerTest)
+
+	// BaseTime staging advances generation.
+	mm.SetMocksWithWindow([]*models.Mock{in1, gap}, nil, models.BaseTime, time.Now())
+	g1 := mm.StagedStartupGeneration()
+	if g1 <= g0 {
+		t.Fatalf("BaseTime staging did not advance generation: before=%d after=%d", g0, g1)
+	}
+
+	// Per-test window refiles keep generation constant.
+	mm.SetMocksWithWindow([]*models.Mock{in1}, nil, w1Start, w1End)
+	mm.SetMocksWithWindow(nil, nil, w2Start, w2End)
+	if got := mm.StagedStartupGeneration(); got != g1 {
+		t.Fatalf("window refiles changed generation: got %d, want %d", got, g1)
+	}
+
+	// SetScopeMocks(open=true) bumps StagingEpoch but does NOT replace
+	// stagedStartupByKind, so StagedStartupGeneration stays constant.
+	epochBeforeScope := mm.StagingEpoch()
+	mm.SetScopeMocks([]*models.Mock{in1}, nil, true)
+	if mm.StagingEpoch() == epochBeforeScope {
+		t.Fatalf("expected SetScopeMocks(open=true) to advance StagingEpoch")
+	}
+	if got := mm.StagedStartupGeneration(); got != g1 {
+		t.Fatalf("SetScopeMocks(open=true) changed generation: got %d, want %d", got, g1)
+	}
+
+	// SetScopeMocks(open=false) restages as BaseTime and advances generation.
+	mm.SetScopeMocks([]*models.Mock{in1, gap}, nil, false)
+	g2 := mm.StagedStartupGeneration()
+	if g2 <= g1 {
+		t.Fatalf("SetScopeMocks(open=false) did not advance generation: before=%d after=%d", g1, g2)
+	}
+
+	// Wrappers delegate generation; heldScope returns 0 once staging moves.
+	scoped := &scopedMockDb{MockMemDb: mm}
+	if got := scoped.StagedStartupGeneration(); got != g2 {
+		t.Fatalf("scopedMockDb generation = %d, want %d", got, g2)
+	}
+	held := &heldScope{roundScope: roundScope{
+		MockManager: mm,
+		g:           roundGuard{at: integrations.RoundAt{Epoch: mm.StagingEpoch()}, staging: true},
+	}}
+	if got := held.StagedStartupGeneration(); got != g2 {
+		t.Fatalf("heldScope generation before move = %d, want %d", got, g2)
+	}
+
+	// ResetForReplaySession clears stagedStartupByKind and advances generation
+	// even though StagingEpoch itself does not advance.
+	epochBeforeReset := mm.StagingEpoch()
+	mm.ResetForReplaySession()
+	g3 := mm.StagedStartupGeneration()
+	if g3 <= g2 {
+		t.Fatalf("ResetForReplaySession did not advance generation: before=%d after=%d (StagingEpoch %d->%d)", g2, g3, epochBeforeReset, mm.StagingEpoch())
+	}
+
+	// BaseTime staging with no declared mocks still advances generation.
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	g4 := mm.StagedStartupGeneration()
+	if g4 <= g3 {
+		t.Fatalf("empty BaseTime restage did not advance generation: before=%d after=%d", g3, g4)
+	}
+	if got := held.StagedStartupGeneration(); got != 0 {
+		t.Fatalf("heldScope generation after staging moved = %d, want 0", got)
+	}
+}
+
+func TestMockManager_StagedStartupReaderConcurrentReadsAndStaging(t *testing.T) {
+	const testKind models.Kind = "StagedStartupConcurrentKind"
+	mm, t0, w1Start, w1End, w2Start, w2End := stagedStartupTestFixture(t, testKind)
+
+	var stop atomic.Bool
+	var reads atomic.Int64
+	var wg sync.WaitGroup
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			scoped := &scopedMockDb{MockMemDb: mm}
+			for !stop.Load() {
+				held := &heldScope{roundScope: roundScope{
+					MockManager: mm,
+					g:           roundGuard{at: integrations.RoundAt{Epoch: mm.StagingEpoch()}, staging: true},
+				}}
+				for _, db := range []integrations.StagedStartupReader{mm, scoped, held} {
+					_ = db.StagedStartupGeneration()
+					got, err := db.GetStagedStartupMocksByKind(testKind)
+					if err != nil {
+						t.Errorf("GetStagedStartupMocksByKind: %v", err)
+						return
+					}
+					prefix := ""
+					for i, m := range got {
+						if m == nil {
+							t.Errorf("nil mock in staged startup snapshot")
+							return
+						}
+						_ = m.Spec.Metadata["type"]
+						idx := strings.IndexByte(m.Name, '-')
+						if idx <= 0 {
+							t.Errorf("unexpected mock name %q", m.Name)
+							return
+						}
+						p := m.Name[:idx]
+						if prefix == "" {
+							prefix = p
+						} else if p != prefix {
+							t.Errorf("single read mixed two stagings: %q vs %q", prefix, p)
+							return
+						}
+						got[i] = nil
+					}
+					reads.Add(1)
+				}
+			}
+		}()
+	}
+
+	for i := 0; i < 200 && !t.Failed(); i++ {
+		pfx := fmt.Sprintf("s%d", i)
+		mks := func() []*models.Mock {
+			return []*models.Mock{
+				makeStagedStartupMock(pfx+"-boot", testKind, "consume", t0.Add(time.Second), models.LifetimePerTest),
+				makeStagedStartupMock(pfx+"-in1", testKind, "consume", w1Start.Add(100*time.Millisecond), models.LifetimePerTest),
+				makeStagedStartupMock(pfx+"-gap", testKind, "consume", w1End.Add(2*time.Second), models.LifetimePerTest),
+				makeStagedStartupMock(pfx+"-pub", testKind, "publish", w1Start.Add(200*time.Millisecond), models.LifetimePerTest),
+				makeStagedStartupMock(pfx+"-in2", testKind, "consume", w2Start.Add(100*time.Millisecond), models.LifetimePerTest),
+			}
+		}
+		switch i % 4 {
+		case 0:
+			mm.ResetForReplaySession()
+		case 1:
+			mm.ResetForReplaySession()
+			mm.ArmSetFence()
+		}
+		mm.SetMocksWithWindow(mks(), nil, models.BaseTime, time.Now())
+		all := mks()
+		mm.SetMocksWithWindow(all[1:2], nil, w1Start, w1End)
+		mm.SetMocksWithWindow(all[4:5], nil, w2Start, w2End)
+		if i%5 == 0 {
+			mm.SetScopeMocks(mks()[1:2], nil, true)
+			mm.SetScopeMocks(mks(), nil, false)
+		}
+	}
+	stop.Store(true)
+	wg.Wait()
+	if reads.Load() == 0 {
+		t.Fatal("expected concurrent readers to complete at least one read")
+	}
 }

@@ -163,6 +163,7 @@ type MockManager struct {
 	filteredByKind      map[models.Kind]*TreeDb
 	unfilteredByKind    map[models.Kind]*TreeDb
 	stagedStartupByKind map[models.Kind][]*models.Mock
+	stagedStartupGen    uint64
 	readThrough         readThroughStore
 
 	logger *zap.Logger
@@ -916,6 +917,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.treesMu.Lock()
 	m.retainedDirty = nil
 	m.stagedStartupByKind = nil
+	m.stagedStartupGen++
 	m.treesMu.Unlock()
 	m.spentMu.Lock()
 	m.spent = nil
@@ -2545,6 +2547,7 @@ func (m *MockManager) setMocksWithWindowLockedRetaining(filtered, unfiltered, ex
 	m.startupNames.Store(&startupNames)
 	if isInitialStaging {
 		m.stagedStartupByKind = newStagedStartup
+		m.stagedStartupGen++
 	}
 	// Initial staging files the session pool in the startup tier too; an
 	// explicit startup slice may share mocks with it as well.
@@ -3676,7 +3679,7 @@ func (m *MockManager) getStartupMocksByKindIn(v *exactView, kind models.Kind) ([
 // later-window server pushes; cleared on ResetForReplaySession and replaced on
 // every BaseTime staging. Ignores consumption (DeleteStartupMock /
 // DeleteFilteredMock) and overlaps GetStartupMocksByKind before test 1;
-// callers must deduplicate delivery within a StagingEpoch.
+// callers may cache the returned slice keyed by StagedStartupGeneration().
 func (m *MockManager) GetStagedStartupMocksByKind(kind models.Kind) ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	src := m.stagedStartupByKind[kind]
@@ -3688,6 +3691,17 @@ func (m *MockManager) GetStagedStartupMocksByKind(kind models.Kind) ([]*models.M
 	copy(out, src)
 	m.treesMu.RUnlock()
 	return out, nil
+}
+
+// StagedStartupGeneration implements integrations.StagedStartupReader.
+// It advances whenever stagedStartupByKind is replaced (BaseTime staging) or
+// cleared (ResetForReplaySession), and remains constant across per-test window
+// refiles and SetScopeMocks(open).
+func (m *MockManager) StagedStartupGeneration() uint64 {
+	m.treesMu.RLock()
+	gen := m.stagedStartupGen
+	m.treesMu.RUnlock()
+	return gen
 }
 
 var _ integrations.StagedStartupReader = (*MockManager)(nil)

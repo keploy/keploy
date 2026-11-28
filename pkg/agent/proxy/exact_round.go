@@ -1558,6 +1558,13 @@ func (h *heldScope) GetStagedStartupMocksByKind(kind models.Kind) ([]*models.Moc
 	return h.held(h.MockManager.GetStagedStartupMocksByKind(kind))
 }
 
+func (h *heldScope) StagedStartupGeneration() uint64 {
+	if h.moved() {
+		return 0
+	}
+	return h.MockManager.StagedStartupGeneration()
+}
+
 var _ integrations.StagedStartupReader = (*heldScope)(nil)
 
 // RangeSessionMocksWithKey is the manager's keyed walk of the session tier
