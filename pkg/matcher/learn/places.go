@@ -160,8 +160,17 @@ func jsonSegs(s string) ([]templates.PathSeg, bool) {
 // varName is the name a variable first found at place gets: the place's last
 // key, header or query name, or "path<n>" for a URL segment, in letters,
 // digits, '_' and '-'; "var-" before one a run's name would begin with.
+// When variables.Parse rejects a word- or step-addressed place (such as
+// url.path[3]#0, where the suffix follows ']'), it falls back to
+// variables.ParseAddress so the segment is named "path<n>" instead of "var"
+// while keeping existing query/header/body word-suffixed names unchanged.
 func varName(place string) string {
 	p, err := variables.Parse(place)
+	if err != nil {
+		if a, aerr := variables.ParseAddress(place); aerr == nil {
+			p, err = a.Place, nil
+		}
+	}
 	base := ""
 	if err == nil {
 		switch p.Part {

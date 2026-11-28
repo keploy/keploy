@@ -2,6 +2,7 @@ package learn
 
 import (
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -114,5 +115,107 @@ func TestMergeLearnedKeepsHeaderNoiseBesideACookieReadByName(t *testing.T) {
 		if _, ok := m.Spec.ReqBodyNoise["header.cookie"]; ok != kept {
 			t.Errorf("a bind at %s: header noise kept %v, want %v (%v)", place, ok, kept, m.Spec.ReqBodyNoise)
 		}
+	}
+}
+
+// TestVarNameParsesWordAddressedPlaces verifies that varName falls back to
+// variables.ParseAddress when variables.Parse rejects indexed path word/step
+// addresses (such as url.path[3]#0 -> "path3", never "var") while preserving
+// existing query, header, and body word-suffixed variable names.
+func TestVarNameParsesWordAddressedPlaces(t *testing.T) {
+	for place, want := range map[string]string{
+		"url.path[3]#0":            "path3",
+		"url.path[3]":              "path3",
+		"url.path[3]|b64#1":        "path3",
+		"url.query.appId#0":        "appId0",
+		"url.query.appId":          "appId",
+		"header.X-Req#1":           "X-Req1",
+		"body.cmd.query.token#1":   "token1",
+		"body.items[0].ref.$oid#0": "ref",
+		"body.run-x#0":             "var-run-x0",
+		"body.$date#0":             "var",
+		"nowhere":                  "var",
+	} {
+		if got := varName(place); got != want {
+			t.Errorf("varName(%q) = %q; want %q", place, got, want)
+		}
+	}
+}
+
+// TestDecideWordAddressedPathAndQueryBindProduceCleanVarName wires a full
+// Decide + Tracker.Name flow for word-addressed binds on url.path[3]#0 and
+// url.query.appId#0, proving url.path[3]#0 gets "path3" (never "var") while
+// url.query.appId#0 keeps its existing "appId0" naming.
+func TestDecideWordAddressedPathAndQueryBindProduceCleanVarName(t *testing.T) {
+	base := time.Date(2026, 11, 24, 6, 45, 0, 0, time.UTC)
+	gap := 65 * time.Second
+	const (
+		recWord  = "7a8b9c0d1e2f3a4b"
+		liveWord = "1f2e3d4c5b6a7980"
+	)
+
+	cases := []struct {
+		name       string
+		leafPath   string
+		place      string
+		recVal     string
+		liveVal    string
+		wantFromAt string
+		wantName   string
+	}{
+		{
+			name:       "path_segment_word",
+			leafPath:   "url.path.3",
+			place:      "url.path[3]",
+			recVal:     recWord + "-suffix",
+			liveVal:    liveWord + "-suffix",
+			wantFromAt: "url.path[3]#0",
+			wantName:   "path3",
+		},
+		{
+			name:       "query_param_word",
+			leafPath:   "url.query.appId",
+			place:      "url.query.appId",
+			recVal:     recWord + "-suffix",
+			liveVal:    liveWord + "-suffix",
+			wantFromAt: "url.query.appId#0",
+			wantName:   "appId0",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mAt := base.Add(10 * time.Millisecond)
+			src := Earlier{
+				Mock:    "mock-1",
+				At:      mAt,
+				Own:     true,
+				Payload: oPayload("mock-1", mAt),
+				Seen: []Seen{{
+					Side:  Request,
+					Leaf:  Leaf{Path: tc.leafPath, Type: String, Value: tc.recVal},
+					Live:  tc.liveVal,
+					Place: tc.place,
+				}},
+			}
+			in := iCall("body.ref", String, recWord, liveWord, base.Add(20*time.Millisecond), base.Add(gap+20*time.Millisecond), nil, []Earlier{src}, nil)
+			in.Drifts = clockedDrifts()
+			ds := Decide(in)
+			if len(ds) != 1 || ds[0].Outcome != OutcomeValue || ds[0].From.Mock != "mock-1" || ds[0].FromAt.String() != tc.wantFromAt {
+				t.Fatalf("Decide = %s (fromAt=%q); want OutcomeValue from mock-1 at %q", oDescribe(ds), func() string {
+					if len(ds) > 0 {
+						return ds[0].FromAt.String()
+					}
+					return ""
+				}(), tc.wantFromAt)
+			}
+			tr := NewTracker()
+			tr.Begin()
+			n, _, _, _ := tr.Test()
+			gotName, ok := tr.Name(n, ds[0].From.Mock, ds[0].FromAt.String(), nil)
+			if !ok || gotName != tc.wantName {
+				t.Fatalf("Tracker.Name(%q, %q) = %q, %v; want %q, true", ds[0].From.Mock, ds[0].FromAt.String(), gotName, ok, tc.wantName)
+			}
+		})
 	}
 }
