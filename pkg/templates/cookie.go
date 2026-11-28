@@ -273,7 +273,16 @@ func cookieNameStart(name string) bool {
 	if size == 0 || r == utf8.RuneError {
 		return false
 	}
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '$'
+	if unicode.IsControl(r) || unicode.IsSpace(r) {
+		return false
+	}
+	// RFC 6265 §4.1.1 / RFC 2616 §2.2: a cookie name is a token; reject
+	// the separator characters (and '' and '"') that delimit tokens.
+	separators := "()<>@,;:\\" + `"` + "/[]?={} 	"
+	if strings.ContainsRune(separators, r) {
+		return false
+	}
+	return true
 }
 
 // parseCookie reads the cookie in s[start:end].
