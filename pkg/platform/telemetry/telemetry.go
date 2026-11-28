@@ -75,12 +75,46 @@ func NewTelemetry(logger *zap.Logger, opt Options) *Telemetry {
 	}
 }
 
+// pingInterval bounds how often a long-running process (for example keploy
+// agent) emits Ping heartbeats. Rate-limited to once per hour and deduplicated
+// process-wide so multiple GetService calls never spawn duplicate Ping loops.
+var (
+	pingInterval = time.Hour
+	nowFunc      = time.Now
+	pingGateMu   sync.Mutex
+	lastPingAt   time.Time
+)
+
+func currentPingInterval() time.Duration {
+	pingGateMu.Lock()
+	defer pingGateMu.Unlock()
+	return pingInterval
+}
+
+func currentNow() time.Time {
+	pingGateMu.Lock()
+	fn := nowFunc
+	pingGateMu.Unlock()
+	return fn()
+}
+
+func allowPing(now time.Time) bool {
+	pingGateMu.Lock()
+	defer pingGateMu.Unlock()
+	if !lastPingAt.IsZero() && now.Sub(lastPingAt) < pingInterval {
+		return false
+	}
+	lastPingAt = now
+	return true
+}
+
 func (tel *Telemetry) Ping(ctx context.Context) {
 	if !tel.Enabled {
 		return
 	}
+	interval := currentPingInterval()
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		select {
 		case <-ctx.Done():
@@ -89,7 +123,9 @@ func (tel *Telemetry) Ping(ctx context.Context) {
 			if tel.closed.Load() {
 				return
 			}
-			tel.SendTelemetry("Ping")
+			if allowPing(currentNow().UTC()) {
+				tel.SendTelemetry("Ping")
+			}
 		}
 		for {
 			if tel.closed.Load() {
@@ -99,7 +135,9 @@ func (tel *Telemetry) Ping(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				tel.SendTelemetry("Ping")
+				if allowPing(currentNow().UTC()) {
+					tel.SendTelemetry("Ping")
+				}
 			}
 		}
 	}()
@@ -278,7 +316,7 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 
 	event := models.TeleEvent{
 		EventType: eventType,
-		CreatedAt: time.Now().Unix(),
+		CreatedAt: currentNow().UTC().Unix(),
 	}
 	if len(output) > 0 && output[0] != nil {
 		event.Meta = output[0]
@@ -325,6 +363,8 @@ func (tel *Telemetry) sendEvent(eventType string, tracked bool, output ...map[st
 			event.IsCI, event.CIProvider = detectCIOrInvoker()
 			event.GitRepo = detectGitRepo()
 		}()
+
+		event.SentAt = currentNow().UTC().Format(time.RFC3339)
 
 		bin, err := marshalEvent(event)
 		if err != nil {
