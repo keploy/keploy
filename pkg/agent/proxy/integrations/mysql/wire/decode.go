@@ -382,6 +382,10 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		if pkt.NewParamsBindFlag == 1 {
 			decodeCtx.rememberParamTypes(stmtID, pkt.Parameters)
 		}
+		// Long data applies only to the next COM_STMT_EXECUTE, so drop our
+		// record of it once this execute has been decoded; keep StmtParamTypes
+		// so a later execute can reuse cached parameter types.
+		delete(decodeCtx.LongDataParams, stmtID)
 		if decodeCtx.Mode != models.MODE_TEST {
 			// Read only to match an older keploy's recording at replay.
 			pkt.LegacyParameters = nil
