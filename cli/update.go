@@ -27,6 +27,7 @@ func Update(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 			provider.PrintLogo(log.PrimarySink(), disableAnsi)
+			honorTelemetryOptOut(cmd, cmdConfigurator)
 			svc, err := serviceFactory.GetService(ctx, "update")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))

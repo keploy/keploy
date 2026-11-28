@@ -117,6 +117,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				// write itself needs no dependencies -- the tools service
 				// was resolved only to reach a method that never used its
 				// own receiver -- so a lookup that fails is not fatal here.
+				honorTelemetryOptOut(cmd, cmdConfigurator)
 				if _, svcErr := servicefactory.GetService(ctx, cmd.Name()); svcErr != nil {
 					logger.Debug("could not resolve the service for telemetry", zap.Error(svcErr))
 				}

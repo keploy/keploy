@@ -54,3 +54,37 @@ func TestEnsureInstallationID_LazyAndRespectsDisableTele(t *testing.T) {
 		t.Fatalf("second enabled run got %q, want persisted %q", secondCfg.InstallationID, enabledCfg.InstallationID)
 	}
 }
+
+func TestGetService_ResolvesInstallationIDLazilyAndHonorsDisableTele(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("KEPLOY_INDOCKER", "true")
+	t.Setenv("INSTALLATION_ID", "")
+
+	keployYAML := filepath.Join(home, ".keploy", "keploy.yaml")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// DisableTele=true: GetService must not resolve or persist a fallback ID.
+	disabledCfg := config.New()
+	disabledCfg.DisableTele = true
+	_, _ = NewServiceProvider(zap.NewNop(), disabledCfg).GetService(ctx, "unknown-cmd")
+	if disabledCfg.InstallationID != "" {
+		t.Fatalf("GetService with DisableTele=true set InstallationID=%q, want empty", disabledCfg.InstallationID)
+	}
+	if _, err := os.Stat(keployYAML); !os.IsNotExist(err) {
+		t.Fatalf("GetService with DisableTele=true must not create %s (stat err=%v)", keployYAML, err)
+	}
+
+	// DisableTele=false: GetService itself invokes ensureInstallationID and persists a 64-hex ID.
+	enabledCfg := config.New()
+	enabledCfg.DisableTele = false
+	_, _ = NewServiceProvider(zap.NewNop(), enabledCfg).GetService(ctx, "unknown-cmd")
+	if len(enabledCfg.InstallationID) != 64 {
+		t.Fatalf("GetService with DisableTele=false set InstallationID=%q (len %d), want 64-hex", enabledCfg.InstallationID, len(enabledCfg.InstallationID))
+	}
+	if _, err := os.Stat(keployYAML); err != nil {
+		t.Fatalf("expected GetService to persist %s: %v", keployYAML, err)
+	}
+}
