@@ -59,16 +59,19 @@ type windowBackgroundHealer interface {
 // decodes of the mock file and hands the exact same set to both the agent and
 // mappings.yaml.
 type windowBgTracker struct {
-	classifier     *models.WindowClassifier
-	recordedFirst  time.Time
-	seen           map[string]struct{}
-	startupCol     *models.DerivedBgCollector
-	workerCol      *models.DerivedBgCollector
-	logger         *zap.Logger
-	testSetID      string
-	sawPass        bool
-	loggedDrops    bool
-	refusedByScope int
+	classifier         *models.WindowClassifier
+	recordedFirst      time.Time
+	seen               map[string]struct{}
+	startupCol         *models.DerivedBgCollector
+	workerCol          *models.DerivedBgCollector
+	logger             *zap.Logger
+	testSetID          string
+	sawPass            bool
+	loggedDrops        bool
+	loggedRefusal      bool
+	scheduleIncomplete bool
+	refusalReason      string
+	refusedByScope     int
 }
 
 func newWindowBgTracker(testCases []*models.TestCase, opts models.BackgroundWindowOptions, logger *zap.Logger, testSetID string) *windowBgTracker {
@@ -77,10 +80,22 @@ func newWindowBgTracker(testCases []*models.TestCase, opts models.BackgroundWind
 		return nil
 	}
 	minSamples := learn.MinEpochReads + 1
+	clf := models.NewWindowClassifierForBackground(windows, opts)
+	refusalReason := ""
+	switch {
+	case opts.ScheduleIncomplete:
+		refusalReason = "could not read the test set's full recorded schedule"
+	case !clf.HasFullSchedule():
+		refusalReason = "no recorded test schedule metadata (recorded_windows) is present for this set"
+	case opts.RecordedStartUnreadable:
+		refusalReason = "could not read the earliest recorded test start"
+	}
 	return &windowBgTracker{
-		classifier:    models.NewWindowClassifierForBackground(windows, opts),
-		recordedFirst: opts.RecordedFirstStart,
-		seen:          make(map[string]struct{}),
+		classifier:         clf,
+		recordedFirst:      opts.RecordedFirstStart,
+		seen:               make(map[string]struct{}),
+		scheduleIncomplete: opts.ScheduleIncomplete,
+		refusalReason:      refusalReason,
 		startupCol: models.NewDerivedBgCollector(models.DerivedBgCollectorConfig{
 			MaxEntries:  windowDerivedMaxPerTier,
 			MaxPerShape: windowDerivedMaxPerShape,
@@ -96,6 +111,24 @@ func newWindowBgTracker(testCases []*models.TestCase, opts models.BackgroundWind
 		logger:    logger,
 		testSetID: testSetID,
 	}
+}
+
+func (t *windowBgTracker) hasFullProof() bool {
+	return t != nil && t.classifier != nil && t.classifier.HasFullSchedule()
+}
+
+func (t *windowBgTracker) logWholesaleRefusalOnce() {
+	if t == nil || t.loggedRefusal || t.hasFullProof() || t.logger == nil {
+		return
+	}
+	t.loggedRefusal = true
+	reason := t.refusalReason
+	if reason == "" {
+		reason = "no recorded test schedule metadata (recorded_windows) is present for this set"
+	}
+	t.logger.Info("skipping persisted window-derived background derivation and keeping legacy Pass 1 behaviour; re-record the test set to persist recorded_windows",
+		zap.String("testSetID", t.testSetID),
+		zap.String("reason", reason))
 }
 
 func (r *Replayer) backgroundWindowOptions(ctx context.Context, testSetID string, testCases []*models.TestCase) models.BackgroundWindowOptions {
@@ -115,12 +148,24 @@ func (r *Replayer) backgroundWindowOptions(ctx context.Context, testSetID string
 		}
 		opts.RecordedWindows = allWindows
 	}
-	if deleted := r.deletedWindowsFor(testSetID); len(deleted) > 0 {
-		if len(opts.RecordedWindows) == 0 {
-			opts.RecordedWindows = append(recordedTestWindows(testCases), deleted...)
-		} else {
-			opts.RecordedWindows = append(append([]models.TestWindow(nil), opts.RecordedWindows...), deleted...)
+	if len(opts.RecordedWindows) == 0 && r.testSetConf != nil {
+		tsConf, err := r.testSetConf.ReadForUpdate(ctx, testSetID)
+		if err != nil {
+			if r.logger != nil {
+				r.logger.Warn("could not read test-set config for recorded_windows; refusing window-derived background promotion (fail closed)",
+					zap.String("testSetID", testSetID), zap.Error(err))
+			}
+			opts.ScheduleIncomplete = true
+			return opts
 		}
+		if tsConf != nil && len(tsConf.RecordedWindows) > 0 {
+			opts.RecordedWindows = tsConf.RecordedWindows
+		}
+	}
+	// --must-pass deletions ONLY add refusal zones; they never turn an
+	// incomplete schedule into a complete recorded schedule.
+	if deleted := r.deletedWindowsFor(testSetID); len(deleted) > 0 {
+		opts.RefusalWindows = deleted
 	}
 	if rsr, ok := r.testDB.(RecordedStartReader); ok {
 		recorded, err := rsr.RecordedFirstTestStart(ctx, testSetID)
@@ -233,9 +278,10 @@ func (t *windowBgTracker) keepNames(docs ...*models.Mapping) []string {
 }
 
 // keepNamesExcludingExpected returns all derived startup and worker mock names
-// not owned by any test case in expected or docs.
+// not owned by any test case in expected or docs, ONLY when a full recorded
+// schedule proof existed.
 func (t *windowBgTracker) keepNamesExcludingExpected(expected map[string][]models.MockEntry, docs ...*models.Mapping) []string {
-	if t == nil {
+	if !t.hasFullProof() {
 		return nil
 	}
 	owned := ownedMockNames(docs...)
@@ -260,6 +306,86 @@ func (t *windowBgTracker) keepNamesExcludingExpected(expected map[string][]model
 	return out
 }
 
+// backgroundShapeMatchedSet returns the set of loaded mock names not already
+// in knownBgNames whose SpecificBackgroundShapeKey (including Mongo query key
+// structure) matches at least one mock in knownBgNames. Used ONLY to prevent
+// false OBSOLETE demotion on incidental in-window background polls — NEVER for
+// --assert-dependencies, schema-noise-strict, DepResult, or unconsumedTestMocks.
+func backgroundShapeMatchedSet(knownBgNames map[string]bool, mockSlices ...[]*models.Mock) map[string]bool {
+	names := backgroundShapeMatchedNames(knownBgNames, mockSlices...)
+	if len(names) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
+}
+
+// isOnlyObsoleteShapeUnconsumed reports whether the mock-set mismatch between
+// filteredConsumed and filteredExpected was caused SOLELY by unconsumed
+// expected mocks in obsoleteShapeExcluded (no foreign mock consumed outside
+// filteredExpected, and every unconsumed expected mock is shape-matched to a
+// known background recording).
+func isOnlyObsoleteShapeUnconsumed(filteredConsumed, filteredExpected []string, obsoleteShapeExcluded map[string]bool) bool {
+	if len(obsoleteShapeExcluded) == 0 {
+		return false
+	}
+	expectedSet := make(map[string]bool, len(filteredExpected))
+	for _, n := range filteredExpected {
+		expectedSet[n] = true
+	}
+	consumedSet := make(map[string]bool, len(filteredConsumed))
+	for _, n := range filteredConsumed {
+		if !expectedSet[n] {
+			// A foreign mock outside the test's mapping was consumed (not just
+			// an unconsumed background-shaped mock): keep OBSOLETE demotion.
+			return false
+		}
+		consumedSet[n] = true
+	}
+	hasExcludedUnconsumed := false
+	for _, n := range filteredExpected {
+		if consumedSet[n] {
+			continue
+		}
+		if !obsoleteShapeExcluded[n] {
+			// A genuine per-test expected mock was left unconsumed.
+			return false
+		}
+		hasExcludedUnconsumed = true
+	}
+	return hasExcludedUnconsumed
+}
+
+// streamObsoleteShapeVeto reports whether a streaming test case's
+// mockSetMismatch was caused solely by unconsumed expected mocks matching a
+// known background shape (vetoing OBSOLETE demotion without excusing foreign
+// consumed mocks or --assert-dependencies). Kept out of RunTestSet so
+// RunTestSet retains its single audited call to eligibleExpectedEntries.
+func streamObsoleteShapeVeto(
+	expected []models.MockEntry,
+	consumed []models.MockState,
+	mockKindByName map[string]models.Kind,
+	reusableMockNames map[string]bool,
+	obsoleteShapeExcluded map[string]bool,
+) bool {
+	if len(obsoleteShapeExcluded) == 0 {
+		return false
+	}
+	var expNames, consNames []string
+	for _, m := range eligibleExpectedEntries(expected, mockKindByName, reusableMockNames) {
+		expNames = append(expNames, m.Name)
+	}
+	for _, m := range consumed {
+		if !consumedOutsideAssertion(m) && !reusableMockNames[m.Name] {
+			consNames = append(consNames, m.Name)
+		}
+	}
+	return isOnlyObsoleteShapeUnconsumed(consNames, expNames, obsoleteShapeExcluded)
+}
+
 // backgroundShapeMatchedNames returns every loaded mock name not already in
 // knownBgNames whose SpecificBackgroundShapeKey matches at least one mock in
 // knownBgNames. Mocks without a concrete request identity (empty specific
@@ -268,13 +394,14 @@ func backgroundShapeMatchedNames(knownBgNames map[string]bool, mockSlices ...[]*
 	if len(knownBgNames) == 0 {
 		return nil
 	}
+	shapeOf := models.SpecificBackgroundShapeKey
 	bgShapes := make(map[string]bool)
 	for _, list := range mockSlices {
 		for _, m := range list {
 			if m == nil || !knownBgNames[m.Name] {
 				continue
 			}
-			if key := models.SpecificBackgroundShapeKey(m); key != "" {
+			if key := shapeOf(m); key != "" {
 				bgShapes[key] = true
 			}
 		}
@@ -289,7 +416,7 @@ func backgroundShapeMatchedNames(knownBgNames map[string]bool, mockSlices ...[]*
 			if m == nil || m.Name == "" || knownBgNames[m.Name] || added[m.Name] {
 				continue
 			}
-			if key := models.SpecificBackgroundShapeKey(m); key != "" && bgShapes[key] {
+			if key := shapeOf(m); key != "" && bgShapes[key] {
 				added[m.Name] = true
 				out = append(out, m.Name)
 			}
@@ -299,14 +426,10 @@ func backgroundShapeMatchedNames(knownBgNames map[string]bool, mockSlices ...[]*
 }
 
 // expandBackgroundExclusions widens backgroundExcluded (for legacy/auto-replay
-// mode, !r.exactServing()) with:
-//  1. windowBg-derived startup/worker mock names when the test set is eligible
-//     for window-derived background healing (missing mappings.yaml or an
-//     unstamped keploy-written mappings.yaml with empty worker:); and
-//  2. any in-window recorded mock whose SpecificBackgroundShapeKey matches a
-//     known background recording (worker:, startup:, or eligible windowBg), so
-//     an incidental background poll recorded during a test's window never
-//     demotes that test to OBSOLETE when left unconsumed.
+// mode, !r.exactServing()) with proven windowBg-derived startup/worker mock
+// names when the test set has a complete recorded schedule and is eligible for
+// window-derived background persistence/healing. Shape-matched in-window mocks
+// are NEVER added here (they apply only to OBSOLETE demotion).
 func (r *Replayer) expandBackgroundExclusions(
 	ctx context.Context,
 	testSetID string,
@@ -314,7 +437,6 @@ func (r *Replayer) expandBackgroundExclusions(
 	windowBg *windowBgTracker,
 	expectedTestMockMappings map[string][]models.MockEntry,
 	base []string,
-	mockSlices ...[]*models.Mock,
 ) []string {
 	seen := make(map[string]bool, len(base))
 	out := make([]string, 0, len(base))
@@ -328,7 +450,7 @@ func (r *Replayer) expandBackgroundExclusions(
 	for _, n := range base {
 		add(n)
 	}
-	if windowBg != nil {
+	if windowBg != nil && windowBg.hasFullProof() {
 		allowBg, _, existingMap := r.windowBgEligibility(ctx, testSetID, mappingExists)
 		// If a mappingReader already serves a non-nil mapping document (even
 		// when Exists returned false on a synthetic store), honor its Source,
@@ -348,9 +470,6 @@ func (r *Replayer) expandBackgroundExclusions(
 				add(n)
 			}
 		}
-	}
-	for _, n := range backgroundShapeMatchedNames(seen, mockSlices...) {
-		add(n)
 	}
 	return out
 }
@@ -373,18 +492,21 @@ func ownedMockNames(docs ...*models.Mapping) map[string]bool {
 }
 
 // apply merges the observed outside-window startup/worker entries into
-// mappingDoc, excluding any mock owned by a test case in mappingDoc, actual, or
-// extraExclude and any mock already listed in mappingDoc.Startup or
-// mappingDoc.Worker. Stamps mappingDoc.BackgroundDerived = true and logs at
-// Info whenever a tier cap dropped recordings.
+// mappingDoc ONLY when a full recorded schedule proof existed (hasFullProof).
+// Excludes mocks already owned in extraExclude (pre-existing mappings) and
+// strips promoted background entries from newly generated mappingDoc.TestCases
+// so Pass 1 in RAM and the persisted mappings.yaml always agree. Stamps
+// mappingDoc.BackgroundDerived = true ONLY when a full proof existed.
 func (t *windowBgTracker) apply(mappingDoc, actual *models.Mapping, extraExclude ...*models.Mapping) (addedStartup, addedWorker int) {
 	if t == nil || mappingDoc == nil {
 		return 0, 0
 	}
-	allDocs := make([]*models.Mapping, 0, 2+len(extraExclude))
-	allDocs = append(allDocs, mappingDoc, actual)
-	allDocs = append(allDocs, extraExclude...)
-	exclude := ownedMockNames(allDocs...)
+	if !t.hasFullProof() {
+		t.logWholesaleRefusalOnce()
+		return 0, 0
+	}
+	_ = actual
+	exclude := ownedMockNames(extraExclude...)
 	for _, m := range mappingDoc.Startup {
 		if m.Name != "" {
 			exclude[m.Name] = true
@@ -396,15 +518,39 @@ func (t *windowBgTracker) apply(mappingDoc, actual *models.Mapping, extraExclude
 		}
 	}
 
+	promoted := make(map[string]bool)
 	if added := filterExcludedEntries(t.startupCol.Entries(), exclude); len(added) > 0 {
 		mappingDoc.Startup = append(mappingDoc.Startup, added...)
 		sortByRecordedTime(mappingDoc.Startup)
 		addedStartup = len(added)
+		for _, e := range added {
+			promoted[e.Name] = true
+		}
 	}
 	if added := filterExcludedEntries(t.workerCol.Entries(), exclude); len(added) > 0 {
 		mappingDoc.Worker = append(mappingDoc.Worker, added...)
 		sortByRecordedTime(mappingDoc.Worker)
 		addedWorker = len(added)
+		for _, e := range added {
+			promoted[e.Name] = true
+		}
+	}
+	// Keep Pass 1 and persisted mappings.yaml consistent: a mock proven outside
+	// every recorded test window and handed to the agent as background in Pass 1
+	// belongs in startup:/worker:, not duplicated inside a test's mocks: list.
+	if len(promoted) > 0 && len(mappingDoc.TestCases) > 0 {
+		for i := range mappingDoc.TestCases {
+			if len(mappingDoc.TestCases[i].Mocks) == 0 {
+				continue
+			}
+			kept := mappingDoc.TestCases[i].Mocks[:0]
+			for _, m := range mappingDoc.TestCases[i].Mocks {
+				if !promoted[m.Name] {
+					kept = append(kept, m)
+				}
+			}
+			mappingDoc.TestCases[i].Mocks = kept
+		}
 	}
 	mappingDoc.BackgroundDerived = true
 	t.logCapDrops()
@@ -566,11 +712,15 @@ func (r *Replayer) healKeployTestMappingWorker(ctx context.Context, testSetID st
 		healDoc.Kind = "TestMockMapping"
 	}
 	if tracker != nil && tracker.sawPass {
+		if !tracker.hasFullProof() {
+			tracker.logWholesaleRefusalOnce()
+			return
+		}
 		tracker.apply(healDoc, actual, existing)
 	} else if err := r.populateWindowDerivedBackground(ctx, testSetID, testCases, healDoc, actual, existing); err != nil {
 		return
 	}
-	if len(healDoc.Worker) == 0 {
+	if !healDoc.BackgroundDerived || len(healDoc.Worker) == 0 {
 		return
 	}
 	// Preserve existing Startup if already present on disk.

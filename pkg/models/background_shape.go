@@ -195,14 +195,253 @@ func bgMongoSectionCommand(section string) string {
 		}
 		return s
 	}
-	s = strings.TrimSpace(s[start+1:])
-	end := strings.IndexAny(s, ",}")
+	body := strings.TrimSpace(s[start+1:])
+	end := strings.IndexAny(body, ",}")
+	cmd := body
 	if end >= 0 {
-		s = s[:end]
+		cmd = body[:end]
 	}
-	s = strings.TrimSpace(s)
-	if len(s) > 96 {
-		s = s[:96]
+	cmd = strings.TrimSpace(cmd)
+	if len(cmd) > 96 {
+		cmd = cmd[:96]
 	}
-	return s
+	if qKeys := bgMongoQueryKeys(s[start:]); qKeys != "" {
+		return cmd + "|q=" + qKeys
+	}
+	return cmd
+}
+
+// bgMongoQueryKeys extracts sorted, value-stripped structural key paths from a
+// Mongo command document's query/filter/q subdocument (supporting both strict
+// JSON and Mongo shell unquoted-key syntax). Two polls of the same collection
+// with different bare timestamps produce the same key path (e.g. dirtyAt.$lte),
+// whereas a test's own claim with a different filter (e.g. _id,owner) stays
+// distinct so shape matching never confuses distinct queries on one collection.
+func bgMongoQueryKeys(doc string) string {
+	for _, field := range []string{"query", "filter", "q"} {
+		sub, ok := extractNamedBraceBlock(doc, field)
+		if !ok {
+			continue
+		}
+		var paths []string
+		collectDocKeyPaths(sub, "", &paths, 0)
+		if len(paths) == 0 {
+			continue
+		}
+		sort.Strings(paths)
+		paths = slices.Compact(paths)
+		joined := strings.Join(paths, ",")
+		if len(joined) > 128 {
+			joined = joined[:128]
+		}
+		return joined
+	}
+	return ""
+}
+
+func extractNamedBraceBlock(doc, field string) (string, bool) {
+	n := len(doc)
+	depth := 0
+	inStr := false
+	esc := false
+	for i := 0; i < n; i++ {
+		c := doc[i]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		if c == '"' {
+			if depth == 1 {
+				// Potential top-level quoted key.
+				j := i + 1
+				for j < n && doc[j] != '"' {
+					if doc[j] == '\\' {
+						j++
+					}
+					j++
+				}
+				if j < n && doc[i+1:j] == field {
+					if blk, ok := braceBlockAfterColon(doc, j+1); ok {
+						return blk, true
+					}
+				}
+				i = j
+				continue
+			}
+			inStr = true
+			continue
+		}
+		if c == '{' {
+			depth++
+			continue
+		}
+		if c == '}' {
+			depth--
+			continue
+		}
+		if depth == 1 && isIdentStart(c) {
+			j := i + 1
+			for j < n && isIdentChar(doc[j]) {
+				j++
+			}
+			if doc[i:j] == field {
+				if blk, ok := braceBlockAfterColon(doc, j); ok {
+					return blk, true
+				}
+			}
+			i = j - 1
+		}
+	}
+	return "", false
+}
+
+func braceBlockAfterColon(doc string, pos int) (string, bool) {
+	n := len(doc)
+	for pos < n && (doc[pos] == ' ' || doc[pos] == '\t' || doc[pos] == '\n' || doc[pos] == '\r') {
+		pos++
+	}
+	if pos >= n || doc[pos] != ':' {
+		return "", false
+	}
+	pos++
+	for pos < n && (doc[pos] == ' ' || doc[pos] == '\t' || doc[pos] == '\n' || doc[pos] == '\r') {
+		pos++
+	}
+	if pos >= n || doc[pos] != '{' {
+		return "", false
+	}
+	depth := 0
+	inStr := false
+	esc := false
+	for i := pos; i < n; i++ {
+		c := doc[i]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return doc[pos : i+1], true
+			}
+		}
+	}
+	return "", false
+}
+
+func collectDocKeyPaths(blk, prefix string, out *[]string, level int) {
+	if level > 4 || len(blk) < 2 || blk[0] != '{' || blk[len(blk)-1] != '}' {
+		return
+	}
+	inner := blk[1 : len(blk)-1]
+	n := len(inner)
+	depth := 0
+	inStr := false
+	esc := false
+	expectKey := true
+	for i := 0; i < n; i++ {
+		c := inner[i]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		if depth == 0 {
+			if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+				continue
+			}
+			if c == ',' {
+				expectKey = true
+				continue
+			}
+			if expectKey {
+				var key string
+				var next int
+				if c == '"' {
+					j := i + 1
+					for j < n && inner[j] != '"' {
+						if inner[j] == '\\' {
+							j++
+						}
+						j++
+					}
+					if j >= n {
+						return
+					}
+					key = inner[i+1 : j]
+					next = j + 1
+				} else if isIdentStart(c) {
+					j := i + 1
+					for j < n && isIdentChar(inner[j]) {
+						j++
+					}
+					key = inner[i:j]
+					next = j
+				}
+				if key != "" {
+					expectKey = false
+					full := key
+					if prefix != "" {
+						full = prefix + "." + key
+					}
+					if sub, ok := braceBlockAfterColon(inner, next); ok {
+						beforeLen := len(*out)
+						collectDocKeyPaths(sub, full, out, level+1)
+						if len(*out) == beforeLen {
+							*out = append(*out, full)
+						}
+						// Advance past the sub-block.
+						if idx := strings.Index(inner[next:], sub); idx >= 0 {
+							i = next + idx + len(sub) - 1
+							continue
+						}
+					} else {
+						*out = append(*out, full)
+					}
+					i = next - 1
+					continue
+				}
+			}
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+}
+
+func isIdentStart(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$'
+}
+
+func isIdentChar(c byte) bool {
+	return isIdentStart(c) || (c >= '0' && c <= '9') || c == '.' || c == '-'
 }

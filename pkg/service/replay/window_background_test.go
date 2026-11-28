@@ -228,6 +228,7 @@ func TestPopulateWindowDerivedBackground_SplitsStartupAndWorkerAndStaysFailClose
 	r := &Replayer{
 		logger: zap.NewNop(),
 		mockDB: &windowBgMockDB{mocks: mocks},
+		testDB: &recordedWindowsTestDB{prTestDB: prTestDB{cases: tcs}, allWindows: recordedTestWindows(tcs)},
 	}
 
 	mappingDoc := &models.Mapping{
@@ -240,7 +241,7 @@ func TestPopulateWindowDerivedBackground_SplitsStartupAndWorkerAndStaysFailClose
 		},
 	}
 
-	if err := r.populateWindowDerivedBackground(context.Background(), "ts-0", tcs, mappingDoc, mappingDoc); err != nil {
+	if err := r.populateWindowDerivedBackground(context.Background(), "ts-0", tcs, mappingDoc, nil, mappingDoc); err != nil {
 		t.Fatalf("populateWindowDerivedBackground: %v", err)
 	}
 
@@ -311,10 +312,11 @@ func TestPopulateWindowDerivedBackground_MockOfRemovedTestWindowIsNotPromoted(t 
 		makeMongoPollMock("between-held-ptw", "ptw_endpoints", t0.Add(25*time.Second), t0.Add(25*time.Second+5*time.Millisecond)),
 		makeMongoPollMock("after-last-held-maybe-removed", "uiTestRuns", t0.Add(35*time.Second), t0.Add(35*time.Second+5*time.Millisecond)),
 	}
+	allRecorded := append([]models.TestWindow{{TestCase: "test-1", Start: t0.Add(10 * time.Second), End: t0.Add(12 * time.Second)}}, recordedTestWindows(tcs)...)
 	r := &Replayer{
 		logger: zap.NewNop(),
 		mockDB: &windowBgMockDB{mocks: mocks},
-		testDB: &recordedStartDB{at: t0.Add(10 * time.Second)},
+		testDB: &recordedWindowsTestDB{prTestDB: prTestDB{cases: tcs}, allWindows: allRecorded, firstStart: t0.Add(10 * time.Second), hasFirst: true},
 	}
 	doc := &models.Mapping{TestSetID: "ts-0"}
 	if err := r.populateWindowDerivedBackground(context.Background(), "ts-0", tcs, doc, doc); err != nil {
@@ -343,7 +345,11 @@ func TestPopulateWindowDerivedBackground_InWindowIdleAnswerGetsIdleReason(t *tes
 	mocks := []*models.Mock{
 		makeHTTP2SQSMock("idle-in-window", "AmazonSQS.ReceiveMessage", t0.Add(11*time.Second), t0.Add(11*time.Second+5*time.Millisecond)),
 	}
-	r := &Replayer{logger: zap.NewNop(), mockDB: &windowBgMockDB{mocks: mocks}}
+	r := &Replayer{
+		logger: zap.NewNop(),
+		mockDB: &windowBgMockDB{mocks: mocks},
+		testDB: &recordedWindowsTestDB{prTestDB: prTestDB{cases: tcs}, allWindows: recordedTestWindows(tcs)},
+	}
 	doc := &models.Mapping{TestSetID: "ts-0"}
 	if err := r.populateWindowDerivedBackground(context.Background(), "ts-0", tcs, doc, doc); err != nil {
 		t.Fatalf("populateWindowDerivedBackground: %v", err)
@@ -383,7 +389,11 @@ func TestPopulateWindowDerivedBackground_TierCapKeepsPollerEpochSamplesAndLogs(t
 		mocks = append(mocks, makeMongoPollMock(fmt.Sprintf("poll-%d", i), "ptw_endpoints", at, at.Add(time.Millisecond)))
 	}
 	core, logs := observer.New(zapcore.InfoLevel)
-	r := &Replayer{logger: zap.New(core), mockDB: &windowBgMockDB{mocks: mocks}}
+	r := &Replayer{
+		logger: zap.New(core),
+		mockDB: &windowBgMockDB{mocks: mocks},
+		testDB: &recordedWindowsTestDB{prTestDB: prTestDB{cases: tcs}, allWindows: recordedTestWindows(tcs)},
+	}
 	doc := &models.Mapping{TestSetID: "ts-0"}
 	if err := r.populateWindowDerivedBackground(context.Background(), "ts-0", tcs, doc, doc); err != nil {
 		t.Fatalf("populateWindowDerivedBackground: %v", err)
@@ -449,6 +459,7 @@ func TestRunTestSet_FreshPruneRunKeepsWindowDerivedWorkers(t *testing.T) {
 	}
 	db := &pruningWindowMockDB{recording: recording}
 	pm := &shMappingDB{prMappingDB: &prMappingDB{exists: false}, mapping: nil}
+	h.replayer.testDB = &recordedWindowsTestDB{prTestDB: prTestDB{cases: h.cases}, allWindows: recordedTestWindows(h.cases)}
 	h.replayer.mappingDB = pm
 	h.replayer.mockDB = db
 	h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, consumed)}
@@ -531,6 +542,7 @@ func TestRunTestSet_HealsKeployTestEmptyWorkerAndPreservesUserEdited(t *testing.
 		}
 		h := newPartialRunHarness(t, 2, 0)
 		pinWindows(h)
+		h.replayer.testDB = &recordedWindowsTestDB{prTestDB: prTestDB{cases: h.cases}, allWindows: recordedTestWindows(h.cases)}
 		h.replayer.config.Test.StrictMockWindow = true
 		pm := &shMappingDB{prMappingDB: &prMappingDB{exists: true}, mapping: stale}
 		h.replayer.mappingDB = pm
@@ -615,6 +627,7 @@ func TestRunTestSet_Pass1PersistsWindowBackgroundForPass2AndRespectsExistingMapp
 	// --- Pass 1: no mappings.yaml yet (default create-if-not-present path) ---
 	h1 := newPartialRunHarness(t, 2, 0)
 	pinWindows(h1)
+	h1.replayer.testDB = &recordedWindowsTestDB{prTestDB: prTestDB{cases: h1.cases}, allWindows: recordedTestWindows(h1.cases)}
 	h1.replayer.config.Test.StrictMockWindow = true
 	p1Map := &shMappingDB{prMappingDB: &prMappingDB{exists: false}, mapping: nil}
 	h1.replayer.mappingDB = p1Map
@@ -978,7 +991,7 @@ func TestUnconsumedInWindowBackgroundShapeNeverDemotesToObsolete(t *testing.T) {
 		}
 	})
 
-	t.Run("switch off: in-window Mongo mock matching worker shape passes under assert-dependencies", func(t *testing.T) {
+	t.Run("switch off: assert-dependencies STILL fails on unconsumed same-shape write (Decision 3 / P2)", func(t *testing.T) {
 		setSwitch(t, false)
 		h := newPartialRunHarness(t, 1, 0)
 		pinWindows(h)
@@ -1004,8 +1017,11 @@ func TestUnconsumedInWindowBackgroundShapeNeverDemotesToObsolete(t *testing.T) {
 
 		st := h.run(t)
 		got := resultOf(t, h, "test-1")
-		if st != models.TestSetStatusPassed || got.Status != models.TestStatusPassed {
-			t.Fatalf("set=%s test=%s; want PASSED when only unconsumed in-window mock matches worker background shape", st, got.Status)
+		if st != models.TestSetStatusFailed || got.Status != models.TestStatusFailed {
+			t.Fatalf("set=%s test=%s; want FAILED under --assert-dependencies (shape match applies only to OBSOLETE demotion)", st, got.Status)
+		}
+		if len(got.Result.DepResult) != 1 {
+			t.Fatalf("DepResult rows = %d, want 1", len(got.Result.DepResult))
 		}
 	})
 
@@ -1013,6 +1029,7 @@ func TestUnconsumedInWindowBackgroundShapeNeverDemotesToObsolete(t *testing.T) {
 		setSwitch(t, false)
 		h := newPartialRunHarness(t, 2, 0)
 		pinWindows(h)
+		h.replayer.testDB = &recordedWindowsTestDB{prTestDB: prTestDB{cases: h.cases}, allWindows: recordedTestWindows(h.cases)}
 		// Outside-window background mock bg-ptw-1 recorded between test-1 and test-2;
 		// in-window mock-640 recorded inside test-1 with the same ptw_endpoints shape.
 		h.mocks.filtered = []*models.Mock{

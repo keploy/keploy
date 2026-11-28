@@ -11,17 +11,17 @@ import (
 // the replayer opens on the agent while that test runs (MockFilterParams
 // AfterTime/BeforeTime).
 type TestWindow struct {
-	TestCase string    `json:"testCase,omitempty"`
-	Start    time.Time `json:"start"`
-	End      time.Time `json:"end"`
+	TestCase string    `json:"testCase,omitempty" yaml:"test_case,omitempty"`
+	Start    time.Time `json:"start" yaml:"start"`
+	End      time.Time `json:"end" yaml:"end"`
 	// Clock names, under the proven switch, the clock Start is on: the test
 	// case's Origin.Clock (RecordedWindow). "" is untrusted.
-	Clock string `json:"clock,omitempty"`
+	Clock string `json:"clock,omitempty" yaml:"clock,omitempty"`
 	// Tests are, for a window several tests' windows were merged into (tests
 	// run at once; TestCase ""), the tests merged: the run reaches it when
 	// any of them begins, and passes its end once each of them has ended
 	// (models.RunPlace). Empty for one test's window.
-	Tests []string `json:"tests,omitempty"`
+	Tests []string `json:"tests,omitempty" yaml:"tests,omitempty"`
 }
 
 // RunWindows is ws, the windows keploy mock replay derives from a set's

@@ -2902,6 +2902,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// so a test still asserts every data-plane mock its mapping owns, whatever
 	// tier DeriveLifetime gives it.
 	reusableMockNames := make(map[string]bool)
+	var obsoleteShapeExcluded map[string]bool
 	// passThroughMockNames marks recorded HTTP mocks that an active egress
 	// passthrough rule now answers without consuming (models.Mock.AnsweredByPassThrough):
 	// left out of per-test and worker-scope unconsumed-mock assertions on both sides.
@@ -3138,10 +3139,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// startup mocks), never excusing a test-owned mock in r.exact.owned.
 		backgroundExcluded = r.backgroundExcludedMockNames(ctx, testSetID, isMappingEnabled, fromWindows, startupMockNames)
 		if !r.exactServing() && isMappingEnabled {
-			backgroundExcluded = r.expandBackgroundExclusions(ctx, testSetID, mappingExists, windowBg, expectedTestMockMappings, backgroundExcluded, filtered, unfiltered)
+			backgroundExcluded = r.expandBackgroundExclusions(ctx, testSetID, mappingExists, windowBg, expectedTestMockMappings, backgroundExcluded)
 		}
 		for _, n := range backgroundExcluded {
 			reusableMockNames[n] = true
+		}
+		if !r.exactServing() && isMappingEnabled && len(reusableMockNames) > 0 {
+			obsoleteShapeExcluded = backgroundShapeMatchedSet(reusableMockNames, filtered, unfiltered)
 		}
 		return filtered, unfiltered, nil
 	}
@@ -3483,8 +3487,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// holding nothing and report zero executed tests (keploy#4614).
 		// Re-register with the replacement, or fail this test set loudly rather
 		// than proceeding mockless.
-		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
-			totalConsumedMocks, useMappingBased, testCases); err != nil {
+		if err := r.ensureAgentHoldsStoredMocksWithShape(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
+			totalConsumedMocks, useMappingBased, testCases, r.recordedSetShapeWith(ctx, testSetID, testCases, windowBg, windowBgExisting, expectedTestMockMappings)); err != nil {
 			return models.TestSetStatusFailed, err
 		}
 		// An agent the retry started in place of the one before, while the
@@ -5046,9 +5050,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			//   - StrictFailure: the pre-existing veto of the OBSOLETE
 			//     demotion for a response-failing test.
 			outcome := resolveTestOutcome(testPass, mockSetMismatch, r.config.Test.NoiseStrict(), r.assertTestMocks(), r.strictFailure())
+			// Decision 3: shape-matched incidental in-window background polls
+			// veto ONLY the OBSOLETE demotion (never --assert-dependencies,
+			// schema-noise-strict, DepResult rows, or foreign consumed mocks).
+			obsoleteVetoed := false
+			if !provenswitch.On() && outcome.Status == models.TestStatusObsolete && len(obsoleteShapeExcluded) > 0 &&
+				isOnlyObsoleteShapeUnconsumed(filteredMockNames, filteredExpectedNames, obsoleteShapeExcluded) {
+				obsoleteVetoed = true
+				if testPass {
+					outcome.Status = models.TestStatusPassed
+					outcome.FailsTestSet = false
+				} else {
+					outcome.Status = models.TestStatusFailed
+					outcome.FailsTestSet = true
+				}
+				outcome.RecordMismatch = false
+				outcome.Log = mismatchLogNone
+			}
 			if mockSetMismatch {
 				leftRecordedUnconsumed = appendOnce(leftRecordedUnconsumed, testCase.Name)
-				if !testPass {
+				if !testPass && !obsoleteVetoed {
 					obsoleteShaped = appendOnce(obsoleteShaped, testCase.Name)
 				}
 			}
@@ -6295,7 +6316,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if streamLeftRecorded {
 				leftRecordedUnconsumed = appendOnce(leftRecordedUnconsumed, tc.Name)
 			}
-			if !testPass && (mockSetMismatch || streamLeftRecorded) {
+			streamObsoleteVeto := false
+			if !provenswitch.On() && !testPass && mockSetMismatch && len(obsoleteShapeExcluded) > 0 {
+				streamObsoleteVeto = streamObsoleteShapeVeto(
+					expectedTestMockMappings[tc.Name],
+					consumedMocks,
+					mockKindByName,
+					reusableMockNames,
+					obsoleteShapeExcluded,
+				)
+			}
+			if !testPass && (mockSetMismatch || streamLeftRecorded) && !streamObsoleteVeto {
 				obsoleteShaped = appendOnce(obsoleteShaped, tc.Name)
 			}
 			var testStatus models.TestStatus
@@ -6305,7 +6336,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					passingTotalConsumedMocks[m.Name] = m
 				}
-			} else if mockSetMismatch && !r.strictFailure() && len(streamTemplateFailures) == 0 && len(streamUnconsumed) == 0 && streamCallsMissed == 0 {
+			} else if mockSetMismatch && !streamObsoleteVeto && !r.strictFailure() && len(streamTemplateFailures) == 0 && len(streamUnconsumed) == 0 && streamCallsMissed == 0 {
 				// A template failure is never demoted to OBSOLETE, nor is a
 				// test that left one of its test mocks unconsumed, or one a
 				// call of which got no recorded answer, nor, under the proven
@@ -8820,24 +8851,32 @@ func (r *Replayer) recordedSetShapeWith(ctx context.Context, testSetID string, t
 	if recorded := r.recordedFirstTestStart(ctx, testSetID); !recorded.IsZero() && (shape.firstTestStart.IsZero() || recorded.Before(shape.firstTestStart)) {
 		shape.firstTestStart = recorded
 	}
-	if !provenswitch.On() && shape.deriveBackground && windowBg != nil && windowBg.sawPass {
-		// Derive ONCE in the replayer and hand that exact set to the agent via
-		// BackgroundMocks so Pass 1 in RAM and the persisted mappings.yaml
-		// always agree (same collector, same caps, same test-owned exclusions).
-		derived := windowBg.keepNamesExcludingExpected(expected, existingMap)
-		if len(derived) > 0 {
-			seen := make(map[string]bool, len(shape.background)+len(derived))
-			for _, n := range shape.background {
-				seen[n] = true
-			}
-			for _, n := range derived {
-				if !seen[n] {
+	if !provenswitch.On() && shape.deriveBackground && windowBg != nil {
+		if windowBg.scheduleIncomplete {
+			// Failed to read the recorded schedule: fail closed.
+			shape.deriveBackground = false
+		} else if windowBg.sawPass && windowBg.hasFullProof() {
+			// Authoritative recorded schedule present: derive ONCE in the
+			// replayer and hand that exact set to the agent via BackgroundMocks
+			// so Pass 1 in RAM and persisted mappings.yaml always agree.
+			derived := windowBg.keepNamesExcludingExpected(expected, existingMap)
+			if len(derived) > 0 {
+				seen := make(map[string]bool, len(shape.background)+len(derived))
+				for _, n := range shape.background {
 					seen[n] = true
-					shape.background = append(shape.background, n)
+				}
+				for _, n := range derived {
+					if !seen[n] {
+						seen[n] = true
+						shape.background = append(shape.background, n)
+					}
 				}
 			}
+			shape.deriveBackground = false
 		}
-		shape.deriveBackground = false
+		// Otherwise (no recorded_windows metadata on a pre-existing set): keep
+		// shape.deriveBackground = true (legacy Pass 1 in-RAM behaviour) with
+		// zero Pass 1 regression, while persisting and stamping nothing.
 	}
 	return shape
 }
@@ -9203,6 +9242,10 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // replaced here may be the bring-up retry's whose setup did not take, or one
 // docker started again under an app that had started.
 func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks *models.ConsumedHistory, useMappingBased bool, testCases []*models.TestCase) error {
+	return r.ensureAgentHoldsStoredMocksWithShape(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks, totalConsumedMocks, useMappingBased, testCases, r.recordedSetShape(ctx, testSetID, testCases))
+}
+
+func (r *Replayer) ensureAgentHoldsStoredMocksWithShape(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks *models.ConsumedHistory, useMappingBased bool, testCases []*models.TestCase, shape recordedSetShape) error {
 	stored := len(filteredMocks) + len(unfilteredMocks)
 	if !r.instrument || stored == 0 {
 		return nil
@@ -9294,7 +9337,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
-	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, pkg.PerTestRegion(filteredMocks), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil); err != nil {
+	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, pkg.PerTestRegion(filteredMocks), useMappingBased, shape, nil); err != nil {
 		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
 			return exitErr
 		}

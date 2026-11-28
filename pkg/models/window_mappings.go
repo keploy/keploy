@@ -242,13 +242,19 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 // WindowClassifier.ClassifyForBackground fails closed whenever earlier or
 // middle test windows may have been removed.
 type BackgroundWindowOptions struct {
-	// RecordedWindows, when non-empty, is the COMPLETE schedule of every test
-	// window ever recorded for this set (including removed, deduped, sealed, or
-	// previously-replayed cases). When provided, any call inside, in-flight
-	// into, or edge-owned by any recorded window is never promoted, and a gap
-	// between two held windows is promoted only when those two windows are
-	// adjacent in RecordedWindows with no removed test between them.
+	// RecordedWindows, when non-empty, is the COMPLETE immutable schedule of
+	// every test window ever recorded for this set (persisted at record time so
+	// tests removed later by dedup, --must-pass, or auto-replay remain in it).
+	// When provided, any call inside, in-flight into, or edge-owned by any
+	// recorded window is never promoted, and a gap between two held windows is
+	// promoted only when those two windows are adjacent in RecordedWindows with
+	// no removed test between them.
 	RecordedWindows []TestWindow
+	// RefusalWindows lists test windows known to have been deleted during this
+	// run (e.g. --must-pass deletions). They ONLY add refusal zones (blocking
+	// promotion of any call inside, in-flight into, or edge-owned by them) and
+	// NEVER make an incomplete schedule appear complete or prefix-safe.
+	RefusalWindows []TestWindow
 	// RecordedFirstStart is the earliest test start the TestDB remembers
 	// (RecordedStartReader). Ignored when RecordedStartUnreadable is true.
 	RecordedFirstStart time.Time
@@ -282,25 +288,26 @@ type WindowClassifier struct {
 	prefixSafe      bool
 	effectiveFirst  time.Time
 	earlierMissing  bool
-	// sequentialGapSafe[i] (for 1 <= i < len(ws)) reports whether held window
-	// ws[i] is provably adjacent to ws[0..i-1] with no removed test in between
-	// (when no full RecordedWindows schedule was supplied).
-	sequentialGapSafe []bool
-	// sequentialPrefixSafe reports whether ws[0] is provably the first
-	// sequential test recorded (e.g. "test-1" / "tc-1").
-	sequentialPrefixSafe bool
 }
 
 // NewWindowClassifier prepares a streaming worker-scope classifier for windows.
 func NewWindowClassifier(windows []TestWindow) *WindowClassifier {
 	sched := NewWindowSchedule(windows)
-	c := &WindowClassifier{ws: sched.windows, sched: sched, allSched: sched}
-	c.initSequentialAdjacency()
-	return c
+	return &WindowClassifier{ws: sched.windows, sched: sched, allSched: sched}
+}
+
+// HasFullSchedule reports whether this classifier was constructed with an
+// authoritative, complete recorded test schedule (opts.RecordedWindows with no
+// schedule read error). Name order never proves completeness.
+func (c *WindowClassifier) HasFullSchedule() bool {
+	return c != nil && !c.bgDisabled && c.hasFullSchedule
 }
 
 // NewWindowClassifierForBackground prepares a streaming classifier with
 // fail-closed recorded-schedule rules for window-derived background collection.
+// Only an explicit RecordedWindows schedule proves gap adjacency; test name
+// order never proves adjacency, and RefusalWindows (--must-pass deletions) only
+// add refusal zones without turning a partial schedule into a complete one.
 func NewWindowClassifierForBackground(held []TestWindow, opts BackgroundWindowOptions) *WindowClassifier {
 	sched := NewWindowSchedule(held)
 	c := &WindowClassifier{
@@ -309,35 +316,35 @@ func NewWindowClassifierForBackground(held []TestWindow, opts BackgroundWindowOp
 		allSched:  sched,
 		hasBgOpts: true,
 	}
-	c.initSequentialAdjacency()
 	if len(c.ws) == 0 || opts.ScheduleIncomplete {
 		c.bgDisabled = true
 		return c
 	}
 
+	type winKey struct {
+		name       string
+		start, end int64
+	}
+	keyOf := func(w TestWindow) winKey {
+		end := w.End
+		if end.IsZero() || end.Before(w.Start) {
+			end = w.Start
+		}
+		return winKey{name: w.TestCase, start: w.Start.UnixNano(), end: end.UnixNano()}
+	}
+	heldKeys := make(map[winKey]bool, len(c.ws))
+	for _, w := range c.ws {
+		heldKeys[keyOf(w)] = true
+	}
+
 	heldFirst := c.ws[0].Start
 	if len(opts.RecordedWindows) > 0 {
 		c.hasFullSchedule = true
-		type winKey struct {
-			name       string
-			start, end int64
-		}
-		keyOf := func(w TestWindow) winKey {
-			end := w.End
-			if end.IsZero() || end.Before(w.Start) {
-				end = w.Start
-			}
-			return winKey{name: w.TestCase, start: w.Start.UnixNano(), end: end.UnixNano()}
-		}
-		heldKeys := make(map[winKey]bool, len(c.ws))
-		for _, w := range c.ws {
-			heldKeys[keyOf(w)] = true
-		}
-		merged := make([]TestWindow, 0, len(opts.RecordedWindows)+len(c.ws))
-		seen := make(map[winKey]bool, len(opts.RecordedWindows)+len(c.ws))
-		for _, w := range opts.RecordedWindows {
+		merged := make([]TestWindow, 0, len(opts.RecordedWindows)+len(opts.RefusalWindows)+len(c.ws))
+		seen := make(map[winKey]bool, len(opts.RecordedWindows)+len(opts.RefusalWindows)+len(c.ws))
+		addWindow := func(w TestWindow) {
 			if w.Start.IsZero() {
-				continue
+				return
 			}
 			k := keyOf(w)
 			if !seen[k] {
@@ -345,12 +352,14 @@ func NewWindowClassifierForBackground(held []TestWindow, opts BackgroundWindowOp
 				merged = append(merged, w)
 			}
 		}
+		for _, w := range opts.RecordedWindows {
+			addWindow(w)
+		}
+		for _, w := range opts.RefusalWindows {
+			addWindow(w)
+		}
 		for _, w := range c.ws {
-			k := keyOf(w)
-			if !seen[k] {
-				seen[k] = true
-				merged = append(merged, w)
-			}
+			addWindow(w)
 		}
 		c.allSched = NewWindowSchedule(merged)
 		c.allHeld = make([]bool, len(c.allSched.windows))
@@ -369,8 +378,32 @@ func NewWindowClassifierForBackground(held []TestWindow, opts BackgroundWindowOp
 		return c
 	}
 
-	// No full RecordedWindows supplied: use RecordedStartReader if known, or
-	// sequential 1-based test ID proof; otherwise fail closed.
+	// No full RecordedWindows supplied: merge any RefusalWindows strictly as
+	// refusal zones so calls inside deleted tests are never promoted, while
+	// keeping hasFullSchedule=false (gaps fail closed).
+	if len(opts.RefusalWindows) > 0 {
+		merged := make([]TestWindow, 0, len(opts.RefusalWindows)+len(c.ws))
+		seen := make(map[winKey]bool, len(opts.RefusalWindows)+len(c.ws))
+		for _, w := range opts.RefusalWindows {
+			if w.Start.IsZero() {
+				continue
+			}
+			k := keyOf(w)
+			if !seen[k] {
+				seen[k] = true
+				merged = append(merged, w)
+			}
+		}
+		for _, w := range c.ws {
+			k := keyOf(w)
+			if !seen[k] {
+				seen[k] = true
+				merged = append(merged, w)
+			}
+		}
+		c.allSched = NewWindowSchedule(merged)
+	}
+
 	if opts.RecordedStartUnreadable {
 		c.prefixSafe = false
 		return c
@@ -382,61 +415,8 @@ func NewWindowClassifierForBackground(held []TestWindow, opts BackgroundWindowOp
 			c.effectiveFirst = opts.RecordedFirstStart
 		}
 		c.prefixSafe = true
-		return c
-	}
-	if c.sequentialPrefixSafe {
-		c.effectiveFirst = heldFirst
-		c.prefixSafe = true
 	}
 	return c
-}
-
-// parseSequentialTestID parses a 1-based Keploy sequential recorded test name
-// of the form "test-<N>" (pkg/platform/yaml/testdb NamingSequential) where
-// N >= 1 and has no leading zeros. Descriptive slug names such as
-// "get-cluster-list-1" use per-slug counters rather than a global recording
-// order, so they return (0, false) and fail closed unless the TestDB supplies
-// the complete recorded schedule via RecordedWindows.
-func parseSequentialTestID(name string) (num int, ok bool) {
-	suffix, found := strings.CutPrefix(name, "test-")
-	if !found || suffix == "" || (len(suffix) > 1 && suffix[0] == '0') {
-		return 0, false
-	}
-	n, err := strconv.Atoi(suffix)
-	if err != nil || n < 1 {
-		return 0, false
-	}
-	return n, true
-}
-
-func (c *WindowClassifier) initSequentialAdjacency() {
-	n := len(c.ws)
-	if n == 0 {
-		return
-	}
-	seq0, ok0 := parseSequentialTestID(c.ws[0].TestCase)
-	if ok0 && seq0 == 1 {
-		c.sequentialPrefixSafe = true
-	}
-	if n < 2 {
-		return
-	}
-	c.sequentialGapSafe = make([]bool, n)
-	allSeqSoFar := ok0
-	maxSeq := seq0
-	for i := 1; i < n; i++ {
-		seq, ok := parseSequentialTestID(c.ws[i].TestCase)
-		if !ok || !allSeqSoFar {
-			allSeqSoFar = false
-			continue
-		}
-		if seq == maxSeq+1 {
-			c.sequentialGapSafe[i] = true
-		}
-		if seq > maxSeq {
-			maxSeq = seq
-		}
-	}
 }
 
 // IsWorker reports whether DeriveWindowMappings(windows, ...) would place m in
@@ -497,14 +477,13 @@ const (
 //     -> WindowBgNone
 //   - prefix (< heldFirst): promoted to WindowBgStartup ONLY strictly before
 //     effectiveFirst when the recorded start is provably known (from the full
-//     recorded schedule, an authoritative RecordedStartReader, or a 1-based
-//     first sequential test like "test-1"). When unknown or unreadable -> fail
-//     closed (WindowBgNone)
+//     recorded schedule or an authoritative RecordedStartReader). When unknown
+//     or unreadable -> fail closed (WindowBgNone)
 //   - gap between two held windows: promoted to WindowBgOutsideWindow ONLY when
-//     the bounding windows are provably adjacent in the recording (both held
-//     and adjacent in the full recorded schedule, or consecutive sequential IDs
-//     such as test-1 -> test-2). Any missing middle test or unprovable gap ->
-//     fail closed (WindowBgNone)
+//     the bounding windows are provably adjacent in the full recorded schedule
+//     (both held and adjacent in RecordedWindows; name order never proves
+//     adjacency). Any missing middle test or unprovable gap -> fail closed
+//     (WindowBgNone)
 //   - tail (>= heldLastEnd): always WindowBgNone
 //   - parser-declared idle answers (IsIdleAnswer) inside a window, removed-test
 //     gap, or tail -> WindowBgIdleInWindow (never falsely labeled "outside
@@ -563,29 +542,19 @@ func (c *WindowClassifier) ClassifyForBackground(m *Mock, recordedFirstStart tim
 		prefixSafe = c.prefixSafe
 		earlierMissing = c.earlierMissing
 		effectiveFirst = c.effectiveFirst
-	} else {
-		if !recordedFirstStart.IsZero() {
-			earlierMissing = recordedFirstStart.Before(heldFirst)
-			effectiveFirst = heldFirst
-			if earlierMissing {
-				effectiveFirst = recordedFirstStart
-			}
-			prefixSafe = true
-		} else if c.sequentialPrefixSafe {
-			effectiveFirst = heldFirst
-			prefixSafe = true
+	} else if !recordedFirstStart.IsZero() {
+		earlierMissing = recordedFirstStart.Before(heldFirst)
+		effectiveFirst = heldFirst
+		if earlierMissing {
+			effectiveFirst = recordedFirstStart
 		}
+		prefixSafe = true
 	}
 
 	gapSafe := false
 	if !inWindow && !at.Before(heldFirst) && at.Before(heldLastEnd) {
 		if c.hasFullSchedule {
 			if allNext > 0 && allNext < len(allWS) && c.allHeld[allNext-1] && c.allHeld[allNext] {
-				gapSafe = true
-			}
-		} else {
-			heldNext := sort.Search(len(c.ws), func(i int) bool { return c.ws[i].Start.After(at) })
-			if heldNext > 0 && heldNext < len(c.ws) && c.sequentialGapSafe[heldNext] {
 				gapSafe = true
 			}
 		}

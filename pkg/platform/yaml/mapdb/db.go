@@ -1224,7 +1224,25 @@ func sourceNodeHasLineComment(root *yamlLib.Node) bool {
 	}
 	for i := 0; i+1 < len(root.Content); i += 2 {
 		if root.Content[i].Value == "source" {
-			return root.Content[i].LineComment != "" || root.Content[i+1].LineComment != ""
+			return root.Content[i].HeadComment != "" ||
+				root.Content[i].LineComment != "" ||
+				root.Content[i+1].HeadComment != "" ||
+				root.Content[i+1].LineComment != ""
+		}
+	}
+	return false
+}
+
+func nodeHasComment(n *yamlLib.Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.HeadComment != "" || n.LineComment != "" || n.FootComment != "" {
+		return true
+	}
+	for _, ch := range n.Content {
+		if nodeHasComment(ch) {
+			return true
 		}
 	}
 	return false
@@ -1294,7 +1312,37 @@ func (db *MappingDb) HealWindowBackground(ctx context.Context, testSetID string,
 		if sourceNodeHasLineComment(root) {
 			return false, nil
 		}
-		appendNodeField := func(key string, val any) error {
+		// If the user explicitly left a commented worker: or startup: block
+		// (e.g. commented-out entries), refuse to heal rather than clobbering
+		// their comments or writing duplicate YAML keys. Note: in yaml.v3, a
+		// comment line under an empty key (`worker:\n  # - name: ...`) lands on
+		// the following key's HeadComment (or root.FootComment if last).
+		keyBlockCommented := func(idx int) bool {
+			kNode, vNode := root.Content[idx], root.Content[idx+1]
+			if nodeHasComment(kNode) || nodeHasComment(vNode) {
+				return true
+			}
+			if vNode.Kind == yamlLib.ScalarNode && (vNode.Tag == "!!null" || vNode.Value == "") {
+				if idx+2 < len(root.Content) {
+					if root.Content[idx+2].HeadComment != "" {
+						return true
+					}
+				} else if root.FootComment != "" {
+					return true
+				}
+			}
+			return false
+		}
+		for i := 0; i+1 < len(root.Content); i += 2 {
+			k := root.Content[i].Value
+			if k == "worker" && keyBlockCommented(i) {
+				return false, nil
+			}
+			if k == "startup" && len(existing.Startup) == 0 && len(startup) > 0 && keyBlockCommented(i) {
+				return false, nil
+			}
+		}
+		setOrAppendNodeField := func(key string, val any) error {
 			raw, err := yamlLib.Marshal(val)
 			if err != nil {
 				return err
@@ -1306,21 +1354,27 @@ func (db *MappingDb) HealWindowBackground(ctx context.Context, testSetID string,
 			if len(valDoc.Content) == 0 {
 				return nil
 			}
+			for i := 0; i+1 < len(root.Content); i += 2 {
+				if root.Content[i].Value == key {
+					root.Content[i+1] = valDoc.Content[0]
+					return nil
+				}
+			}
 			root.Content = append(root.Content,
 				&yamlLib.Node{Kind: yamlLib.ScalarNode, Tag: "!!str", Value: key},
 				valDoc.Content[0],
 			)
 			return nil
 		}
-		if err := appendNodeField("background_derived", true); err != nil {
+		if err := setOrAppendNodeField("background_derived", true); err != nil {
 			return false, err
 		}
 		if len(existing.Startup) == 0 && len(startup) > 0 {
-			if err := appendNodeField("startup", startup); err != nil {
+			if err := setOrAppendNodeField("startup", startup); err != nil {
 				return false, err
 			}
 		}
-		if err := appendNodeField("worker", worker); err != nil {
+		if err := setOrAppendNodeField("worker", worker); err != nil {
 			return false, err
 		}
 		var buf bytes.Buffer

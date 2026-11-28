@@ -21,6 +21,11 @@ type TestSet struct {
 	// call that needs one. Nil when the agent dropped none, or sent no
 	// summary (an agent older than it).
 	RecordMocksDropped *MockDropSummary `json:"record_mocks_dropped,omitempty" bson:"record_mocks_dropped,omitempty" yaml:"recordMocksDropped,omitempty"`
+	// RecordedWindows is the immutable [request, response] schedule of every
+	// test case recorded for this test set, persisted at record time so tests
+	// deleted later (dedup, --must-pass, auto-replay) remain accounted for when
+	// deriving outside-window background mocks.
+	RecordedWindows []TestWindow `json:"recorded_windows,omitempty" bson:"recorded_windows,omitempty" yaml:"recorded_windows,omitempty"`
 }
 
 // Secret interface for types that support secret configuration.

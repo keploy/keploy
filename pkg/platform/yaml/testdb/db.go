@@ -70,7 +70,12 @@ type TestYaml struct {
 	// Keyed by tcsPath+"\x00"+slug; values are *atomic.Int64 holding the
 	// last index handed out.
 	slugIndex sync.Map
+	// recordedWindowsMu serializes append-only writes to each set's
+	// recorded_windows.jsonl schedule file.
+	recordedWindowsMu sync.Mutex
 }
+
+const recordedWindowsFileName = "recorded_windows.jsonl"
 
 func New(logger *zap.Logger, tcsPath string) *TestYaml {
 	return NewWithFormatAndNaming(logger, tcsPath, yaml.FormatYAML, NamingDescriptive)
@@ -271,12 +276,149 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 	if err != nil {
 		return err
 	}
+	if err := ts.appendRecordedWindow(testSetID, tc); err != nil {
+		ts.logger.Warn("failed to append test window to recorded_windows schedule",
+			zap.String("testSetID", testSetID),
+			zap.String("testCase", tc.Name),
+			zap.Error(err))
+	}
 
 	if enableLog {
 		ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
 	}
 
 	return nil
+}
+
+// appendRecordedWindow appends tc's immutable [request, response] window to
+// <testSetID>/recorded_windows.jsonl strictly inside ts.TcsPath so tests
+// removed later (dedup, --must-pass, auto-replay) remain accounted for in the
+// test set's recorded schedule.
+func (ts *TestYaml) appendRecordedWindow(testSetID string, tc *models.TestCase) error {
+	if ts == nil || tc == nil || testSetID == "" {
+		return nil
+	}
+	w := models.RecordedWindow(tc)
+	if w.Start.IsZero() {
+		return nil
+	}
+	if filepath.Base(testSetID) != testSetID || strings.Contains(testSetID, "..") {
+		return fmt.Errorf("invalid test set ID %q", testSetID)
+	}
+	line, err := json.Marshal(w)
+	if err != nil {
+		return err
+	}
+	line = append(line, '\n')
+
+	ts.recordedWindowsMu.Lock()
+	defer ts.recordedWindowsMu.Unlock()
+
+	root, err := utils.OpenRecordingDir(ts.TcsPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	rel := filepath.Join(testSetID, recordedWindowsFileName)
+	f, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(line)
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
+}
+
+// RecordedTestWindows implements replay.RecordedWindowsReader: it returns the
+// immutable recorded test window schedule persisted at record time for
+// testSetID (from recorded_windows.jsonl and/or config.yaml's recorded_windows).
+// Returns (nil, nil) when no recorded schedule exists (pre-existing sets), and
+// returns a non-nil error if a schedule file exists but cannot be read or
+// parsed so callers fail closed.
+func (ts *TestYaml) RecordedTestWindows(ctx context.Context, testSetID string) ([]models.TestWindow, error) {
+	if ts == nil || testSetID == "" {
+		return nil, nil
+	}
+	if filepath.Base(testSetID) != testSetID || strings.Contains(testSetID, "..") {
+		return nil, fmt.Errorf("invalid test set ID %q: must not contain path separators or '..'", testSetID)
+	}
+	root, err := utils.OpenRecordingDir(ts.TcsPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	type winKey struct {
+		name       string
+		start, end int64
+	}
+	seen := make(map[winKey]bool)
+	var out []models.TestWindow
+	addWindow := func(w models.TestWindow) {
+		if w.Start.IsZero() {
+			return
+		}
+		end := w.End
+		if end.IsZero() || end.Before(w.Start) {
+			end = w.Start
+		}
+		k := winKey{name: w.TestCase, start: w.Start.UnixNano(), end: end.UnixNano()}
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, w)
+		}
+	}
+
+	// 1. Append-only schedule written during InsertTestCase.
+	rel := filepath.Join(testSetID, recordedWindowsFileName)
+	if data, err := root.ReadFile(rel); err == nil {
+		scanner := bufio.NewScanner(bytes.NewReader(data))
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		lineNo := 0
+		for scanner.Scan() {
+			lineNo++
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var w models.TestWindow
+			if uerr := json.Unmarshal([]byte(line), &w); uerr != nil {
+				return nil, fmt.Errorf("malformed recorded_windows.jsonl line %d for %s: %w", lineNo, testSetID, uerr)
+			}
+			addWindow(w)
+		}
+		if serr := scanner.Err(); serr != nil {
+			return nil, fmt.Errorf("read recorded_windows.jsonl for %s: %w", testSetID, serr)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("read recorded_windows.jsonl for %s: %w", testSetID, err)
+	}
+
+	// 2. Also honour recorded_windows persisted in config.yaml / config.json.
+	setDir := filepath.Join(ts.TcsPath, testSetID)
+	if data, detected, err := yaml.ReadRecordingFileAny(ctx, ts.logger, ts.TcsPath, setDir, "config", ts.Format); err == nil {
+		var cfg models.TestSet
+		if uerr := yaml.UnmarshalGeneric(detected, data, &cfg); uerr != nil {
+			return nil, fmt.Errorf("parse config for recorded_windows (%s): %w", testSetID, uerr)
+		}
+		for _, w := range cfg.RecordedWindows {
+			addWindow(w)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("read config for recorded_windows (%s): %w", testSetID, err)
+	}
+
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
