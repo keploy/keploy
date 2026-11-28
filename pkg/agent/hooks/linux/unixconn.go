@@ -121,11 +121,9 @@ type unixConn struct {
 	lost   *ebpf.Map
 	losses captureloss.Counter
 	// fallback: the syscall tracepoints report, not fexit (no trampoline);
-	// inProcessHold: fexit ran with in-process prog-FD hold because host bpffs was unavailable;
 	// why is the attach or preflight detail.
-	fallback      bool
-	inProcessHold bool
-	why           string
+	fallback bool
+	why      string
 	// self is keploy's agent's TGID: a socket it holds is keploy's own.
 	self uint32
 
@@ -248,47 +246,32 @@ func loadUnixConnWith(logger *zap.Logger, objs *bpfObjects, fallback bool) (*uni
 		// Arm host-bpffs trampoline grace pinning BEFORE attaching any fexit
 		// program (CVE-2026-98800 defense on Linux 5.10..7.2.9).
 		//
-		// Where host bpffs is unavailable (e.g. DinD / plain classic containers
-		// without /run/keploy/host-bpffs), keep fexit with its exact in-kernel
-		// peer filter via bpfsafety.AttachTracingWithInProcessHold rather than
-		// degrading to the syscall-tracepoint path (which lacks in-kernel peer
-		// resolution in container PID namespaces and causes false NOT JUDGED
-		// results under KEPLOY_PROVEN). Never fail closed for plain classic runs.
+		// Where host bpffs is unavailable, bpfsafety.Init degrades honestly to
+		// unprotected mode (logs one cause-specific WARN, sets
+		// UnprotectedTrampolinesActive) without failing startup: dynamic-
+		// trampoline kernels (5.10.28+, 5.11.11+, 5.12+) keep fexit's in-kernel
+		// peer filter, while static-trampoline kernels (5.10.0–5.10.27 and
+		// 5.11.0–5.11.10) fail closed with ErrAnchorUnpinned and fall back to
+		// the syscall tracepoints below unless
+		// KEPLOY_ALLOW_UNPROTECTED_TRAMPOLINES=1 is set (which keeps fexit).
 		mode := bpfsafety.DetectMode(false)
-		initErr := bpfsafety.Init(context.Background(), logger, mode)
-		useInProcessHold := false
-		if initErr != nil {
-			if errors.Is(initErr, utils.ErrEnvironmentUnsupported) {
-				useInProcessHold = true
-				u.inProcessHold = true
-				u.why = stripUnprotectedOverrideHint(initErr.Error())
-			} else {
-				u.close()
-				return nil, fmt.Errorf("arm trampoline grace pinning for unixconn fexit: %w", initErr)
-			}
+		if initErr := bpfsafety.Init(context.Background(), logger, mode); initErr != nil {
+			u.close()
+			return nil, fmt.Errorf("arm trampoline grace pinning for unixconn fexit: %w", initErr)
 		}
 		for _, name := range unixFexitPrograms {
+			targetFunc := unixFexitAttachTarget(spec, name)
 			var l link.Link
 			err := watchedCall(logger, "attach of fexit program "+name+" via bpfsafety", func() error {
 				var aerr error
-				if useInProcessHold {
-					l, aerr = bpfsafety.AttachTracingWithInProcessHold(coll.Programs[name])
-					return aerr
-				}
-				l, aerr = bpfsafety.AttachTracing(coll.Programs[name], "unixconn", name, "p")
-				if aerr != nil && (errors.Is(aerr, bpfsafety.ErrPinFailed) || errors.Is(aerr, bpfsafety.ErrGraceNotArmed)) {
-					// Host bpffs became unwritable / pin failed after Init
-					// succeeded (e.g. EACCES): keep fexit via in-process prog-FD
-					// hold rather than degrading to syscall tracepoints.
-					useInProcessHold = true
-					u.inProcessHold = true
-					u.why = stripUnprotectedOverrideHint(aerr.Error())
-					l, aerr = bpfsafety.AttachTracingWithInProcessHold(coll.Programs[name])
-				}
+				l, aerr = bpfsafety.AttachTracing(coll.Programs[name], "unixconn", targetFunc, "p")
 				return aerr
 			})
 			if err != nil {
 				u.close()
+				if errors.Is(err, bpfsafety.ErrAnchorUnpinned) {
+					return nil, fmt.Errorf("attach %s: %w", name, err)
+				}
 				return nil, fmt.Errorf("attach %s (a kernel without BPF trampolines?): %w", name, err)
 			}
 			u.links = append(u.links, l)
@@ -536,10 +519,6 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 		h.logger.Warn("keploy sees the application's calls over Unix sockets at the syscall tracepoints",
 			zap.String("reason", unixFallbackReason(u.why)),
 			zap.String("kernel", kernelName()), zap.String("fexit", u.why))
-	} else if u.inProcessHold {
-		h.logger.Warn("keploy unixconn fexit is using detached-holder BPF program FD retention because host bpffs grace pinning was unavailable; graceful stops hand program FDs to a detached >=60s holder process (best-effort if container PID 1), while SIGKILL/OOM crash-surviving pins are inactive (CVE-2026-98800)",
-			zap.String("kernel", kernelName()),
-			zap.String("detail", u.why))
 	}
 	h.unixMu.Lock()
 	h.unix = u
@@ -551,14 +530,30 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 	// Its programs' skipped runs are read with the hooks' (skipwatch.go):
 	// the counts as it closes stay counted.
 	h.skipsWatch(u.coll.Programs)
+	disarm := func() {
+		h.objectsMutex.RLock()
+		mapsToClear := []*ebpf.Map{
+			h.objects.TargetNamespacePids,
+			h.objects.KeployClientKernelPidMap,
+			h.objects.KeployAgentKernelPidMap,
+			h.objects.KeployClientRegistrationMap,
+			h.objects.KeployAgentRegistrationMap,
+		}
+		h.objectsMutex.RUnlock()
+		for _, m := range mapsToClear {
+			clearBPFMapAllKeys(m)
+		}
+	}
 	var closeOnce sync.Once
 	detach := func() {
 		closeOnce.Do(func() {
+			disarm()
 			h.skipsForget(u.coll.Programs)
 			u.close()
 		})
 	}
 	if !u.fallback {
+		bpfsafety.RegisterDisarmHook(disarm)
 		bpfsafety.RegisterDetachHook(detach)
 	}
 	go func() {
@@ -567,15 +562,41 @@ func (h *Hooks) startUnixConn(ctx context.Context) {
 	}()
 }
 
-func stripUnprotectedOverrideHint(s string) string {
-	const marker = " (for an emergency break-glass override only,"
-	if idx := strings.Index(s, marker); idx >= 0 {
-		return strings.TrimSpace(s[:idx])
+func unixFexitAttachTarget(spec *ebpf.CollectionSpec, name string) string {
+	if spec != nil {
+		if ps := spec.Programs[name]; ps != nil && ps.AttachTo != "" {
+			return ps.AttachTo
+		}
 	}
-	return s
+	return name
+}
+
+func clearBPFMapAllKeys(m *ebpf.Map) {
+	if m == nil {
+		return
+	}
+	info, err := m.Info()
+	if err != nil || info.KeySize == 0 || info.ValueSize == 0 {
+		return
+	}
+	keyBuf := make([]byte, info.KeySize)
+	valBuf := make([]byte, info.ValueSize)
+	var keys [][]byte
+	iter := m.Iterate()
+	for iter.Next(&keyBuf, &valBuf) {
+		kcopy := make([]byte, len(keyBuf))
+		copy(kcopy, keyBuf)
+		keys = append(keys, kcopy)
+	}
+	for _, k := range keys {
+		_ = m.Delete(k)
+	}
 }
 
 func unixFallbackReason(why string) string {
+	if why != "" && strings.Contains(why, bpfsafety.ErrAnchorUnpinned.Error()) {
+		return "the syscall tracepoints: trampoline anchor not pinned on host bpffs (static-trampoline kernel); fexit withheld for this run"
+	}
 	if why != "" && (strings.Contains(why, "shutting down") || strings.Contains(why, "safety gate") || strings.Contains(why, "trampoline grace")) {
 		return "the syscall tracepoints: " + why
 	}

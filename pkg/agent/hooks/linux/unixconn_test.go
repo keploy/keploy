@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/internal/testnet"
+	"go.keploy.io/server/v3/pkg/agent/bpfsafety"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -214,5 +215,35 @@ func TestUnixReportsWithNoPeerAreJudgedByWhoIsBoundToThePath(t *testing.T) {
 	}
 	if got := u.snapshot(); len(got) != 1 || got[0].What != "an address keploy could not read" {
 		t.Fatalf("snapshot %+v, want the unread address named", got)
+	}
+}
+
+func TestUnixFexitAttachTargetUsesKernelAttachTo(t *testing.T) {
+	spec, err := loadUnixconn()
+	if err != nil {
+		t.Fatalf("loadUnixconn: %v", err)
+	}
+	want := map[string]string{
+		"k_unix_stream_connect": "unix_stream_connect",
+		"k_unix_dgram_connect":  "unix_dgram_connect",
+		"k_unix_dgram_sendmsg":  "unix_dgram_sendmsg",
+	}
+	for _, progName := range unixFexitPrograms {
+		got := unixFexitAttachTarget(spec, progName)
+		if got != want[progName] {
+			t.Fatalf("unixFexitAttachTarget(spec, %q) = %q, want %q (must pass real kernel AttachTo symbol, not prog name)", progName, got, want[progName])
+		}
+	}
+	clearBPFMapAllKeys(nil) // nil-safe
+}
+
+func TestUnixFallbackReasonForAnchorUnpinned(t *testing.T) {
+	why := "attach k_unix_stream_connect: " + bpfsafety.ErrAnchorUnpinned.Error() + ": refusing to attach tracing program"
+	got := unixFallbackReason(why)
+	if strings.Contains(got, "has no BPF trampoline") {
+		t.Fatalf("unixFallbackReason(%q) = %q, must not claim kernel lacks BPF trampolines", why, got)
+	}
+	if !strings.Contains(got, "trampoline anchor not pinned") || !strings.Contains(got, "withheld for this run") {
+		t.Fatalf("unixFallbackReason(%q) = %q, want clear anchor-unpinned fallback reason", why, got)
 	}
 }

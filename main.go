@@ -119,17 +119,15 @@ func start(ctx context.Context) {
 	}()
 
 	// Run bpfsafety.GracefulShutdown before utils.MarkDetachDone (and before the
-	// log file closes above) whenever this process armed host-bpffs grace pins,
-	// registered tracing detach hooks, or held BPF program FDs (OSS unixconn
-	// under KEPLOY_PROVEN without host bpffs). GracefulShutdown NEVER blocks
-	// exit: with host bpffs it leaves the grace dir for the >= 15m reaper;
-	// without host bpffs it hands prog FDs to a detached >= 60s holder process
-	// and returns immediately.
+	// log file closes above) whenever this process armed host-bpffs grace pins
+	// or registered tracing detach hooks. GracefulShutdown NEVER blocks exit:
+	// with host bpffs it leaves the grace dir for the >= 15m cross-process
+	// reaper and returns immediately.
 	defer func() {
 		if !bpfsafety.HasActiveWork() {
 			return
 		}
-		bpfsafety.GracefulShutdown(context.Background(), logger, bpfsafety.DefaultInProcessHoldWait)
+		bpfsafety.GracefulShutdown(context.Background(), logger)
 	}()
 
 	// If KEPLOY_DEBUG_FILE is set and this run asked for its debug log
@@ -316,6 +314,14 @@ func start(ctx context.Context) {
 	if cmd, err := rootCmd.ExecuteC(); err != nil {
 		err = cli.HintUnknownCommand(rootCmd, err)
 		utils.ErrCode = finalExitCode(err, utils.ErrCode, cmd.CommandPath(), os.Stderr)
+	}
+
+	// Disarm targeting maps and detach BPF tracing links FIRST and fast upon
+	// command completion (before chown/profile/temp-file teardown) so shutdown
+	// deadlines or SIGKILL never catch a tracing link mid-close. The safety
+	// defer registered above remains as a backstop for panic/early-return paths.
+	if bpfsafety.HasActiveWork() {
+		bpfsafety.GracefulShutdown(context.Background(), logger)
 	}
 
 	// Restore keploy folder ownership if running under sudo (for Docker mode)

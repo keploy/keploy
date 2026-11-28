@@ -8,15 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/cilium/ebpf"
-	"go.keploy.io/server/v3/pkg/agent/bpfsafety"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -392,59 +389,5 @@ func TestCleanOrphanedBPFPins_RespectsFlockWhenProcIsBlind(t *testing.T) {
 	cleanOrphanedBPFPins(zap.NewNop(), lockDir, "self", func(int) bool { return false })
 	if _, err := os.Stat(tmpPin); !os.IsNotExist(err) {
 		t.Fatalf("expected legacy pin to be removed after sibling released lock, stat err=%v", err)
-	}
-}
-
-func TestIsKeployProcessIgnoresDetachedBPFHolder(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
-	// Copy test binary to a path whose basename contains "keploy" so
-	// /proc/<pid>/exe matches keploy just like the real binary.
-	fakeKeploy := filepath.Join(t.TempDir(), "keploy-holder-identity-test")
-	src, err := os.Open(exe)
-	if err != nil {
-		t.Fatalf("open exe: %v", err)
-	}
-	dst, err := os.OpenFile(fakeKeploy, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		_ = src.Close()
-		t.Fatalf("create fake keploy: %v", err)
-	}
-	if _, err := io.Copy(dst, src); err != nil {
-		_ = src.Close()
-		_ = dst.Close()
-		t.Fatalf("copy exe: %v", err)
-	}
-	_ = src.Close()
-	_ = dst.Close()
-
-	cmd := exec.Command(fakeKeploy)
-	cmd.Args = []string{bpfsafety.DetachedHolderComm}
-	cmd.Env = []string{
-		"KEPLOY_INTERNAL_BPF_HOLD_MS=15000",
-		"KEPLOY_INTERNAL_BPF_HOLD_COUNT=0",
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start detached holder: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-
-	pidStr := strconv.Itoa(cmd.Process.Pid)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if b, rerr := os.ReadFile(filepath.Join("/proc", pidStr, "comm")); rerr == nil && strings.TrimSpace(string(b)) == bpfsafety.DetachedHolderComm {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if isKeployProcess(pidStr) {
-		t.Fatalf("isKeployProcess(%s) = true for detached holder (comm=%s); want false so orphan cleanup is not blocked", pidStr, bpfsafety.DetachedHolderComm)
 	}
 }
