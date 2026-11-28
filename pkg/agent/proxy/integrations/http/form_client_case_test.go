@@ -134,11 +134,12 @@ func TestLearnMatchAndRequestPlaceRoundTripFormURLEncodedClientRequest(t *testin
 				return url.Values{"client_id": {"demo-cli"}, "installation_id": {inst}, "note": {"x&y=z 50% off"}}.Encode()
 			}
 			recReq := &models.HTTPReq{
-				Method:    "POST",
-				URL:       "http://localhost:8083/oauth/par",
-				Timestamp: learnAt.Add(-time.Second),
-				Header:    map[string]string{"Content-Type": ct},
-				Body:      mkBody(recInst),
+				Method:      "POST",
+				URL:         "http://localhost:8083/oauth/par",
+				Timestamp:   learnAt.Add(-time.Second),
+				Header:      map[string]string{"Content-Type": ct},
+				Body:        mkBody(recInst),
+				RawFormBody: ct == "application/x-www-form-urlencoded",
 			}
 			tr.SetCases([]learn.ClientCase{{Name: "post-oauth-par-2", Req: recReq}})
 			liveReq := *recReq
@@ -333,11 +334,12 @@ func TestLearnPlanNamesUnbindableFormKeyReason(t *testing.T) {
 			tr.SetClientTests(true)
 			tr.Begin()
 			recReq := &models.HTTPReq{
-				Method:    "POST",
-				URL:       "http://localhost:8083/oauth/par",
-				Timestamp: learnAt.Add(-time.Second),
-				Header:    map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
-				Body:      tc.recBody,
+				Method:      "POST",
+				URL:         "http://localhost:8083/oauth/par",
+				Timestamp:   learnAt.Add(-time.Second),
+				Header:      map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+				Body:        tc.recBody,
+				RawFormBody: true,
 			}
 			tr.SetCases([]learn.ClientCase{{Name: "post-oauth-par-2", Req: recReq}})
 			liveReq := *recReq

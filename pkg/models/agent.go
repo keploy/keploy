@@ -1016,6 +1016,11 @@ type TestRequest struct {
 	// Zero where the recording holds none, or from a keploy older than its
 	// agent: the windows then start at each call's previous call alone.
 	RecordedAt time.Time `json:"recordedAt,omitzero"`
+	// RawFormBody carries HTTPReq.RawFormBody for the recorded request: true
+	// when an exact "application/x-www-form-urlencoded" recording was captured
+	// raw on the wire, false for legacy pre-decoded recordings and non-exact-CT
+	// requests.
+	RawFormBody bool `json:"rawFormBody,omitempty"`
 }
 
 // TestRequestPart is one part of a test case's request, as recorded and as

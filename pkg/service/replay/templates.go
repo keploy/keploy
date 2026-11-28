@@ -833,6 +833,7 @@ func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *
 		// As recorded: the text the recording held where each placeholder
 		// now is, not the placeholder (templates.Run.RecordedRequest).
 		rec, live := run.RecordedRequest(tc.HTTPReq), sent.HTTPReq
+		out.RawFormBody = rec.RawFormBody
 		add("url", rec.URL, live.URL)
 		headers("header.", rec.Header, live.Header)
 		recBody, liveBody := rec.Body, live.Body

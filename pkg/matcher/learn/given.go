@@ -218,7 +218,17 @@ func GivenRequest(req *models.TestRequest) Earlier {
 			}
 		case part.Name == "body":
 			if !variables.IsJSONDoc(part.Recorded) && variables.IsFormMediaType(recMedia) {
-				if leaves, rn, sn, ok := formSeen(part.Recorded, recMedia, part.Sent, sentMedia); ok {
+				// A recording of the exact form media type that carries no
+				// RawFormBody was decoded whole at capture by an older keploy
+				// (or lost its marker on the way): its keys still bind where
+				// they parse, as before the marker, since most such bodies
+				// held no escape the decode could change. Where the decode
+				// did change them, the re-record hint is named on the body
+				// whole instead of a conflict: where its keys are not those
+				// the request as sent holds (formSeen), or it no longer
+				// parses.
+				legacy := recMedia == "application/x-www-form-urlencoded" && !req.RawFormBody && part.Recorded != ""
+				if leaves, rn, sn, ok := formSeen(part.Recorded, recMedia, part.Sent, sentMedia, legacy); ok {
 					e.Seen = append(e.Seen, leaves...)
 					for _, n := range rn {
 						recNames[n] = true
@@ -226,6 +236,11 @@ func GivenRequest(req *models.TestRequest) Earlier {
 					for _, n := range sn {
 						sentNames[n] = true
 					}
+					if legacy {
+						bodyWhy = legacyFormHint
+					}
+				} else if legacy {
+					bodyWhy = legacyFormHint
 				} else {
 					bodyWhy = formParseWhy(part.Recorded, part.Sent)
 				}
@@ -350,8 +365,11 @@ func textMedia(ct string) bool {
 // recorded or non-empty sent body. A key that repeats on either side, is
 // empty, had no '=' in the recorded pair, holds '.', '[' or ']', or decodes to
 // invalid UTF-8 (in key or value) is marked Unnamed so it stays visible as an
-// earlier text while never naming a single-value variable place.
-func formSeen(recorded, recMedia, sent, sentMedia string) (leaves []Seen, recNames, sentNames []string, ok bool) {
+// earlier text while never naming a single-value variable place. ok is false
+// too for a legacy recording (one of the exact media type with no
+// RawFormBody) whose keys are not those of the non-empty form body as sent:
+// the decode at capture split or joined them.
+func formSeen(recorded, recMedia, sent, sentMedia string, legacy bool) (leaves []Seen, recNames, sentNames []string, ok bool) {
 	rf, rok := variables.ParseFormBody(recorded, recMedia)
 	if !rok {
 		return nil, nil, nil, false
@@ -363,6 +381,13 @@ func formSeen(recorded, recMedia, sent, sentMedia string) (leaves []Seen, recNam
 		if !lok && !variables.IsJSONDoc(sent) {
 			return nil, nil, nil, false
 		}
+	}
+	if legacy && lf != nil && !sameFormKeys(rf, lf) {
+		// A legacy recording (decoded whole at capture) whose keys are not
+		// the keys of the body as sent: the decode split or joined them,
+		// out of an escaped '&' or '=', so no key of it is a place to bind
+		// at. GivenRequest names the re-record hint on the body whole.
+		return nil, nil, nil, false
 	}
 	hasEq := map[string]bool{}
 	for _, pair := range strings.Split(recorded, "&") {
@@ -416,12 +441,27 @@ func formSeen(recorded, recMedia, sent, sentMedia string) (leaves []Seen, recNam
 	return leaves, recNames, sentNames, true
 }
 
+// sameFormKeys reports whether a and b hold the same set of keys.
+func sameFormKeys(a, b url.Values) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+const legacyFormHint = "recorded form body was likely decoded by an older keploy at capture; re-record to capture raw bytes"
+
 // formParseWhy explains why a non-empty, non-JSON application/x-www-form-urlencoded
 // body failed url.ParseQuery so callers can surface why individual form keys
-// could not be bound. When the recorded body fails to parse while the live sent
-// body parses cleanly, it notes that an older keploy likely decoded the body at
-// capture and suggests re-recording. When the recorded body parses cleanly but
-// the live sent body fails, it reports the live parse error.
+// could not be bound. Legacy exact-CT recordings (lacking RawFormBody) are
+// identified directly in GivenRequest via legacyFormHint without probing parse
+// failure. When the recorded body parses cleanly but the live sent body fails,
+// it reports the live parse error.
 func formParseWhy(recBody, sentBody string) string {
 	classify := func(err error) string {
 		msg := err.Error()
@@ -447,11 +487,6 @@ func formParseWhy(recBody, sentBody string) string {
 			}
 		}
 		return ""
-	}
-	if sentBody != "" {
-		if _, serr := url.ParseQuery(sentBody); serr == nil {
-			return "recorded form body could not be parsed (likely decoded by an older keploy at capture; re-record to capture raw bytes)"
-		}
 	}
 	return classify(err)
 }

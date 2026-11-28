@@ -82,14 +82,13 @@ func (pm *IngressProxyManager) takeRequest(req *http.Request, at time.Time) {
 		return
 	}
 	live := &models.HTTPReq{
-		Method:      models.Method(req.Method),
-		ProtoMajor:  req.ProtoMajor,
-		ProtoMinor:  req.ProtoMinor,
-		URL:         fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
-		Header:      pkg.ToYamlHTTPHeader(req.Header),
-		URLParams:   pkg.URLParams(req),
-		Timestamp:   at,
-		RawFormBody: req.Header.Get("Content-Type") == "application/x-www-form-urlencoded",
+		Method:     models.Method(req.Method),
+		ProtoMajor: req.ProtoMajor,
+		ProtoMinor: req.ProtoMinor,
+		URL:        fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
+		Header:     pkg.ToYamlHTTPHeader(req.Header),
+		URLParams:  pkg.URLParams(req),
+		Timestamp:  at,
 	}
 	switch {
 	case req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0:
